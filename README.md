@@ -35,7 +35,8 @@ sync.
 
 ## Views
 
-Tabs in the sidebar. Each is a different way into the same kernel.
+Two tabs in the sidebar. **structures** browses the kernel's data structures;
+**operations** traces the code paths that read and modify them.
 
 - **structures**: the subsystem tree. Open a struct, follow its fields.
   Curated links (`→`) add edges that are not fields, such as a task's threads,
