@@ -1,0 +1,90 @@
+#path {
+    background: $panel;
+    color: $text;
+    padding: 0 1;
+    height: 1;
+}
+
+Horizontal {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 40;
+    border-right: solid $panel;
+}
+
+#nav {
+    height: 1fr;
+}
+
+#views {
+    height: 3;
+}
+
+#detail {
+    width: 1fr;
+}
+
+#doc {
+    height: auto;
+    max-height: 2;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+/* Only visible while something is fetching, so it is deliberately loud. */
+#activity {
+    height: 1;
+    background: $warning-muted;
+    color: $text;
+    padding: 0 1;
+}
+
+#fields {
+    height: 1fr;
+}
+
+#hint {
+    height: auto;
+    max-height: 3;
+    background: $panel;
+    color: $text;
+    padding: 0 1;
+}
+
+#search {
+    dock: bottom;
+    height: 3;
+}
+
+/* ---------------------------------------------------------- focus mode */
+
+#graph-path {
+    background: $panel;
+    color: $text;
+    padding: 0 1;
+    height: 1;
+}
+
+/* The canvas is wider and taller than the terminal by design -- the graph is
+   panned, not shrunk to fit, because shrinking it would mean dropping the
+   traversal labels that are the point of the view. */
+#graph-scroll {
+    height: 1fr;
+    overflow: auto auto;
+}
+
+#graph-canvas {
+    width: auto;
+    height: auto;
+    padding: 1 2;
+}
+
+#graph-info {
+    height: auto;
+    max-height: 3;
+    background: $panel;
+    color: $text;
+    padding: 0 1;
+}

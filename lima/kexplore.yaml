@@ -1,0 +1,73 @@
+# lima VM for kexplore.
+#
+# Fedora is used because its debuginfod server publishes both DWARF and source
+# for the stock kernel, which is what makes struct documentation possible
+# without building a kernel.
+#
+#   limactl start --name=kernel-lab lima/kexplore.yaml
+
+minimumLimaVersion: 2.0.0
+
+images:
+- location: "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-44-1.7.aarch64.qcow2"
+  arch: aarch64
+  digest: "sha256:55c60a3b80d3616a08705afd0459e75fe9f03c54aba7a46e4002a41a72fa0d5b"
+- location: "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+  arch: "x86_64"
+  digest: "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+
+cpus: 4
+memory: 8GiB
+disk: 40GiB
+
+# The repo is read from the host at the same path, so there is nothing to sync.
+# Read-only is enough: the tool never writes here, which is also why run.sh sets
+# PYTHONDONTWRITEBYTECODE.
+mounts:
+- location: "~"
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+
+    dnf install -y \
+      drgn \
+      elfutils-debuginfod-client \
+      dwarves \
+      binutils \
+      python3-textual
+
+    # Optional: the "measure" groups need these. Remove if not wanted.
+    dnf install -y bpftrace bcc-tools perf || true
+
+    # Fedora publishes kernel DWARF and source through debuginfod rather than a
+    # kernel-debuginfo package, so this is required, not a convenience.
+    mkdir -p /etc/profile.d
+    cat > /etc/profile.d/debuginfod.sh <<'EOF'
+    export DEBUGINFOD_URLS="https://debuginfod.fedoraproject.org/"
+    EOF
+
+    # Per-task scheduler statistics (task->sched_info, task->stats). Off by
+    # default; harmless to enable and needed for several scheduler views.
+    echo 'kernel.sched_schedstats = 1' > /etc/sysctl.d/99-schedstats.conf
+    sysctl -w kernel.sched_schedstats=1
+
+probes:
+- description: "kexplore prerequisites"
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    for tool in drgn debuginfod-find pahole addr2line nm; do
+      if ! timeout 300s bash -c "until command -v $tool >/dev/null; do sleep 3; done"; then
+        echo "$tool not installed" >&2
+        exit 1
+      fi
+    done
+    if ! timeout 300s bash -c "until python3 -c 'import textual' >/dev/null 2>&1; do sleep 3; done"; then
+      echo "python3-textual not installed" >&2
+      exit 1
+    fi
+  hint: |
+    Provisioning did not finish. Check "limactl shell kernel-lab sudo journalctl -u cloud-final".
