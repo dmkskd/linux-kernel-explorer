@@ -1,7 +1,14 @@
 # How it works
 
-Five external tools do the work. Nothing here parses kernel memory or DWARF by
-hand.
+kexplore is a front end over five tools:
+
+| tool        | responsibility                                          |
+| ----------- | ------------------------------------------------------- |
+| drgn        | reads kernel memory and resolves DWARF types             |
+| debuginfod  | fetches the vmlinux debuginfo and the matching source    |
+| pahole      | the file and line where a struct is declared             |
+| addr2line   | the file and line a kernel address belongs to            |
+| bpftrace    | what happens over an interval, rather than at an instant |
 
 ## [drgn](https://drgn.readthedocs.io/)
 
@@ -88,16 +95,23 @@ kernel's own comments, for this build.
 
 ## [addr2line](https://sourceware.org/binutils/docs/binutils/addr2line.html)
 
-Walkthrough steps name functions, not structs, and pahole does not cover
-functions. `addr2line` against the same debuginfo does, with one correction:
+Maps an address to the source line that produced it, using the DWARF line
+table in the same debuginfo. Walkthrough steps name functions, and `s` opens
+the source of the one under the cursor:
+
+```
+$ addr2line -f -e vmlinux 0xffff8000817202f0
+schedule
+kernel/sched/core.c:7279
+```
+
+The debuginfo holds link-time addresses while the running kernel is relocated
+by KASLR, so a runtime address returns `??:0` until the offset is subtracted:
 
 ```
 KASLR offset = runtime _stext - link-time _stext      (link-time from nm)
-addr2line -e vmlinux $(( runtime_addr - offset ))     -> kernel/sched/core.c:4153
+addr2line -e vmlinux $(( runtime_addr - offset ))
 ```
-
-The debuginfo holds link-time addresses while the running kernel is relocated,
-so without subtracting the offset addr2line returns `??:0`.
 
 ## [bpftrace](https://bpftrace.org/)
 
