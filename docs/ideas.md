@@ -93,3 +93,64 @@ Why it matters here rather than being a micro-optimisation curiosity: it
 explains why touching a task's scheduling state costs one or two cache lines
 while touching its identity costs a different one, which is the concrete
 version of "false sharing" and "hot fields" that is otherwise abstract.
+
+
+## Three missing views
+
+Every view in the tool shows a structure the same way: its fields, and the
+curated links out of it. Three kinds of structure need something different.
+
+**hierarchy** would show several levels at once, each indented under the one
+above it.
+
+Following a pointer replaces the screen with the next struct, so only one level
+is ever visible. Resolving a virtual address walks five tables (`pgd`, `p4d`,
+`pud`, `pmd`, `pte`), but `follow_page()` does all five inside one call and
+returns only the page at the end, so `page > resident pages of pid 1` shows the
+destination and none of the route. A hierarchy view would give a row per table:
+the index taken there, the entry, and where the walk stopped, because a huge
+page ends it early at the pmd. The mount and cgroup trees are the same problem,
+where `vfs > mounts` is a flat list and the tree survives only inside the path
+strings.
+
+**state machine** would show the values a field can take, and what moves
+between them.
+
+The tool decodes `skc_state = 10` into `TCP_LISTEN`. That is where one socket
+is now, and says nothing about where it can go next or what would take it
+there. The view would draw the states and the transitions, label each
+transition with the event that causes it, and mark how many of this kernel's
+sockets are sitting in each state. The folio lifecycle and block request states
+work the same way.
+
+**invariant** would show a counter the kernel keeps beside the same number
+worked out by walking the structures and counting.
+
+The kernel keeps running totals, such as how many free pages a zone has. The
+same number can be worked out the slow way, by walking the structures and
+counting. Showing both is worth a view because the comparison tells you what
+the counter actually includes. Measured on an idle kernel here:
+
+```
+zone Normal
+  zone->vm_stat[NR_FREE_PAGES]      676864 pages   the counter
+  sum(free_area[order].nr_free)     676864 pages   counted from the free lists
+  per-cpu cached pages                6408 pages   in neither number
+```
+
+The first two agreeing exactly is the finding: `NR_FREE_PAGES` tracks the buddy
+free lists and nothing else. The 6408 pages parked in per-CPU caches appear in
+neither total, so a page can be available to the next allocation without being
+counted as free by the zone. Under load the first two drift apart by a handful
+of pages, because the kernel allocates between the two reads and they cannot be
+sampled together; a view would have to say that rather than report it as a
+fault. `mm->map_count` against a walk of the VMAs, and `sk_rmem_alloc` against
+the summed `truesize` of a socket's queued skbs, are the same exercise.
+
+
+## Subsystems with no entry point
+
+Types this kernel has that nothing in the catalog reaches yet: block (`bio`,
+`request`, `request_queue`), irq (`irq_desc`, measured but not browsable),
+timers, cgroup, page cache (`address_space`), reclaim (`lruvec`), the buddy
+allocator, rcu, workqueues.
