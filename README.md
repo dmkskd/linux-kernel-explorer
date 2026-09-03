@@ -3,9 +3,9 @@
 A terminal explorer for a live Linux kernel, built on
 [drgn](https://drgn.readthedocs.io/).
 
-It answers "what happens during a page fault, and which structures take part",
-rather than "what are the values in my process". It lists the tasks, sockets and
-pages live in this kernel, and follows the links between them.
+It explains how the kernel handles events such as page faults, showing the
+functions and structures involved at each step. The structure browser lets you
+inspect live tasks, sockets, and pages, and follow the links between them.
 
 ```
 process › 611 auditd › threads › 612 gmain › mm (address space) › VMAs

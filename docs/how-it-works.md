@@ -3,10 +3,11 @@
 Five external tools do the work. Nothing here parses kernel memory or DWARF by
 hand.
 
-## drgn
+## [drgn](https://drgn.readthedocs.io/)
 
-[drgn](https://drgn.readthedocs.io/) attaches to `/proc/kcore` and gives typed
-access to live kernel memory:
+`/proc/kcore` is a privileged, ELF-formatted view of the running kernel's
+virtual address space. drgn reads it to retrieve live kernel objects, then uses
+DWARF type information to give those bytes names, types, and fields:
 
 ```python
 prog = drgn.program_from_kernel()
@@ -23,9 +24,10 @@ drgn also ships Linux-specific helpers (`for_each_task`, `for_each_vma`,
 `SOCKET_I`, `rbtree_inorder_for_each_entry`), which the curated maps use instead
 of re-implementing list and tree walks.
 
-Requires root, because `/proc/kcore` does.
+Reading `/proc/kcore` requires root, which is why the explorer runs as root in
+the VM.
 
-## debuginfod
+## [debuginfod](https://sourceware.org/elfutils/Debuginfod.html)
 
 Fedora does not publish a `kernel-debuginfo` package for the stock kernel, so
 there is no local DWARF. `DEBUGINFOD_URLS` points drgn at Fedora's debuginfod
@@ -65,7 +67,7 @@ Two client behaviours:
   source-prefix probe tries up to three candidate source roots and only one can
   match; without it the misses go back to the server on every run.
 
-## pahole
+## [pahole](https://github.com/acmel/dwarves)
 
 drgn 0.2.0 does not expose `DW_AT_decl_file` / `DW_AT_decl_line` on a `Type`, so
 there is no way to ask it which file a struct came from. `pahole` reads the same
@@ -84,7 +86,7 @@ is discarded rather than shown wrongly.
 That is where the struct summaries and per-field documentation come from: the
 kernel's own comments, for this build.
 
-## addr2line
+## [addr2line](https://sourceware.org/binutils/docs/binutils/addr2line.html)
 
 Walkthrough steps name functions, not structs, and pahole does not cover
 functions. `addr2line` against the same debuginfo does, with one correction:
@@ -97,7 +99,7 @@ addr2line -e vmlinux $(( runtime_addr - offset ))     -> kernel/sched/core.c:415
 The debuginfo holds link-time addresses while the running kernel is relocated,
 so without subtracting the offset addr2line returns `??:0`.
 
-## bpftrace
+## [bpftrace](https://bpftrace.org/)
 
 drgn reads state. It cannot answer "how long did tasks wait for a CPU in the
 last two seconds", because that is a property of events over time. The `measure`
