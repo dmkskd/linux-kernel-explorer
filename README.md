@@ -3,15 +3,15 @@
 A terminal explorer for a live Linux kernel, built on
 [drgn](https://drgn.readthedocs.io/).
 
-Explore a live kernel as a map of connected objects. Start from a subsystem or
-an object such as a task, then follow its fields and curated relationships to
-its threads, address space, VMAs, open files, sockets, and more. Operations use
-the same objects to walk through paths such as a page fault, linking each step
-to the functions and structures it uses.
+Explore a live kernel as a map of connected structures. Start from a subsystem
+or a single task, then follow its fields and curated relationships to its
+threads, address space, VMAs, open files, sockets, and more. Operations walk the
+same map along a path such as a page fault, naming the function behind each step
+and opening what it touches.
 
 ## See it in use
 
-| Browse the live kernel | Follow an object's relationships |
+| Browse the live kernel | Follow a structure's relationships |
 | --- | --- |
 | <a href="docs/images/structure-browser.png"><img src="docs/images/structure-browser.png" alt="Structure browser showing process and scheduler entry points" width="400"></a> | <a href="docs/images/task-graph.png"><img src="docs/images/task-graph.png" alt="Graph showing a task's threads, address space, files, and sockets" width="400"></a> |
 
