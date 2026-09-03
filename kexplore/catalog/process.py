@@ -24,6 +24,7 @@ from drgn.helpers.linux.kthread import task_is_kthread
 from drgn.helpers.linux.pid import find_task, for_each_task
 from drgn.helpers.linux.sched import task_state_to_char
 
+from ..core import ctypes as ct
 from .registry import Entry, Subsystem, register
 from .format import task_comm
 
@@ -35,25 +36,56 @@ def _is_leader(task) -> bool:
     return task.pid == task.tgid
 
 
+# Every list here is a list of tasks, so they answer with the same columns and
+# insert one more only where that entry has something of its own to report.
+TASK_COLUMNS = ("pid", "state", "command")
+OBJECT_COLUMNS = ("type", "address")
+
+
+def task_columns(*extra: str) -> tuple[str, ...]:
+    return TASK_COLUMNS + extra + OBJECT_COLUMNS
+
+
+def _cells(task, *extra: str) -> tuple[str, ...]:
+    """One task as columns: what it is to userspace, then what it is here.
+
+    The type and address repeat on every row, which is the point: a table of
+    pid, state and command is ps output, and these two say that each row is a
+    kernel structure at an address you can read.
+    """
+    return (
+        # Right-aligned by padding: the table sizes a column to its widest cell
+        # and left-aligns everything in it, so a ragged pid column is the only
+        # other option.
+        f"{task.pid.value_():>7}",
+        task_state_to_char(task),
+        task_comm(task),
+        *extra,
+        ct.type_name(task.type_),
+        f"{task.value_():#x}",
+    )
+
+
 def processes(prog: Program):
     """Group leaders only -- one row per group, as ps would show."""
     for task in for_each_task(prog):
         if not _is_leader(task):
             continue
         threads = task.signal.nr_threads.value_()
-        state = task_state_to_char(task)
-        suffix = f"  ({threads} threads)" if threads > 1 else ""
-        yield f"{task.pid.value_():>7} {state}  {task_comm(task)}{suffix}", task
+        yield _cells(task, str(threads) if threads > 1 else ""), task
 
 
-def multithreaded(prog: Program):
-    """Group leaders whose group has more than one thread."""
+def init(prog: Program):
+    """Pid 1, as a one-row list so it carries the same columns as the rest."""
+    task = find_task(prog, 1)
+    if task:
+        yield _cells(task), task
+
+
+def all_tasks(prog: Program):
+    """Every task, threads included -- the same walk without the leader filter."""
     for task in for_each_task(prog):
-        if not _is_leader(task):
-            continue
-        threads = task.signal.nr_threads.value_()
-        if threads > 1:
-            yield f"{task.pid.value_():>7}  {task_comm(task)}  ({threads} threads)", task
+        yield _cells(task, "" if _is_leader(task) else f"of {task.tgid.value_()}"), task
 
 
 def kernel_threads(prog: Program):
@@ -65,26 +97,14 @@ def kernel_threads(prog: Program):
     """
     for task in for_each_task(prog):
         if task_is_kthread(task):
-            yield f"{task.pid.value_():>7} {task_state_to_char(task)}  {task_comm(task)}", task
-
-
-def no_mm(prog: Program):
-    """Tasks with no address space, kthread or not.
-
-    Differs from the PF_KTHREAD list by exiting userspace tasks, which is the
-    point of listing it separately.
-    """
-    for task in for_each_task(prog):
-        if not task.mm.value_():
-            kind = "kthread" if task_is_kthread(task) else "userspace, exiting"
-            yield f"{task.pid.value_():>7} {task_comm(task)}  [{kind}]", task
+            yield _cells(task), task
 
 
 def zombies(prog: Program):
     """Tasks in EXIT_ZOMBIE: exited, not yet reaped by their parent."""
     for task in for_each_task(prog):
         if task.exit_state.value_() & EXIT_ZOMBIE:
-            yield f"{task.pid.value_():>7} {task_comm(task)}", task
+            yield _cells(task), task
 
 
 register(
@@ -95,37 +115,40 @@ register(
             "Every row is one task_struct.",
         entries=[
             Entry(
-                "processes",
-                "processes",
-                "One task per group: the leader. Follow 'threads' for the rest.",
-                processes,
+                "init",
+                "init (pid 1)",
+                "The task that leads pid 1's group, as somewhere to start.",
+                init,
+                columns=task_columns(),
             ),
             Entry(
-                "multithreaded",
-                "multithreaded only",
-                "Leaders of groups with nr_threads > 1.",
-                multithreaded,
+                "processes",
+                "processes",
+                "Thread group leaders, one row each.",
+                processes,
+                columns=task_columns("threads"),
+            ),
+            Entry(
+                "tasks",
+                "all tasks",
+                "Every task, threads included.",
+                all_tasks,
+                columns=task_columns("thread of"),
             ),
             Entry(
                 "kthreads",
                 "kernel threads",
                 "Tasks with PF_KTHREAD set. Each leads a group of its own.",
                 kernel_threads,
-            ),
-            Entry(
-                "no_mm",
-                "tasks with no mm",
-                "mm == NULL: kthreads plus exiting userspace tasks.",
-                no_mm,
+                columns=task_columns(),
             ),
             Entry(
                 "zombies",
                 "zombies",
-                "exit_state & EXIT_ZOMBIE: exited, not yet reaped.",
+                "exit_state & EXIT_ZOMBIE: exited, not yet reaped by the parent.",
                 zombies,
+                columns=task_columns(),
             ),
-            Entry("init", "init (pid 1)", "The task that leads pid 1's group.",
-                  lambda prog: find_task(prog, 1)),
         ],
     )
 )

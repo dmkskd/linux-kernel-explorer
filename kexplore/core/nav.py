@@ -70,6 +70,9 @@ class Row:
     # Views that are a matrix rather than field/type/value supply their own
     # cells; when set these replace the three default columns.
     cells: tuple[str, ...] | None = None
+    # Whether those cells still stand for a kernel object, and so want the
+    # follow marker in front of them. A measurement's cells do not.
+    marked: bool = False
     # Columns the expanded view wants, when they differ from this frame's.
     expand_columns: tuple[str, ...] | None = None
     # The catalog item this row stands for, when the row is an index entry
@@ -82,6 +85,10 @@ class Row:
     # declaration order, so these show where a field physically sits.
     offset: int | None = None
     size: int | None = None
+    # In-place expansion: how far this row is nested under the one that opened
+    # it, and whether its own children are currently spliced in below it.
+    depth: int = 0
+    expanded: bool = False
 
     @property
     def placement(self) -> str:
@@ -101,9 +108,26 @@ class Row:
 
     @property
     def marker(self) -> str:
+        if self.expanded:
+            return "▾"
         if self.kind == "link":
             return "→"
         return "▸" if self.followable else " "
+
+    def children(self) -> list["Row"]:
+        """The rows one level down, for opening this row without leaving the frame.
+
+        A link brings its own expansion, because reaching the other end may
+        mean walking a list rather than dereferencing a pointer.
+        """
+        if self.expand is not None:
+            return list(self.expand())
+        if self.obj is None:
+            return []
+        target = follow(self.obj)
+        if target is None:
+            return []
+        return rows_for(target)
 
 
 @dataclass
@@ -168,6 +192,51 @@ def collect(label: str, produce: Produce, limit: int = MAX_ROWS) -> Collection:
     return Collection(label, items, truncated)
 
 
+def _address(obj: Object) -> str:
+    """``obj``'s value as hex, for a pointer. Empty for anything else."""
+    try:
+        return f"{obj.value_():#x}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _item_row(label: str | tuple[str, ...], obj: Object) -> Row:
+    """One item of a collection.
+
+    A provider that yields a tuple is describing columns of its own -- pid,
+    state, command -- rather than one label. Those become the row's cells, and
+    the frame supplies the header to match. A provider that yields a string
+    gets the field/type/value layout, which is what a list of structures with
+    nothing in particular to say about them wants.
+    """
+    if not isinstance(label, tuple):
+        return Row(
+            name=label,
+            obj=obj,
+            type_name=ct.type_name(obj.type_),
+            value=ct.render_value(obj),
+            followable=can_follow(obj),
+        )
+    cells = tuple(str(cell) for cell in label)
+    # The name is never displayed as a cell, but it is what the filter matches
+    # and what names the frame once the row is followed. The type and the
+    # address are dropped from it because the path line above the table already
+    # carries both, and a breadcrumb reading "1 S systemd struct task_struct *
+    # 0xffff0000c086ca00" is unreadable.
+    noise = {ct.type_name(obj.type_), _address(obj)}
+    return Row(
+        name=" ".join(
+            cell.strip() for cell in cells if cell.strip() and cell not in noise
+        ),
+        obj=obj,
+        type_name=ct.type_name(obj.type_),
+        value=ct.render_value(obj),
+        followable=can_follow(obj),
+        cells=cells,
+        marked=True,
+    )
+
+
 def collection_rows(collection: Collection) -> list[Row]:
     """A resolved collection as rows: its items, or why there are none.
 
@@ -178,16 +247,7 @@ def collection_rows(collection: Collection) -> list[Row]:
     if collection.error:
         return [Row(collection.error, None, "", "", False, kind="error")]
 
-    rows = [
-        Row(
-            name=label,
-            obj=obj,
-            type_name=ct.type_name(obj.type_),
-            value=ct.render_value(obj),
-            followable=can_follow(obj),
-        )
-        for label, obj in collection.items
-    ]
+    rows = [_item_row(label, obj) for label, obj in collection.items]
     if collection.truncated:
         rows.append(Row("… truncated", None, "", "", False, kind="truncated"))
     if not rows:

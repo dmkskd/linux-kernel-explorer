@@ -11,6 +11,7 @@ to build one, which one is on screen, and what the keys do to it.
 from __future__ import annotations
 
 import code
+from dataclasses import replace
 
 import drgn
 from drgn import Object, Program
@@ -93,21 +94,46 @@ def _type_of(row: Row) -> str:
     return row.original_type or row.type_name
 
 
+class FieldsTable(DataTable):
+    """The detail pane, with enter named.
+
+    DataTable and Tree both bind enter themselves, with show=False, and the
+    focused widget's binding is the one the footer prints. An App-level
+    "enter follow" is therefore invisible exactly when it applies. Declaring it
+    on the widget keeps it on the footer, and keeps it accurate: enter means
+    follow in the table and open in the sidebar.
+    """
+
+    BINDINGS = [Binding("enter", "select_cursor", "follow")]
+
+
+class NavTree(Tree):
+    BINDINGS = [Binding("enter", "select_cursor", "open")]
+
+
 class Explorer(App):
     CSS_PATH = "app.tcss"
     TITLE = "kexplore"
 
     BINDINGS = [
+        # enter belongs to whichever widget has focus, and each names it there.
+        # The footer prints the rest in this order, grouped by what they do to
+        # the screen: move within it, change it, leave it for another view.
+        Binding("space", "expand", "expand"),
         Binding("backspace", "back", "back"),
         Binding("slash", "search", "search"),
+        Binding("o", "sort", "sort"),
+        # Shift reverses whatever o settled on, which is worth having but not
+        # worth a second slot on the footer.
+        Binding("O", "sort_reverse", "reverse", show=False),
         Binding("r", "refresh", "refresh"),
-        Binding("s", "source", "source"),
         Binding("u", "userspace", "userspace"),
+        Binding("s", "source", "source"),
         Binding("g", "graph", "graph"),
+        Binding("colon", "repl", "drgn repl"),
         # Escape undoes whatever is most local: the filter box, then the same
         # step backspace takes. Hidden from the footer, which already shows one.
         Binding("escape", "escape", "back", show=False),
-        Binding("colon", "repl", "drgn repl"),
         Binding("q", "quit", "quit"),
     ]
 
@@ -208,11 +234,11 @@ class Explorer(App):
                     Tab("operations", id="view-operations"),
                     id="views",
                 )
-                yield Tree("subsystems", id="nav")
+                yield NavTree("subsystems", id="nav")
             with Vertical(id="detail"):
                 yield Static("", id="doc")
                 yield Static("", id="activity")
-                yield DataTable(id="fields", cursor_type="row", zebra_stripes=True)
+                yield FieldsTable(id="fields", cursor_type="row", zebra_stripes=True)
                 yield Static("", id="hint")
         yield Input(placeholder="filter fields…", id="search")
         yield Footer()
@@ -381,6 +407,31 @@ class Explorer(App):
         self.set_activity("")
         self.render_frame()
 
+    def _type_suffix(self, frame: Frame) -> str:
+        """The C type this screen is made of, for the path line.
+
+        A struct view takes it from the object it opened. A listing has no
+        object of its own, so it takes it from the rows, which is what stops a
+        table of pid/state/command reading as ps output: every row of it is a
+        task_struct. Reported only when the rows agree, since a list of mixed
+        types has no single answer.
+        """
+        if frame.obj is not None:
+            return f"   {frame.obj.type_.type_name()}"
+        types = {row.type_name for row in frame.rows if row.obj is not None}
+        return f"   {types.pop()}" if len(types) == 1 else ""
+
+    def _headers(self, columns: tuple[str, ...]) -> list[str]:
+        """The column names, with an arrow on the one the rows are ordered by."""
+        frame = self.stack[-1] if self.stack else None
+        if frame is None or frame.sort_column is None:
+            return list(columns)
+        arrow = " ▼" if frame.sort_reverse else " ▲"
+        return [
+            f"{name}{arrow}" if index == frame.sort_column else name
+            for index, name in enumerate(columns)
+        ]
+
     def render_frame(self) -> None:
         table: DataTable = self.query_one("#fields", DataTable)
         columns = self.stack[-1].columns if self.stack else FIELD_COLUMNS
@@ -388,7 +439,7 @@ class Explorer(App):
         # cached auto-width, so a wide value from the previous frame would still
         # be reserving space in this one.
         table.clear(columns=True)
-        table.add_columns(*columns)
+        table.add_columns(*self._headers(columns))
         source_view = columns == SOURCE_COLUMNS
         table.fixed_columns = SOURCE_FIXED_COLUMNS if source_view else 0
 
@@ -398,8 +449,7 @@ class Explorer(App):
 
         frame = self.stack[-1]
         breadcrumb = " › ".join(f.label for f in self.stack)
-        suffix = f"   {frame.obj.type_.type_name()}" if frame.obj is not None else ""
-        self.query_one("#path", Static).update(f"{breadcrumb}{suffix}")
+        self.query_one("#path", Static).update(f"{breadcrumb}{self._type_suffix(frame)}")
 
         self.update_doc()
 
@@ -412,9 +462,11 @@ class Explorer(App):
         for index, row in enumerate(self.visible_rows()):
             if row.cells is not None:
                 values = list(row.cells)[:width]
+                if row.marked and values:
+                    values[0] = f"{'  ' * row.depth}{row.marker} {values[0]}"
             else:
                 values = [
-                    f"{row.marker} {row.display_name}",
+                    f"{'  ' * row.depth}{row.marker} {row.display_name}",
                     row.type_name,
                     row.value,
                     row.placement,
@@ -586,6 +638,96 @@ class Explorer(App):
             self.notify("nothing to follow (NULL or unreadable)", severity="warning")
             return
         self.push(frames.object_frame(row.name, target, self.context))
+
+    def action_expand(self) -> None:
+        """Open the row under the cursor in place, keeping its neighbours visible.
+
+        ``enter`` replaces the screen with what it followed, which is right for
+        going somewhere and wrong for a one-field refcount. This splices the
+        children in below the row instead, indented, and takes them out again
+        on a second press. The expansion lives in the frame's row list, so a
+        refresh or a re-entry rebuilds the frame closed.
+        """
+        row = self.current_row()
+        if row is None or not self.stack:
+            self.bell()
+            return
+
+        rows = self.stack[-1].rows
+        index = next((i for i, candidate in enumerate(rows) if candidate is row), None)
+        if index is None:
+            self.bell()
+            return
+
+        table: DataTable = self.query_one("#fields", DataTable)
+        cursor = table.cursor_row
+
+        # A Row is frozen, so opening one means replacing it with a copy that
+        # says so, rather than flipping a flag on the row already in the list.
+        if row.expanded:
+            # Everything deeper than this row belongs to it, including whatever
+            # its children have opened themselves.
+            end = index + 1
+            while end < len(rows) and rows[end].depth > row.depth:
+                end += 1
+            del rows[index + 1 : end]
+            rows[index] = replace(row, expanded=False)
+        else:
+            children = row.children()
+            if not children:
+                self.notify(f"nothing to expand under {row.name}", severity="warning")
+                return
+            rows[index] = replace(row, expanded=True)
+            rows[index + 1 : index + 1] = [
+                replace(child, depth=row.depth + 1) for child in children
+            ]
+
+        self.render_frame()
+        table.move_cursor(row=cursor)
+
+    def action_sort(self) -> None:
+        """Order the rows by the next column, and eventually by none of them.
+
+        Cycling rather than pointing at a column, because the table's cursor
+        selects a row: there is nothing on screen that says which column the
+        user means. The header carries the arrow, so the state is visible even
+        though the key that set it is not.
+        """
+        frame = self.stack[-1] if self.stack else None
+        if frame is None or not any(
+            row.marked and row.cells is not None for row in frame.rows
+        ):
+            self.notify("nothing to sort in this view", severity="warning")
+            return
+
+        current = frame.sort_column
+        if current is None:
+            frame.sort_column = 0
+        elif current + 1 < len(frame.columns):
+            frame.sort_column = current + 1
+        else:
+            frame.sort_column = None
+        frame.sort_reverse = False
+        self._resort(frame)
+
+    def action_sort_reverse(self) -> None:
+        """Flip the direction of the column already sorted on."""
+        frame = self.stack[-1] if self.stack else None
+        if frame is None or frame.sort_column is None:
+            self.notify("press o to sort by a column first", severity="warning")
+            return
+        frame.sort_reverse = not frame.sort_reverse
+        self._resort(frame)
+
+    def _resort(self, frame: Frame) -> None:
+        frame.load()
+        self.filter = ""
+        self.render_frame()
+        if frame.sort_column is None:
+            self.notify("unsorted: back to the order the walk produced")
+        else:
+            direction = "descending" if frame.sort_reverse else "ascending"
+            self.notify(f"sorted by {frame.columns[frame.sort_column]}, {direction}")
 
     def action_back(self) -> None:
         if self._resume_graph():

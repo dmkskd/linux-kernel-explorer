@@ -14,16 +14,14 @@ from __future__ import annotations
 ENTRY_COMMANDS: dict[tuple[str, str], str] = {
     # process
     ("process", "processes"): "ps -e",
-    ("process", "multithreaded"): "ps -eo pid,nlwp,comm | awk '$2 > 1'",
+    ("process", "tasks"): "ps -eL",
     ("process", "kthreads"): "ps -eo pid,comm --ppid 2, or ps -e | grep '\\['",
-    ("process", "no_mm"): "ps -eo pid,comm --ppid 2 plus exiting tasks",
     ("process", "zombies"): "ps -eo pid,stat,comm | awk '$2 ~ /Z/'",
     ("process", "init"): "ps -p 1",
     # sched
     ("sched", "runqueues"): "cat /proc/schedstat",
     ("sched", "running"): "ps -eo pid,psr,comm --sort=psr",
     ("sched", "init_task"): "",
-    ("sched", "tasks"): "ps -eL",
     # mm
     ("mm", "init_mm"): "",
     ("mm", "pgdat"): "numactl -H, or ls /sys/devices/system/node",

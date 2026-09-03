@@ -48,6 +48,36 @@ GROUP_DOCS = {
 }
 
 
+def _sort_key(cell: str) -> tuple[int, float, str]:
+    """Order a cell as a number when it is one, and as text otherwise.
+
+    A pid column sorted as text puts 10 before 2, and an address column sorted
+    as text is ordered by its digits rather than by where it points. Numbers
+    sort before text, so a blank cell (no thread count, no group) collects at
+    one end rather than among the values.
+    """
+    text = cell.strip()
+    try:
+        return (0, float(int(text, 16) if text.startswith("0x") else float(text)), "")
+    except ValueError:
+        return (1, 0.0, text.lower())
+
+
+def sort_rows(rows: list[Row], column: int, reverse: bool) -> list[Row]:
+    """Order the rows that stand for objects, leaving the others where they are.
+
+    "… truncated" and "(empty)" say something about the list as a whole, so
+    they stay at the end instead of being sorted into it.
+    """
+    listed = [row for row in rows if row.marked and row.cells is not None]
+    rest = [row for row in rows if not (row.marked and row.cells is not None)]
+    listed.sort(
+        key=lambda row: _sort_key(row.cells[column] if column < len(row.cells) else ""),
+        reverse=reverse,
+    )
+    return listed + rest
+
+
 @dataclass
 class Frame:
     """One level of the navigation stack."""
@@ -58,9 +88,16 @@ class Frame:
     doc: str = ""
     rows: list[Row] = field(default_factory=list)
     columns: tuple[str, ...] = FIELD_COLUMNS
+    # Which column the rows are ordered by, None being the order the walk
+    # produced them in. Sorting rebuilds the frame, so any row opened in place
+    # closes: a child sorted away from its parent belongs to nothing.
+    sort_column: int | None = None
+    sort_reverse: bool = False
 
     def load(self) -> None:
         self.rows = self.make_rows()
+        if self.sort_column is not None:
+            self.rows = sort_rows(self.rows, self.sort_column, self.sort_reverse)
 
 
 @dataclass
@@ -219,7 +256,12 @@ def entry_frame(ctx: Context, entry: Entry, subsystem_key: str = "") -> Frame:
         if command:
             doc = f"from userspace:  {command}"
 
-    return Frame(entry.label, lambda: collection_rows(entry.resolve(ctx.prog)), doc=doc)
+    return Frame(
+        entry.label,
+        lambda: collection_rows(entry.resolve(ctx.prog)),
+        doc=doc,
+        columns=entry.columns or FIELD_COLUMNS,
+    )
 
 
 def fact_frame(ctx: Context, entry: FactEntry) -> Frame:

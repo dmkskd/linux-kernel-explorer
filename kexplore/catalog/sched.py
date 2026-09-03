@@ -5,8 +5,7 @@ from __future__ import annotations
 from drgn import Program
 from drgn.helpers.linux.cpumask import for_each_online_cpu
 from drgn.helpers.linux.percpu import per_cpu
-from drgn.helpers.linux.pid import for_each_task
-from drgn.helpers.linux.sched import cpu_curr, task_state_to_char
+from drgn.helpers.linux.sched import cpu_curr
 
 from .registry import Entry, Subsystem, register
 from .format import task_comm
@@ -21,12 +20,6 @@ def running(prog: Program):
     for cpu in for_each_online_cpu(prog):
         task = cpu_curr(prog, cpu)
         yield f"cpu{cpu}: {task_comm(task)} [{task.pid.value_()}]", task
-
-
-def tasks(prog: Program):
-    for task in for_each_task(prog):
-        state = task_state_to_char(task)
-        yield f"{task.pid.value_():>7} {state}  {task_comm(task)}", task
 
 
 register(
@@ -52,12 +45,6 @@ register(
                 "init_task",
                 "The root of the task list; every task links back here.",
                 lambda prog: prog["init_task"],
-            ),
-            Entry(
-                "tasks",
-                "all tasks",
-                "Every task_struct, walked via the pid hash.",
-                tasks,
             ),
         ],
     )

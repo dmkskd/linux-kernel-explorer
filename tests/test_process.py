@@ -44,14 +44,19 @@ async def main() -> int:
 
         check(app.source.available, f"kernel source available ({app.source.source_prefix})")
 
-        # Multithreaded processes -> pick one -> its task_struct.
-        open_entry(app, tree, "multithreaded")
+        # Every process -> pick a multithreaded one -> its task_struct. The
+        # thread count is a column now, so the list no longer needs an entry of
+        # its own to find one.
+        open_entry(app, tree, "processes")
         await pilot.pause()
         rows = app.stack[-1].rows
-        check(len(rows) > 0, f"found {len(rows)} multithreaded processes")
-        print(f"         e.g. {rows[0].name.strip()}")
+        check(len(rows) > 0, f"found {len(rows)} processes")
+        threaded = [i for i, r in enumerate(rows) if r.cells and r.cells[3]]
+        check(len(threaded) > 0, f"{len(threaded)} of them report a thread count")
+        print(f"         e.g. {rows[threaded[0]].name.strip()}")
 
         table.focus()
+        table.move_cursor(row=threaded[0])
         app.action_follow()
         # The struct's documentation is recovered in a worker (pahole over the
         # vmlinux, then the source through debuginfod), so the doc and hint
@@ -88,6 +93,52 @@ async def main() -> int:
         app.update_hint()
         comm_doc = str(hint.renderable)
         check("executable name" in comm_doc, f"field doc from source: {comm_doc[:60]}")
+
+        # o orders by a column, O flips it, and the header says which.
+        open_entry(app, tree, "processes")
+        await pilot.pause()
+        table.focus()
+        await pilot.press("o")
+        pids = [int(r.cells[0]) for r in app.stack[-1].rows if r.cells]
+        check(pids == sorted(pids), "sorted by pid ascending")
+        headers = [str(c.label) for c in table.columns.values()]
+        check(headers[0] == "pid ▲", f"the sorted column is marked: {headers[0]}")
+        await pilot.press("O")
+        pids = [int(r.cells[0]) for r in app.stack[-1].rows if r.cells]
+        check(pids == sorted(pids, reverse=True), "reversed to descending")
+        # Cycling past the last column returns to the order the walk produced.
+        for _ in range(len(app.stack[-1].columns)):
+            await pilot.press("o")
+        check(app.stack[-1].sort_column is None, "sorting cycles back to unsorted")
+
+        # space opens a row where it sits, so a one-field struct can be read
+        # without losing the fields around it.
+        open_entry(app, tree, "init")
+        await pilot.pause()
+        table.focus()
+        app.action_follow()
+        await pilot.pause()
+        names = [r.name for r in app.stack[-1].rows]
+        before = len(app.stack)
+        count = len(app.stack[-1].rows)
+        index = names.index("usage")
+        table.move_cursor(row=index)
+        await pilot.press("space")
+        rows = app.stack[-1].rows
+        check(len(app.stack) == before, "expanding in place pushes no frame")
+        check(len(rows) > count, f"{len(rows) - count} rows spliced in under usage")
+        check(rows[index].expanded and rows[index + 1].depth == 1,
+              "the opened row is marked, its children indented")
+        check(table.cursor_row == index, "the cursor stays on the row it opened")
+
+        # Nested, then collapsing the parent must take the grandchildren too.
+        table.move_cursor(row=index + 1)
+        await pilot.press("space")
+        check(app.stack[-1].rows[index + 2].depth == 2, "a child opens under a child")
+        table.move_cursor(row=index)
+        await pilot.press("space")
+        check(len(app.stack[-1].rows) == count, "collapsing removes every descendant")
+        check(not app.stack[-1].rows[index].expanded, "and unmarks the row")
 
         # mm link from a task with an address space.
         open_entry(app, tree, "init")

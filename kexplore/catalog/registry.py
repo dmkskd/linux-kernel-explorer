@@ -51,6 +51,10 @@ class Entry:
     provider: Provider
     # Optional submenu within the subsystem; entries without one sit at the top.
     group: str = ""
+    # Header for a provider that yields cells rather than one label. Left empty
+    # by an entry whose rows have nothing to say beyond their type and address,
+    # which then get the field/type/value columns.
+    columns: tuple[str, ...] = ()
 
     def resolve(self, prog: Program) -> Collection:
         return collect(self.label, lambda: self.provider(prog))
