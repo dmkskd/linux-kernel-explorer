@@ -195,18 +195,24 @@ def collection_rows(collection: Collection) -> list[Row]:
     return rows
 
 
-def _member_rows(obj: Object, type_: drgn.Type) -> Iterator[Row]:
+def _member_rows(obj: Object, type_: drgn.Type, base: int = 0) -> Iterator[Row]:
     """Rows for a struct/union, flattening anonymous members.
 
     drgn lets you reach members of an anonymous struct/union directly from the
     parent, so flattening avoids needing a synthetic object for the anonymous
     container.
+
+    ``base`` is the bit offset of ``type_`` within the struct the rows are
+    being shown for. drgn reports ``bit_offset`` relative to the immediately
+    enclosing type, so flattening an anonymous member has to carry its offset
+    down, or every field inside it reports a position relative to the union it
+    happens to sit in.
     """
     for member in type_.members or ():
         if member.name is None:
             inner = ct.strip(member.type)
             if inner.kind in ct.AGGREGATE_KINDS:
-                yield from _member_rows(obj, inner)
+                yield from _member_rows(obj, inner, base + member.bit_offset)
                 continue
 
         value = ct.safe(lambda m=member: obj.member_(m.name), None)
@@ -225,7 +231,7 @@ def _member_rows(obj: Object, type_: drgn.Type) -> Iterator[Row]:
             value=ct.render_value(value),
             followable=can_follow(value),
             note=note,
-            offset=ct.safe(lambda m=member: m.bit_offset // 8, None),
+            offset=ct.safe(lambda m=member: (base + m.bit_offset) // 8, None),
             size=ct.safe(lambda m=member: drgn.sizeof(m.type), None),
         )
 

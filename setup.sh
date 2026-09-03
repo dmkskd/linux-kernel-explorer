@@ -12,6 +12,29 @@ set -euo pipefail
 VM="${KEXPLORE_VM:-kernel-lab}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+usage() {
+  cat <<USAGE
+usage: ./setup.sh [-h|--help]
+
+Create the lima VM kexplore runs against, then verify the tools inside it.
+If the VM already exists it is started and re-verified rather than recreated,
+so this is safe to run again.
+
+Takes no options other than this one. The VM name comes from the environment:
+
+  KEXPLORE_VM    name of the lima VM (currently: $VM)
+
+run.sh reads the same variable, so set it for both or neither.
+USAGE
+}
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; echo >&2; echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+fi
+
 if ! command -v limactl >/dev/null; then
   echo "limactl not found. Install it with: brew install lima" >&2
   exit 1

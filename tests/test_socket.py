@@ -11,6 +11,7 @@ from textual.widgets import DataTable, Tree
 
 from kexplore.catalog.links import links_for
 from kexplore.catalog.registry import Entry
+from kexplore.core import nav
 from kexplore.tui.app import Explorer
 
 ok = True
@@ -118,6 +119,22 @@ async def main() -> int:
         )
         visible = [l.label for l in links_for(non_socket) if l.visible(non_socket)]
         check("socket" not in visible, f"non-socket file hides socket link: {visible}")
+
+        # Regression: sock_common is mostly anonymous unions, and flattening
+        # them used to report each field's offset within its union, so every
+        # one of these started again from 0.
+        common = prog.type("struct sock_common")
+        wrong = []
+        for row in nav.rows_for(prog["init_net"].genl_sock.__sk_common):
+            if row.offset is None or row.note:  # a bit field has no offsetof
+                continue
+            try:
+                expected = drgn.offsetof(common, row.name)
+            except Exception:  # noqa: BLE001
+                continue
+            if row.offset != expected:
+                wrong.append(f"{row.name} {row.offset} != {expected}")
+        check(not wrong, f"sock_common field offsets match offsetof: {wrong[:3]}")
 
     print("\nPASS" if ok else "\nFAIL")
     return 0 if ok else 1

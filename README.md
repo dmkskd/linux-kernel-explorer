@@ -24,14 +24,22 @@ process › 611 auditd › threads › 612 gmain › mm (address space) › VMAs
 ## Setup
 
 ```sh
-./setup.sh          # create and provision the lima VM (default name: kernel-lab)
+./setup.sh          # create and provision the lima VM
 ./run.sh            # start the explorer
 ./run.sh --check    # resolve every entry against this kernel, no UI
+./run.sh --help     # every option, and the environment it reads
 ```
 
 `run.sh` executes inside the VM as root, because reading `/proc/kcore` requires
 it. The repo is mounted from the host at the same path, so there is nothing to
 sync.
+
+The VM is called `kernel-lab`. `KEXPLORE_VM` overrides that, and both scripts
+read it, so export it rather than setting it per command:
+
+```sh
+export KEXPLORE_VM=my-vm
+```
 
 ## Views
 
