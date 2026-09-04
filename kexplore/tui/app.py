@@ -11,6 +11,7 @@ to build one, which one is on screen, and what the keys do to it.
 from __future__ import annotations
 
 import code
+import re
 from dataclasses import replace
 
 import drgn
@@ -80,6 +81,65 @@ def _highlight_source(rows: list[Row]) -> dict[str, Text]:
     code = "\n".join(row.value for row in rows)
     highlighted = Syntax(code, "c", theme="ansi_dark").highlight(code)
     return {row.name: line for row, line in zip(rows, highlighted.split("\n"))}
+
+
+# One colour per row kind, applied to the name cell. Links and derived rows are
+# things the explorer added; fields are what the struct actually declares, so
+# fields keep the default colour and the added rows are the ones that stand out.
+KIND_STYLES = {
+    "link": "bold blue",
+    "derived": "cyan",
+    "error": "bold red",
+    "truncated": "dim italic",
+}
+
+# A value cell is "lead  = annotation", where the annotation is a decoder's
+# reading of the number in front of it ("1  = S (sleeping)"). Split so the two
+# halves can be coloured apart.
+# The separating whitespace stays in the first group, so no styled span ever
+# starts or ends on a space.
+_ANNOTATED = re.compile(r"^(.*?\s\s+)(=\s.*)$", re.DOTALL)
+# A number followed by the same number in hex, or by a name: "0 (root)".
+_TRAILING_PAREN = re.compile(r"^([^(]*?\s*)(\(.*\))$", re.DOTALL)
+
+
+def _paint_value(cell: Text) -> None:
+    """Colour a value cell by the form its text takes.
+
+    The forms are the ones the catalog produces: an aggregate placeholder, a
+    null pointer, a hex address, a number, and any of those followed by a
+    decoder's annotation. Anything else keeps the default colour.
+    """
+    text = cell.plain
+    body = text
+    match = _ANNOTATED.match(text)
+    if match:
+        body = match.group(1)
+        cell.stylize("cyan", len(body), len(text))
+
+    # rstrip so the annotation's separator does not stop the paren matching;
+    # slicing still uses offsets from the start of the cell.
+    body = body.rstrip()
+    end = len(body)
+    inner = _TRAILING_PAREN.match(body)
+    if inner:
+        end = len(inner.group(1))
+        cell.stylize("dim", end, len(body))
+
+    lead = body[:end].rstrip()
+    if not lead.strip():
+        return
+    if lead.startswith("{"):
+        style = "dim"
+    elif lead == "NULL":
+        style = "dim red"
+    elif lead.startswith("0x"):
+        style = "yellow"
+    elif lead.lstrip("-").isdigit():
+        style = "green"
+    else:
+        return
+    cell.stylize(style, 0, len(lead))
 
 
 def _descendants(node):
@@ -477,6 +537,21 @@ class Explorer(App):
             cells = [Text(_clip(v, limit)) for v in values]
             if row.name in source:
                 cells[2] = source[row.name].copy()
+            elif row.cells is None:
+                # Only the field/type/value/placement layout is painted. A view
+                # that supplies its own cells is a matrix of unrelated columns,
+                # where colouring by position would mean nothing.
+                style = KIND_STYLES.get(row.kind)
+                if style:
+                    cells[0].stylize(style)
+                # The C type and the placement are reference detail. Dimming
+                # them lets the name and the value carry the line.
+                if row.kind == "field" and len(cells) > 1:
+                    cells[1].stylize("dim")
+                if len(cells) > 2:
+                    _paint_value(cells[2])
+                if len(cells) > 3:
+                    cells[3].stylize("dim")
             # Colour the userspace command so it is obviously not a kernel path.
             if self.userspace and len(cells) > 1 and row.kind in ("link", "field"):
                 # Only colour cells that actually became a command: an

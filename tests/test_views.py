@@ -10,6 +10,7 @@ import asyncio
 import sys
 
 import drgn
+from rich.text import Text
 from textual.widgets import DataTable, Input, Tabs, Tree
 
 from harness import settle
@@ -24,6 +25,7 @@ from kexplore.tui.app import (
     SOURCE_FIXED_COLUMNS,
     Explorer,
     _highlight_source,
+    _paint_value,
 )
 
 ok = True
@@ -312,6 +314,30 @@ async def main() -> int:
               "a declaration is coloured")
         check(highlighted["3"].plain == "struct task_struct *p;",
               "highlighting does not alter the text")
+
+        # Value cells, coloured by the form the value takes. A styled span must
+        # never start or end on a space: the value column is aligned by those
+        # spaces, and styling them is how they get lost.
+        def painted(value):
+            cell = Text(value)
+            _paint_value(cell)
+            return {value[s.start:s.end]: s.style for s in cell.spans}
+
+        cases = {
+            "NULL": "NULL",
+            "0xffff800080038000": "0xffff800080038000",
+            "{…} 5 fields": "{…} 5 fields",
+            "0 (root)": "0",
+            "1  = S (sleeping)": "= S (sleeping)",
+        }
+        for value, span in cases.items():
+            check(span in painted(value), f"{value!r} colours {span!r}")
+        spans = painted("4194560 (0x400100)  = PF_KTHREAD")
+        check(set(spans) == {"4194560", "(0x400100)", "= PF_KTHREAD"},
+              f"a number, its hex and its decoding are coloured apart: {sorted(spans)}")
+        check(all(part == part.strip() for part in spans),
+              "no coloured span starts or ends on a space")
+        check(not painted("init_user_ns"), "a bare symbol name keeps the default colour")
 
         # Switching back restores the structure view.
         tabs.active = "view-structures"
