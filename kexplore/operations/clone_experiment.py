@@ -267,7 +267,9 @@ CLONE_MATRIX = register_algorithm(
         rule=(
             "Runs a helper that clones once per flag combination and holds the "
             "children alive, then compares each child's structure pointers against "
-            "the parent's. Takes a few seconds; nothing is left running."
+            "the parent's. Each combination is also timed 200 times on a single "
+            "pinned CPU, and the last column reports the p10, median and p90 of "
+            "the clone() call. Takes a few seconds; nothing is left running."
         ),
         doc="Controlled experiment: one clone flag at a time, with its cost.",
         analyse=_clone_matrix,
@@ -280,7 +282,7 @@ CLONE_MATRIX = register_algorithm(
             "sighand",
             "signal",
             "nsproxy",
-            "clone() us  min/med/p90",
+            "clone() us  p10/med/p90",
         ),
             background=True,
         )

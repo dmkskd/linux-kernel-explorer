@@ -23,6 +23,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterator
@@ -55,6 +57,24 @@ def cache_path() -> Path:
     return (Path(base) if base else Path.home() / ".cache") / "debuginfod_client"
 
 
+def ima_cert_path() -> str:
+    """The IMA certificate path this machine configures, or "".
+
+    Fedora's DEBUGINFOD_URLS carries ``ima:enforcing``, which makes
+    libdebuginfod verify the signature on what it downloads, and the
+    certificates come from a separate variable. Both are set by
+    /etc/profile.d/debuginfod.sh and both are dropped by sudo, so forwarding
+    only the URL asks for enforcement with no keys: the transfer completes,
+    fails with ENOKEY, and nothing is cached. Read the same *.certpath files
+    that profile script reads.
+    """
+    try:
+        parts = [p.read_text().strip() for p in sorted(Path("/etc/debuginfod").glob("*.certpath"))]
+    except OSError:
+        return ""
+    return ":".join(part for part in parts if part)
+
+
 def offline() -> bool:
     """True if lookups are currently restricted to the cache."""
     return os.environ.get("DEBUGINFOD_URLS", "") == OFFLINE_URLS
@@ -70,6 +90,20 @@ def configure(offline_only: bool = False) -> None:
     if offline_only:
         os.environ["DEBUGINFOD_URLS"] = OFFLINE_URLS
 
+    # Signature enforcement without keys is worse than either alternative: it
+    # pays for the whole transfer and then throws it away, every run.
+    if "ima:" in os.environ.get("DEBUGINFOD_URLS", ""):
+        if not os.environ.get("DEBUGINFOD_IMA_CERT_PATH"):
+            certs = ima_cert_path()
+            if certs:
+                os.environ["DEBUGINFOD_IMA_CERT_PATH"] = certs
+            else:
+                # No keys anywhere: enforcing can only fail, so ask for the
+                # download the caller actually wants and say what was given up.
+                os.environ["DEBUGINFOD_URLS"] = servers()
+                print("kernel debug info: no IMA certificates on this machine, "
+                      "so the download is not signature-checked", file=sys.stderr)
+
     cache = cache_path()
     try:
         cache.mkdir(parents=True, exist_ok=True)
@@ -82,21 +116,60 @@ def configure(offline_only: bool = False) -> None:
     except OSError:
         pass  # A read-only or absent cache is the client's problem to report.
 
+    # Zero-length debuginfo/executable entries are poison from an interrupted
+    # transfer or a 404 negative-cache write; drop them before anything reads
+    # the cache.
+    clear_empty_entries()
+
 
 def _entry_dir(build_id: str) -> Path:
     return cache_path() / build_id
 
 
 def is_cached(build_id: str) -> bool:
-    """True if the completed vmlinux debuginfo is already on disk."""
-    return (_entry_dir(build_id) / "debuginfo").is_file()
+    """True if the completed vmlinux debuginfo is already on disk.
+
+    Zero-length files are never a hit: libdebuginfod writes one at the final
+    name for a server 404 (negative cache), and an interrupted transfer can
+    leave one behind too. Either way drgn would load an empty vmlinux.
+    """
+    try:
+        return (_entry_dir(build_id) / "debuginfo").stat().st_size > 0
+    except OSError:
+        return False
 
 
-def stale_partials(build_id: str | None = None) -> list[Path]:
-    """Abandoned partial downloads, which cost ~700MB each and never resume."""
+def clear_empty_entries() -> int:
+    """Delete zero-length debuginfo/executable cache entries; return count.
+
+    libdebuginfod answers a later query with the empty file itself (instant
+    ENOENT), so leaving them breaks every future fetch for that build-id.
+    Source misses are cached as empty files too, but those are legitimate
+    and cheap to keep; only debuginfo/executable entries are removed, and a
+    genuine 404 there costs one fast re-query.
+    """
+    removed = 0
+    for entry_dir in _directories(cache_path()):
+        for name in ("debuginfo", "executable"):
+            victim = entry_dir / name
+            try:
+                if victim.stat().st_size == 0:
+                    victim.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    return removed
+
+
+def stale_partials(build_id: str | None = None, max_age: float = _STALE_TEMP_SECONDS) -> list[Path]:
+    """Abandoned partial downloads, which cost ~700MB each and never resume.
+
+    ``max_age`` zero means every partial, fresh ones included; the default
+    keeps only those from runs that have already exited.
+    """
     cache = cache_path()
     roots = [_entry_dir(build_id)] if build_id else _directories(cache)
-    cutoff = time.time() - _STALE_TEMP_SECONDS
+    cutoff = time.time() - max_age
     found = []
     for root in roots:
         try:
@@ -143,6 +216,97 @@ def human(size: float) -> str:
     return f"{size:.1f} GiB"
 
 
+def servers(urls: str | None = None) -> str:
+    """The server URLs in DEBUGINFOD_URLS, without the ``ima:`` directives.
+
+    Fedora ships ``ima:enforcing <url> ima:ignore`` in /etc/debuginfod/*.urls.
+    Those tokens set signature checking for the URL between them, so the
+    variable is correct but printing it raw reads as a corrupted value.
+    """
+    if urls is None:
+        urls = os.environ.get("DEBUGINFOD_URLS", "")
+    found = [token for token in urls.split() if "://" in token]
+    return " ".join(found) if found else urls
+
+
+def expected_size(build_id: str) -> int:
+    """The transfer size the server announced, or 0 if it has not said yet.
+
+    libdebuginfod writes the response headers to ``hdr-debuginfo`` in the
+    cache entry, and Fedora's server sends ``x-debuginfod-size``. It appears
+    while the body is still transferring, so it can drive a percentage.
+    """
+    try:
+        text = (_entry_dir(build_id) / "hdr-debuginfo").read_text(errors="replace")
+    except OSError:
+        return 0
+    match = re.search(r"^x-debuginfod-size:\s*(\d+)", text, re.MULTILINE)
+    return int(match.group(1)) if match else 0
+
+
+def _partial_size(build_id: str) -> int:
+    """Bytes written so far to the in-flight temporary file."""
+    largest = 0
+    for item in stale_partials(build_id, max_age=0):
+        try:
+            largest = max(largest, item.stat().st_size)
+        except OSError:
+            continue
+    return largest
+
+
+class _Progress(threading.Thread):
+    """Report transfer progress by watching the partial file grow.
+
+    libdebuginfod's own DEBUGINFOD_PROGRESS output is one line per callback
+    with no rate and no total, so this watches the file instead: it is the
+    same number the transfer is producing, and the cache entry already says
+    how large the whole thing will be.
+    """
+
+    def __init__(self, build_id: str, stream) -> None:
+        super().__init__(daemon=True)
+        self.build_id = build_id
+        self.stream = stream
+        self.done = threading.Event()
+        self.live = hasattr(stream, "isatty") and stream.isatty()
+
+    def run(self) -> None:
+        started = time.monotonic()
+        last_line = ""
+        while not self.done.wait(0.5):
+            size = _partial_size(self.build_id)
+            if not size:
+                continue
+            elapsed = time.monotonic() - started
+            rate = size / elapsed if elapsed > 0 else 0
+            total = expected_size(self.build_id)
+            if total:
+                line = field("progress", f"{human(size)} of {human(total)} "
+                                         f"({100 * size / total:.0f}%) at {human(rate)}/s")
+            else:
+                line = field("progress", f"{human(size)} at {human(rate)}/s")
+            if self.live:
+                self.stream.write("\r\033[K" + line)
+                self.stream.flush()
+            elif line[:20] != last_line[:20]:  # only when the figure moves
+                self.stream.write(line + "\n")
+                self.stream.flush()
+            last_line = line
+        if self.live and last_line:
+            self.stream.write("\r\033[K")
+            self.stream.flush()
+
+    def stop(self) -> None:
+        self.done.set()
+        self.join(timeout=2)
+
+
+def field(label: str, value: str) -> str:
+    """One indented ``label value`` line, so the fetch reads as a block."""
+    return f"  {label:<9}{value}"
+
+
 def prefetch(build_id: str, log: Callable[[str], None] = print) -> bool:
     """Download the vmlinux debuginfo to completion, reporting progress.
 
@@ -151,47 +315,81 @@ def prefetch(build_id: str, log: Callable[[str], None] = print) -> bool:
     is served from disk. Interrupting the explorer's own fetch discards it, but
     interrupting this only costs the same download again.
     """
+    local = local_vmlinux()
+    if local:
+        log(field("local", str(local)))
+        return True
+
     if is_cached(build_id):
         size = (_entry_dir(build_id) / "debuginfo").stat().st_size
-        log(f"already cached: {human(size)} in {_entry_dir(build_id)}")
+        log(field("cached", f"{human(size)} in {_entry_dir(build_id)}"))
         return True
 
     freed = clear_partials(build_id)
     if freed:
-        log(f"discarded {human(freed)} of abandoned partial downloads")
+        log(field("cleaned", f"discarded {human(freed)} of abandoned partial downloads"))
 
     urls = os.environ.get("DEBUGINFOD_URLS", "")
     if not urls or urls == OFFLINE_URLS:
-        log("DEBUGINFOD_URLS is not set to a real server; nothing to fetch from")
+        log(field("server", "DEBUGINFOD_URLS names no real server; nothing to fetch"))
         return False
 
-    log(f"fetching kernel debuginfo for build-id {build_id}")
-    log(f"  from {urls}")
-    log("  this is a few hundred MB and does not resume -- let it finish")
+    log(field("build-id", build_id))
+    log(field("server", servers(urls)))
 
-    environment = dict(os.environ, DEBUGINFOD_PROGRESS="1")
+    started = time.monotonic()
+    progress = _Progress(build_id, sys.stderr)
+    progress.start()
     try:
         result = subprocess.run(
-            ["debuginfod-find", "debuginfo", build_id], env=environment
+            ["debuginfod-find", "debuginfo", build_id],
+            env=dict(os.environ, DEBUGINFOD_PROGRESS="0"),
+            stdout=subprocess.PIPE,  # the resulting path, which the caller knows
+            text=True,
         )
     except OSError as exc:
-        log(f"could not run debuginfod-find: {exc}")
+        progress.stop()
+        log(field("failed", f"could not run debuginfod-find: {exc}"))
         return False
     except KeyboardInterrupt:
-        log("\ninterrupted -- the partial download was discarded, nothing is cached")
+        progress.stop()
+        log(field("stopped", "the partial file is discarded, nothing is cached"))
         return False
+    finally:
+        progress.stop()
 
     if result.returncode != 0 or not is_cached(build_id):
-        log("fetch did not complete; nothing was cached")
+        log(field("failed", "the transfer did not complete; nothing was cached"))
         return False
 
     size = (_entry_dir(build_id) / "debuginfo").stat().st_size
-    log(f"cached {human(size)}; later runs can use --offline")
+    seconds = time.monotonic() - started
+    log(field("done", f"{human(size)} in {seconds:.0f}s; later runs read the cache"))
     return True
 
 
+def local_vmlinux() -> Path | None:
+    """A locally installed vmlinux with DWARF, if one exists.
+
+    Covers the distro debug packages (Ubuntu's dbgsym, Debian's -dbg), which
+    install outside the debuginfod cache. drgn searches these same paths.
+    """
+    release = os.uname().release
+    for candidate in (
+        Path(f"/usr/lib/debug/boot/vmlinux-{release}"),
+        Path(f"/usr/lib/debug/lib/modules/{release}/vmlinux"),
+        Path(f"/boot/vmlinux-{release}"),
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def status(build_id: str | None) -> str:
-    """One line describing what the cache can serve right now."""
+    """One line describing what the attach will find."""
+    local = local_vmlinux()
+    if local:
+        return f"installed locally: {local}"
     if not build_id:
         return "no kernel build-id; debuginfod cannot be used"
     if is_cached(build_id):
@@ -199,8 +397,8 @@ def status(build_id: str | None) -> str:
             size = (_entry_dir(build_id) / "debuginfo").stat().st_size
         except OSError:
             size = 0
-        where = "cache only" if offline() else os.environ.get("DEBUGINFOD_URLS", "")
-        return f"debuginfo cached ({human(size)}), {where}"
+        where = "cache only" if offline() else servers()
+        return f"cached, {human(size)}, from {where}"
     if offline():
-        return "debuginfo not cached and offline: run 'kexplore --prefetch' first"
-    return "debuginfo not cached; it will be downloaded now (a few hundred MB)"
+        return "not cached, and offline: run 'kexplore --prefetch' first"
+    return "not cached; fetched during the attach"

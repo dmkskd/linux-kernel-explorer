@@ -18,12 +18,12 @@ tui/        Textual: when to build a frame, which one is on screen, what the
 ## Tests
 
 ```sh
-./run.sh --test              # everything, inside the VM
+./run.sh --test              # everything, through the resolved backend
 python3 tests/run_all.py     # on the host: the tests that need no kernel
 ```
 
-Most tests attach to the live kernel, so they need the VM and root; `run_all.py`
-says which it skipped and why. `tests/helpers/` holds programs that *make
+Most tests attach to the live kernel, so they need root wherever the backend
+(see the README) runs; `run_all.py` says which it skipped and why. `tests/helpers/` holds programs that *make
 something happen* so a measurement has something to see; they are not tests and
 are not run.
 

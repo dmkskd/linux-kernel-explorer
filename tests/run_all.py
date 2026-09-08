@@ -5,8 +5,9 @@ Two kinds live here:
 * **host tests** need nothing but Python. They cover the parts deliberately
   written to be checkable without a kernel -- graph layout, bpftrace output
   parsing -- and run on a laptop or in CI.
-* **kernel tests** attach to the live kernel through drgn, so they need the VM
-  and root. Skipped, loudly, when drgn cannot attach.
+* **kernel tests** attach to the live kernel through drgn, so they need root
+  wherever the backend (lima VM, native host or container) runs. Skipped,
+  loudly, when drgn cannot attach.
 
     python3 tests/run_all.py            # everything this machine can do
     python3 tests/run_all.py --host     # only the ones needing no kernel
@@ -37,7 +38,7 @@ KERNEL = [
 
 
 def have_kernel() -> bool:
-    """Whether drgn can attach here. Requires the VM, root, and the DWARF."""
+    """Whether drgn can attach here. Requires root and the kernel DWARF."""
     try:
         import drgn
     except ImportError:
@@ -80,7 +81,7 @@ def main() -> int:
         if have_kernel():
             names += KERNEL
         else:
-            print("no live kernel here (needs the VM and root): "
+            print("no live kernel attachable here (needs root and the DWARF): "
                   "running host tests only", flush=True)
             print("  skipping  " + "  ".join(KERNEL), flush=True)
 

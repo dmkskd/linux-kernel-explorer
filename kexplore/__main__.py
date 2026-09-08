@@ -20,8 +20,15 @@ def main() -> int:
     parser.add_argument(
         "--prefetch",
         action="store_true",
-        help="download the kernel debuginfo to completion and exit, so later "
-             "runs need no network",
+        help="download the kernel debuginfo to completion and exit. A cold "
+             "first run does this download anyway; use this to prepare for "
+             "offline work",
+    )
+    parser.add_argument(
+        "--no-prefetch",
+        action="store_true",
+        help="attach without downloading debuginfo to completion first; the "
+             "first run then fetches lazily during attach",
     )
     parser.add_argument(
         "--offline",
@@ -33,6 +40,13 @@ def main() -> int:
 
     from .core import debuginfod
     from .core.source import kernel_build_id
+
+    def say(label: str, text: str) -> None:
+        """Every startup line: one label column, then the value."""
+        print(f"{label:<11}{text}", file=sys.stderr)
+
+    def indented(text: str) -> None:
+        print(text, file=sys.stderr)
 
     if args.prefetch and args.offline:
         print("--prefetch and --offline are contradictory", file=sys.stderr)
@@ -51,7 +65,8 @@ def main() -> int:
             print("could not read the kernel build-id from /sys/kernel/notes",
                   file=sys.stderr)
             return 1
-        return 0 if debuginfod.prefetch(build_id) else 1
+        say("debug info", "fetching to completion")
+        return 0 if debuginfod.prefetch(build_id, log=indented) else 1
 
     import drgn
 
@@ -61,34 +76,72 @@ def main() -> int:
         if os.geteuid() != 0:
             print("kexplore needs root to read /proc/kcore", file=sys.stderr)
             return 1
-        # Attaching loads the kernel's DWARF, which on a cold cache means a
-        # several-hundred-megabyte download with no output of its own. Say so
-        # before it starts rather than looking hung for minutes.
         build_id = kernel_build_id()
-        print(debuginfod.status(build_id), file=sys.stderr)
-        if offline and build_id and not debuginfod.is_cached(build_id):
+        # Local debug packages (Ubuntu dbgsym, Debian -dbg) satisfy the DWARF
+        # need without the debuginfod cache, so the gates below test both.
+        have_dwarf = bool(
+            debuginfod.local_vmlinux()
+            or (build_id and debuginfod.is_cached(build_id))
+        )
+        # One heading, then the fetch indents under it. Printing the cache
+        # status as well would say the same thing twice.
+        downloading = bool(build_id) and not have_dwarf and not offline \
+            and not args.no_prefetch
+        if downloading:
+            say("debug info", "not cached, downloading it now "
+                             "(--no-prefetch attaches without it)")
+        else:
+            say("debug info", debuginfod.status(build_id))
+
+        if offline and not have_dwarf:
             # Without the DWARF drgn attaches but cannot name a single type, so
             # fail here rather than at the first empty view.
             print("run 'kexplore --prefetch' once with a connection you are "
                   "happy to use, then --offline works with no network at all",
                   file=sys.stderr)
             return 1
-        if build_id and not offline and not debuginfod.is_cached(build_id):
-            # Let libdebuginfod narrate the transfer; without it the wait is
-            # silent. Harmless when the fetch is a cache hit.
-            os.environ.setdefault("DEBUGINFOD_PROGRESS", "1")
-        print("attaching to the live kernel…", file=sys.stderr, flush=True)
+        if not have_dwarf and not offline:
+            if downloading:
+                # Download here, to completion, with progress -- not silently
+                # inside the attach, where interrupting looks like a hang and
+                # throws the transfer away.
+                if not debuginfod.prefetch(build_id, log=indented):
+                    return 1
+            else:
+                # Let libdebuginfod narrate the transfer; without it the wait
+                # is silent. Harmless when the fetch is a cache hit.
+                os.environ.setdefault("DEBUGINFOD_PROGRESS", "1")
+        say("kernel", "attaching to the live kernel…")
+        sys.stderr.flush()
         prog = drgn.program_from_kernel()
 
     # drgn attaches happily without DWARF and only fails at the first type
     # lookup, which turns into "could not find 'cpu_online_mask'" in every view
-    # instead of one comprehensible error. Check once, here.
-    if not _has_debug_info(prog):
+    # instead of one comprehensible error. Check once, here. The first lookup
+    # also builds drgn's DWARF index, which on a multi-GB debug package takes
+    # a while, so time it: a slow one should be visible, not silent.
+    import time
+
+    start = time.monotonic()
+    has_debug = _has_debug_info(prog)
+    elapsed = time.monotonic() - start
+    if has_debug and elapsed > 5:
+        say("index", f"{elapsed:.0f}s to build drgn's DWARF index")
+    if not has_debug:
         print("\nattached, but this kernel's debug info is not loaded: every "
               "view would fail.", file=sys.stderr)
         if not args.core:
-            print("the download was interrupted, or the cache is cold. Run:\n"
-                  "  kexplore --prefetch      (one uninterrupted download)\n"
+            # Say what the cache actually holds, so the user can tell an
+            # interrupted download apart from a fetch that never happened.
+            partials = debuginfod.stale_partials(build_id, max_age=0)
+            if partials:
+                size = sum(p.stat().st_size for p in partials)
+                print(f"the last download was interrupted: {debuginfod.human(size)} "
+                      "of a partial file is in the cache. Run:", file=sys.stderr)
+            else:
+                print("nothing is cached: the fetch never completed. Run:",
+                      file=sys.stderr)
+            print("  kexplore --prefetch      (one uninterrupted download)\n"
                   "  kexplore --offline       (afterwards, no network at all)",
                   file=sys.stderr)
         return 1
@@ -102,10 +155,46 @@ def main() -> int:
     if args.check:
         return _check(prog)
 
+    source = None
+    if not args.core:
+        # Probe once here so startup says what is available instead of the UI
+        # discovering it later. Skipped for -c: the probe would describe the
+        # host kernel, not the core.
+        source = _probe_source()
+        if source is not None:
+            say("source", f"on demand via debuginfod, rooted at "
+                          f"{source.source_prefix}")
+        else:
+            say("source", "unavailable for this build; struct documentation "
+                          "and the 's' key are disabled")
+
     from .tui.app import Explorer
 
-    Explorer(prog).run()
+    Explorer(prog, source).run()
     return 0
+
+
+def _probe_source(timeout: float = 5.0) -> "KernelSource | None":
+    """The KernelSource if source is fetchable for this build, else None.
+
+    The probe shells out to debuginfod-find; a hung or slow server gets
+    ``timeout`` seconds, then the answer is "unavailable". An abandoned
+    probe thread is daemonized and dies with the process.
+    """
+    import threading
+
+    from .core.source import KernelSource
+
+    candidate = KernelSource()
+    result: list[bool] = []
+
+    def probe() -> None:
+        result.append(candidate.available)
+
+    thread = threading.Thread(target=probe, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    return candidate if result and result[0] else None
 
 
 def _has_debug_info(prog) -> bool:

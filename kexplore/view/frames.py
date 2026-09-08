@@ -493,7 +493,7 @@ def landing_frame(ctx: Context) -> Frame:
             Row(
                 "struct docs and source",
                 None, "",
-                "available" if docs_ok else "unavailable (needs pahole + debuginfod)",
+                "available" if docs_ok else "unavailable (no source for this build)",
                 False, kind="derived",
                 doc="Kernel source comments and the 's' key to open the source.",
             )

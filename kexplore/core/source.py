@@ -25,6 +25,7 @@ import os
 import re
 import struct
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -134,10 +135,15 @@ class KernelSource:
             f"/usr/src/debug/linux-{self.release}/",
             f"/usr/src/linux-{self.release}/",
         ]
+        # Older kernel builds record source paths with a literal "./"
+        # component and the server stores them that way; newer builds answer
+        # to both forms. Probe the "./" form too, or the prefix is wrongly
+        # reported missing.
         for prefix in candidates:
-            if self._find("source", prefix + "kernel/sched/sched.h"):
-                self._prefix = prefix
-                return prefix
+            for probe in ("./kernel/sched/sched.h", "kernel/sched/sched.h"):
+                if self._find("source", prefix + probe):
+                    self._prefix = prefix
+                    return prefix
         self._prefix = ""
         return None
 
@@ -179,7 +185,12 @@ class KernelSource:
         prefix = self.source_prefix
         if not prefix:
             return None
-        return self._find("source", prefix + relative_path)
+        found = self._find("source", prefix + relative_path)
+        if found is None and relative_path.startswith("./"):
+            # Some builds record "./"-prefixed paths while the server stores
+            # them plain; try the other form once.
+            found = self._find("source", prefix + relative_path[2:])
+        return found
 
     @functools.lru_cache(maxsize=64)  # noqa: B019
     def read(self, relative_path: str) -> list[str] | None:
@@ -241,16 +252,30 @@ class KernelSource:
 
     # ---------------------------------------------------------------- parsing
 
-    def document(self, tag: str, member_names: frozenset[str]) -> StructDoc:
-        """Recover the summary comment and per-member comments for ``tag``."""
+    def document(
+        self,
+        tag: str,
+        member_names: frozenset[str],
+        progress: Callable[[str], None] | None = None,
+    ) -> StructDoc:
+        """Recover the summary comment and per-member comments for ``tag``.
+
+        ``progress`` is called with a one-line description of each slow step
+        (the pahole scan, the source fetch), so the UI can show what it is
+        doing instead of looking hung.
+        """
         doc = StructDoc(tag)
 
+        if progress:
+            progress(f"pahole: locating struct {tag}")
         declaration = self.declaration(tag)
         if not declaration:
             doc.error = f"no declaration info for struct {tag}"
             return doc
         doc.decl_file, doc.decl_line = declaration
 
+        if progress:
+            progress(f"debuginfod: fetching {doc.decl_file}")
         lines = self.read(doc.decl_file)
         if lines is None:
             doc.error = f"could not fetch {doc.decl_file}"

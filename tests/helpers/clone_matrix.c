@@ -80,36 +80,112 @@ static int compare_long(const void *a, const void *b)
 }
 
 /*
+ * Pin to one CPU for the duration of the timing. Unpinned, wake_up_new_task
+ * puts the new task on a different CPU, and clone() then pays for an IPI and
+ * for bringing an idle vCPU back, which inside a VM means going out to the
+ * host. Measured over 400 rounds on this VM, pinning halved the whole
+ * distribution: plain fork went from 25.1 us median to 12.6, and a
+ * CLONE_THREAD clone from 7.3 to 3.3. What is left is the clone() path
+ * itself, which is what the column claims to show.
+ */
+static void pin_to_one_cpu(void)
+{
+	cpu_set_t allowed, one;
+
+	CPU_ZERO(&allowed);
+	if (sched_getaffinity(0, sizeof(allowed), &allowed))
+		return;
+	for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+		if (!CPU_ISSET(cpu, &allowed))
+			continue;
+		CPU_ZERO(&one);
+		CPU_SET(cpu, &one);
+		sched_setaffinity(0, sizeof(one), &one);
+		return;
+	}
+}
+
+/*
  * Time the clone() call itself, and report the distribution rather than a mean.
  * Inside a VM the host can deschedule the vCPU mid-call, which produces a long
- * tail that says nothing about the kernel; the minimum is the sample least
- * contaminated by it, so all three are reported.
+ * tail that says nothing about the kernel, so a quantile is reported rather
+ * than a mean. The low end is p10 and not the minimum: with the run pinned and
+ * the address space held constant, the samples cluster tightly and the single
+ * fastest one is a rare outlier below that cluster (7 of 400 rounds landed
+ * within 10% of it), so quoting it makes the spread look twice as wide as it
+ * is. Raising the RT priority was tried and changed nothing, so preemption is
+ * not what remains.
  */
 static void time_variant(const struct variant *v, int rounds, long *out)
 {
 	static long samples[4096];
 	struct timespec a, b;
 	int counted = 0;
+	int slots;
+	char *arena;
 
 	if (rounds > (int)(sizeof(samples) / sizeof(samples[0])))
 		rounds = sizeof(samples) / sizeof(samples[0]);
 
+	pin_to_one_cpu();
+
+	/*
+	 * Only CLONE_THREAD needs a stack per round: its child may still be
+	 * running on the stack when clone() returns. Everywhere else the child
+	 * is finished with it by then, because the loop waits for it, and vfork
+	 * suspends the parent until the child exits or execs. So those variants
+	 * reuse a single stack.
+	 *
+	 * This is what keeps the address space out of the measurement. Freeing
+	 * and reallocating a stack per round grew the mm by a mapping each time
+	 * and the variants that copy it got steadily slower: on plain fork the
+	 * median of the first 20 rounds was 32 us against 69 for the last 20.
+	 * Allocating all the stacks up front instead is constant but expensive,
+	 * because touching that arena anywhere makes dup_mmap copy its page
+	 * tables on every round: one page touched per 2 MB cost as much as
+	 * touching all 200 slots (both 21.0 us median against 14.1 untouched).
+	 * One reused stack is both constant and cheap, at 11.7.
+	 */
+	slots = (v->flags & CLONE_THREAD) ? rounds : 1;
+	while (slots > 0) {
+		arena = malloc((size_t)slots * STACK_BYTES);
+		if (arena)
+			break;
+		slots /= 2;
+	}
+	if (slots <= 0) {
+		out[0] = out[1] = out[2] = out[3] = -1;
+		return;
+	}
+	if (slots < rounds && slots > 1)
+		rounds = slots;
+
+	/*
+	 * Fault the stacks in before timing rather than during it. The first
+	 * write to a slot faults, and every 2 MB that fault also allocates a
+	 * page table page. That landed in the vfork column alone, once every 8
+	 * rounds with a 256 KB stack: vfork is the only variant whose parent is
+	 * still blocked while the child runs on the new stack. Halving the
+	 * stack size moved it to every 16th round, which is what identified the
+	 * 2 MB boundary. Pre-touched, vfork's p90 fell from 24.0 us to 6.5 with
+	 * the median unchanged at 5.1.
+	 */
+	for (int i = 0; i < slots; i++)
+		arena[(size_t)(i + 1) * STACK_BYTES - 8] = 0;
+
+	/* Stacks grow down, so each child starts at the top of its slot. */
 	for (int i = 0; i < rounds; i++) {
-		char *stack = malloc(STACK_BYTES);
-		if (!stack)
-			break;
 		clock_gettime(CLOCK_MONOTONIC, &a);
-		pid_t pid = clone(child_exit_fn, stack + STACK_BYTES, v->flags, NULL);
+		pid_t pid = clone(child_exit_fn,
+				  arena + (size_t)(i % slots + 1) * STACK_BYTES,
+				  v->flags, NULL);
 		clock_gettime(CLOCK_MONOTONIC, &b);
-		if (pid < 0) {
-			free(stack);
+		if (pid < 0)
 			break;
-		}
 		samples[counted++] = (b.tv_sec - a.tv_sec) * 1000000000L +
 				     (b.tv_nsec - a.tv_nsec);
 		if (!(v->flags & CLONE_THREAD))
 			waitpid(pid, NULL, __WALL);
-		/* The child may still be on this stack briefly; leak it. */
 	}
 
 	if (!counted) {
@@ -117,10 +193,7 @@ static void time_variant(const struct variant *v, int rounds, long *out)
 		return;
 	}
 	qsort(samples, counted, sizeof(samples[0]), compare_long);
-	long total = 0;
-	for (int i = 0; i < counted; i++)
-		total += samples[i];
-	out[0] = samples[0];                    /* min */
+	out[0] = samples[counted / 10];         /* p10 */
 	out[1] = samples[counted / 2];          /* median */
 	out[2] = samples[(counted * 9) / 10];   /* p90 */
 	out[3] = counted;

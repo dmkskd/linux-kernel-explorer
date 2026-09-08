@@ -197,10 +197,23 @@ class Explorer(App):
         Binding("q", "quit", "quit"),
     ]
 
-    def __init__(self, prog: Program) -> None:
+    def __init__(
+        self,
+        prog: Program,
+        source: KernelSource | None = None,
+        source_available: bool = True,
+    ) -> None:
         super().__init__()
         self.prog = prog
-        self.context = Context(prog, KernelSource())
+        self.context = Context(prog, source or KernelSource())
+        # False means startup probed and found no kernel source (or a vmcore,
+        # where a lookup would describe the host kernel): the 's' key is
+        # hidden by check_action and refuses in action_source. The default
+        # keeps tests and direct construction ungated.
+        self._source_available = source_available
+        # Set by action_source when a fetch is in flight, so the view opens as
+        # soon as the worker returns instead of requiring a second keypress.
+        self._pending_source: tuple[str, str] | None = None
         self.stack: list[Frame] = []
         self.filter = ""
         self._docs: dict[str, StructDoc] = {}
@@ -226,6 +239,21 @@ class Explorer(App):
     def userspace(self) -> bool:
         return self.context.userspace
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Returning None hides the binding from the footer: the source view
+        # needs kernel source, which this build may not have.
+        if action == "source" and not self._source_available:
+            return None
+        # Already looking at source: its rows are lines of C, not objects, so
+        # "s" has nothing to resolve. Hide it rather than answering with a
+        # refusal.
+        if action == "source" and self._showing_source():
+            return None
+        return True
+
+    def _showing_source(self) -> bool:
+        return bool(self.stack) and self.stack[-1].columns == frames.SOURCE_COLUMNS
+
     # ------------------------------------------------------------ struct docs
 
     def struct_doc(self, obj: Object | None) -> StructDoc | None:
@@ -234,7 +262,7 @@ class Explorer(App):
         Never blocks: recovering these runs pahole over a ~700MB vmlinux and
         then pulls the source file through debuginfod, so the first request for
         a tag starts a worker and returns ``None``. The doc and hint lines are
-        rewritten when it lands.
+        rewritten when the worker returns.
         """
         if obj is None:
             return None
@@ -254,13 +282,21 @@ class Explorer(App):
         self.set_activity(f"reading kernel source for struct {tag}…")
 
         def work() -> None:
+            def step(text: str) -> None:
+                self.call_from_thread(self.set_activity, text)
+
             try:
-                doc = self.source.document(tag, members)
+                doc = self.source.document(tag, members, progress=step)
             except Exception as exc:  # noqa: BLE001 - a bad tag shouldn't kill the UI
                 doc = StructDoc(tag, error=f"{type(exc).__name__}: {exc}")
             self.call_from_thread(self._struct_doc_done, tag, doc)
 
         self.run_worker(work, thread=True, group=f"doc:{tag}")
+
+    def _still_fetching(self, tag: str) -> None:
+        """Report a slow source fetch, unless it has already been answered."""
+        if self._pending_source is not None and self._pending_source[0] == tag:
+            self.notify(f"fetching the source for struct {tag}")
 
     def _struct_doc_done(self, tag: str, doc: StructDoc | None) -> None:
         # A failed lookup still gets recorded, so it is attempted once per tag
@@ -269,6 +305,19 @@ class Explorer(App):
         self.set_activity("")
         self.update_doc()
         self.update_hint()
+        pending = self._pending_source
+        if pending is not None and pending[0] == tag:
+            self._pending_source = None
+            doc = self._docs[tag]
+            if not doc.decl_file:
+                self.notify("no source available here", severity="warning")
+                return
+            line = doc.decl_line
+            title = f"struct {doc.tag}"
+            if pending[1] in doc.member_lines:
+                line = doc.member_lines[pending[1]]
+                title = f"struct {doc.tag}.{pending[1]}"
+            self.open_source(doc.decl_file, line, title)
 
     def update_doc(self) -> None:
         """Prefer the kernel's own words for this struct over the map's blurb."""
@@ -304,6 +353,7 @@ class Explorer(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.refresh_bindings()
         self.build_tree("structures")
         self.query_one("#search", Input).display = False
         self.query_one("#activity", Static).display = False
@@ -851,6 +901,11 @@ class Explorer(App):
         Works on a struct field (its declaration) and on a walkthrough step
         (the function), since a step already carries its file:line.
         """
+        if not self._source_available:
+            self.notify("no kernel source for this build", severity="warning")
+            return
+        if self._showing_source():
+            return
         row = self.current_row()
 
         # A walkthrough step carries "file:line" in its source column.
@@ -860,9 +915,29 @@ class Explorer(App):
                 self.open_source(path, int(line), row.name)
                 return
 
-        doc = self.struct_doc(self.stack[-1].obj if self.stack else None)
+        # A listing frame (every task, every device) has no object of its own,
+        # so take the row under the cursor: its type is what "s" should show.
+        frame_obj = self.stack[-1].obj if self.stack else None
+        if frame_obj is None and row is not None:
+            frame_obj = row.obj
+        doc = self.struct_doc(frame_obj)
         if doc is None:
-            self.notify("still reading the source for this struct…")
+            # The worker that reads this struct's source is still running.
+            # Record what was asked for, so _struct_doc_done opens it once the
+            # worker returns. Without this the notification is all that
+            # happens and the user has to press s again.
+            aggregate = ct.struct_type(frame_obj.type_) if frame_obj is not None else None
+            tag = aggregate.tag if aggregate is not None else None
+            if tag:
+                self._pending_source = (tag, row.name if row is not None else "")
+                # Say nothing yet. A cached lookup returns in well under a
+                # second and opens the view itself, and a notification about
+                # fetching would still be on screen underneath it. Only a
+                # fetch that is actually slow is worth reporting.
+                self.set_timer(0.4, lambda: self._still_fetching(tag))
+            else:
+                self.notify("no structure here to show source for",
+                            severity="warning")
             return
         if not doc.decl_file:
             self.notify("no source available here", severity="warning")
