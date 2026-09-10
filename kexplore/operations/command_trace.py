@@ -335,13 +335,20 @@ def _reads_from_source(
 
 
 def command_trace(
-    prog: Program, command: str, served: ProcFile | None = None
+    prog: Program,
+    command: str,
+    served: ProcFile | None = None,
+    origin: str = "",
 ) -> Iterator[Observation]:
     """The four stages for one command, measured on this kernel.
 
     ``served`` short-circuits discovery when the command names a file the
     catalog knows. Everything else runs the command twice: once to find the
     kernel entry point it used, once to record the stack that reached it.
+
+    ``origin`` is the row the command was taken from. The trace replaces that
+    view, so without it the first stage can only refer to a row that is no
+    longer on screen.
     """
     # The comm filter needs the program that runs, not the pipeline: in
     # "awk … /proc/1/stat | head" it is awk that reads the file.
@@ -355,7 +362,7 @@ def command_trace(
     yield Observation(
         "1. command",
         command,
-        "userspace equivalent for this row",
+        f"userspace column of {origin}" if origin else "the command traced",
         kind="heading",
     )
 
@@ -501,14 +508,22 @@ def _reads_stage(
     # is what pushed the useful half of each row off the screen: eighteen rows
     # of the same sentence, each one truncated.
     where = (_where_at(prog, address) if address else _where(prog, leaf)) or "no debuginfo"
-    sources = "source scan of " + leaf
-    if published:
-        sources += f", then the catalog for {path}"
+    if structs:
+        sources = "source scan of " + leaf
+        if published:
+            sources += f", then the catalog for {path}"
+        detail = ", ".join(structs)
+    else:
+        # "nothing resolved" states the outcome and hides the reason, and the
+        # reason is the useful half: the scan reports fields reached through the
+        # function's parameters, and a local says nothing about what the caller
+        # passed in.
+        detail = "none found"
+        sources = f"no parameter of {leaf} is dereferenced in its body"
+        if not path:
+            sources += "; no /proc file was read, so the catalog has no list"
     yield Observation(
-        "4. what it reads",
-        ", ".join(structs) or "nothing resolved",
-        f"{where}; {sources}",
-        kind="heading",
+        "4. what it reads", detail, f"{where}; {sources}", kind="heading"
     )
     for name, type_name in from_source:
         yield Observation(f"   {name}", type_name, "source")

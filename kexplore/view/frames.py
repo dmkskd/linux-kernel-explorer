@@ -561,7 +561,9 @@ def landing_plan(ctx: Context) -> Plan:
     )
 
 
-def command_trace_frame(ctx: Context, command: str, served=None) -> Frame:
+def command_trace_frame(
+    ctx: Context, command: str, served=None, origin: str = ""
+) -> Frame:
     """One userspace command, traced down to the kernel function behind it."""
     from ..operations.command_trace import command_trace
 
@@ -576,7 +578,7 @@ def command_trace_frame(ctx: Context, command: str, served=None) -> Frame:
                 kind="derived" if observation.kind != "input" else "field",
                 doc=observation.doc_for or observation.why,
             )
-            for observation in command_trace(ctx.prog, command, served)
+            for observation in command_trace(ctx.prog, command, served, origin)
         ]
 
     return Frame(f"trace: {command}", make_rows, doc=_trace_doc(command, served),
@@ -590,7 +592,9 @@ def _trace_doc(command: str, served) -> str:
     return f"{command}  ->  {served.path}  ->  {served.function}"
 
 
-def command_trace_plan(ctx: Context, command: str, served=None) -> Plan:
+def command_trace_plan(
+    ctx: Context, command: str, served=None, origin: str = ""
+) -> Plan:
     """Deferred: the command runs under bpftrace, which takes seconds."""
     watching = (
         f"the read of {served.path}"
@@ -601,7 +605,7 @@ def command_trace_plan(ctx: Context, command: str, served=None) -> Plan:
         f"trace: {command}",
         doc=_trace_doc(command, served),
         columns=COMMAND_TRACE_COLUMNS,
-        build=lambda: command_trace_frame(ctx, command, served),
+        build=lambda: command_trace_frame(ctx, command, served, origin),
         activity=f"running {command} under bpftrace…",
         placeholder=(
             Row(f"running {command} under bpftrace…", None, "",

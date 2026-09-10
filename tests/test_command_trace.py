@@ -80,6 +80,12 @@ async def main() -> int:
         rows = app.stack[-1].rows
         headings = [r.name for r in rows if r.name[:2] in ("1.", "2.", "3.", "4.")]
         check(len(headings) == 4, f"four stages: {headings}")
+        # The trace replaces the view it was started from, so the first stage
+        # names the row rather than pointing at one that is no longer there.
+        check(
+            rows[0].value == "userspace column of flags",
+            f"the command says where it came from: {rows[0].value}",
+        )
 
         stack = [r for r in rows if "fs/proc/array.c" in r.type_name]
         check(bool(stack), "the measured stack reaches fs/proc/array.c")
@@ -254,6 +260,22 @@ async def main() -> int:
             added is not None and added.value.startswith("fs/namespace.c:"),
             f"resolved to the right one of the two: "
             f"{added.value if added else '(missing)'}",
+        )
+
+        # An empty stage 4 states why it is empty. vfs_statx reads a local
+        # struct path, and a local says nothing about what the caller passed in,
+        # so the scan reports none.
+        rows = list(command_trace(app.prog, "ls -l /proc/1/ns"))
+        reads = next((r for r in rows if r.label.startswith("4.")), None)
+        check(
+            reads is not None and reads.value == "none found",
+            f"an empty stage 4 says so plainly: "
+            f"{reads.value if reads else '(missing)'}",
+        )
+        check(
+            reads is not None and "is dereferenced in its body" in reads.why,
+            f"and gives the reason, not just the outcome: "
+            f"{reads.why if reads else '(missing)'}",
         )
 
         # "the busiest" is meaningless without the tally it won: name the

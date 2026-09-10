@@ -997,7 +997,15 @@ class Explorer(App):
             return
         # A command that names no file is not a dead end: the trace measures
         # which one it read. Only it can say, so nothing is refused here.
-        self.open_plan(frames.command_trace_plan(self.context, command, served_by(command)))
+        row = self.current_row()
+        self.open_plan(
+            frames.command_trace_plan(
+                self.context,
+                command,
+                served_by(command),
+                origin=row.name if row is not None else "",
+            )
+        )
 
     def action_repl(self) -> None:
         """Suspend the TUI and hand the current object to a drgn REPL."""
