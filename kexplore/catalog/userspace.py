@@ -10,6 +10,8 @@ worth stating rather than leaving blank: it marks what only a debugger reaches.
 
 from __future__ import annotations
 
+import re
+
 # Keyed by (subsystem key, entry key).
 ENTRY_COMMANDS: dict[tuple[str, str], str] = {
     # process
@@ -173,12 +175,110 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
 }
 
 
-def field_command(tag: str, field: str, pid: int | None = None) -> str:
-    """The userspace equivalent for one struct field, if there is one."""
-    command = FIELD_COMMANDS.get((tag, field), "")
-    if command and pid is not None:
-        command = command.replace("<pid>", str(pid))
+# One place decides what a placeholder can be filled from. Every command in
+# this file, in ``links.py`` and in the kernel-side trace goes through it, so a
+# struct
+# either supplies a value for every command it shows or for none of them.
+#
+# Each rule reads the answer out of the kernel rather than out of the path the
+# user took to get here: an mm_struct names its owner, and a struct file, which
+# records no holder at all, is found by the task holding it. What no rule can
+# answer keeps its placeholder, because a command with <pid> still in it is
+# correct and one with a made-up pid is not.
+
+
+def _holder_of(obj):
+    """The task holding this file, and at which descriptor.
+
+    struct file has no back-pointer to a task: several tasks can hold the same
+    file, and a file in flight over a unix socket is held by none. The index
+    that does know is the fd table, so this searches them. Measured at about
+    2000 descriptors across the machine, which is a hundredth of a second.
+    """
+    from drgn.helpers.linux.fs import for_each_file
+    from drgn.helpers.linux.pid import for_each_task
+
+    address = obj.value_()
+    for task in for_each_task(obj.prog_):
+        try:
+            for fd, held in for_each_file(task):
+                if held.value_() == address:
+                    return task.pid.value_(), fd
+        except Exception:  # noqa: BLE001, S112 - a task exiting mid-walk is normal
+            continue
+    return None, None
+
+
+def placeholders(obj, tag: str) -> dict[str, str]:
+    """What this struct can fill into a command shown against it."""
+    found: dict[str, str] = {}
+    try:
+        if tag == "task_struct":
+            found["<pid>"] = str(obj.pid.value_())
+        elif tag == "mm_struct":
+            if obj.owner:
+                found["<pid>"] = str(obj.owner.pid.value_())
+        elif tag == "vm_area_struct":
+            if obj.vm_mm.owner:
+                found["<pid>"] = str(obj.vm_mm.owner.pid.value_())
+        elif tag == "signal_struct":
+            if obj.curr_target:
+                found["<pid>"] = str(obj.curr_target.pid.value_())
+        elif tag == "net_device":
+            found["<name>"] = obj.name.string_().decode()
+        elif tag == "file":
+            pid, fd = _holder_of(obj)
+            if pid is not None:
+                found["<pid>"], found["<n>"] = str(pid), str(fd)
+        elif tag == "socket" and obj.file:
+            pid, fd = _holder_of(obj.file)
+            if pid is not None:
+                found["<pid>"], found["<n>"] = str(pid), str(fd)
+        elif tag == "sock" and obj.sk_socket and obj.sk_socket.file:
+            pid, fd = _holder_of(obj.sk_socket.file)
+            if pid is not None:
+                found["<pid>"], found["<n>"] = str(pid), str(fd)
+    except Exception:  # noqa: BLE001 - an unreadable owner leaves the placeholder
+        return found
+    return found
+
+
+# What to say when a placeholder cannot be filled. An unfilled one is not a
+# command waiting to be completed: if no task owns this object, no /proc
+# directory publishes it, and there is nothing to run anywhere.
+UNFILLED = {
+    "<pid>": "no owning task, so no /proc path",
+    "<n>": "no owning task, so no /proc path",
+    "<name>": "no interface name",
+}
+
+_PLACEHOLDER = re.compile(r"<\w+>")
+
+
+def fill(command: str, found: dict[str, str]) -> str:
+    """Substitute what the struct knows, and say why where it knows nothing."""
+    for placeholder, value in found.items():
+        command = command.replace(placeholder, value)
+    left = _PLACEHOLDER.search(command)
+    if left:
+        return UNFILLED.get(left.group(), f"{left.group()} is not known here")
     return command
+
+
+def runnable(command: str) -> str:
+    """The part of a displayed command a shell can actually take.
+
+    A cell may offer alternatives separated by ", or " and may carry a trailing
+    "# …" note. Both are for the reader: the alternatives are equivalents, not
+    one pipeline, and the note is prose. Only the first alternative, without the
+    note, is a command.
+    """
+    return command.split(", or ")[0].split("  #")[0].strip()
+
+
+def field_command(tag: str, field: str, found: dict[str, str] | None = None) -> str:
+    """The userspace equivalent for one struct field, if there is one."""
+    return fill(FIELD_COMMANDS.get((tag, field), ""), found or {})
 
 
 def entry_command(subsystem_key: str, entry_key: str) -> str:

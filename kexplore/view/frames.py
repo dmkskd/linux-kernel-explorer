@@ -24,7 +24,7 @@ from drgn import Object, Program, TypeKind
 from ..catalog.decoders import decode_field
 from ..catalog.links import Derived, Link, derived_for, links_for, userspace_for
 from ..catalog.registry import Entry, FactEntry, Measurement, Subsystem
-from ..catalog.userspace import entry_command, field_command
+from ..catalog.userspace import entry_command, field_command, placeholders
 from ..core import ctypes as ct
 from ..core import debuginfod
 from ..core.nav import Row, collect, collection_rows, rows_for
@@ -38,6 +38,7 @@ MEASURE_COLUMNS = ("bucket / key", "count", "distribution")
 STEP_COLUMNS = ("step", "source", "what happens")
 SOURCE_COLUMNS = ("line", "", "source")
 LISTING_COLUMNS = ("entry", "what it shows")
+COMMAND_TRACE_COLUMNS = ("stage", "detail", "evidence")
 
 # What a branch of the sidebar is, when the branch is not itself a catalog
 # item. The tree groups entries by ``entry.group``; this says what that group
@@ -161,7 +162,7 @@ def _decoded(parent: Object, row: Row) -> Row:
     return replace(row, value=f"{row.value}  = {text}", doc=doc)
 
 
-def _with_userspace(parent: Object, row: Row) -> Row:
+def _with_userspace(parent: Object, row: Row, found: dict[str, str]) -> Row:
     """Replace a field's type with how to read it from userspace, if possible.
 
     Most fields have no equivalent; those keep their type, because claiming an
@@ -172,8 +173,7 @@ def _with_userspace(parent: Object, row: Row) -> Row:
     tag = ct.tag_of(parent.type_)
     if tag is None:
         return row
-    pid = ct.safe(lambda: parent.pid.value_(), None) if tag == "task_struct" else None
-    command = field_command(tag, row.name, pid)
+    command = field_command(tag, row.name, found)
     if not command:
         return row
     return replace(row, type_name=command, original_type=row.type_name)
@@ -183,12 +183,17 @@ def _link_row(link: Link, obj: Object, userspace: bool) -> Row:
     """A curated relationship, rendered as a followable row.
 
     In userspace mode the origin column is replaced by the command that gets
-    the same information on a box without this tool.
+    the same information on a box without this tool. The origin moves to
+    ``original_type``, the same way a field's C type does, which is what marks
+    the column as holding a command rather than a kernel path: a link with no
+    equivalent says so and keeps the marker clear.
     """
+    command = userspace_for(link, obj) if userspace and link.userspace else ""
     return Row(
         name=link.label,
         obj=None,
-        type_name=userspace_for(link, obj) if userspace else link.origin,
+        type_name=command or link.origin,
+        original_type=link.origin if command else "",
         value="",
         followable=True,
         kind="link",
@@ -242,7 +247,12 @@ def object_frame(label: str, obj: Object, ctx: Context | None = None, doc: str =
         ]
         fields = [_decoded(target, row) for row in rows_for(obj)]
         if userspace:
-            fields = [_with_userspace(target, row) for row in fields]
+            # Resolved once for the frame: finding which task holds a struct
+            # file is a walk over every fd table, and the answer is the same
+            # for every row of the same struct.
+            tag = ct.tag_of(obj.type_) or ""
+            found = ct.safe(lambda: placeholders(target, tag), {})
+            fields = [_with_userspace(target, row, found) for row in fields]
         return computed + links + fields
 
     return Frame(label, make_rows, obj=obj, doc=doc)
@@ -548,6 +558,56 @@ def landing_plan(ctx: Context) -> Plan:
         columns=FIELD_COLUMNS,
         build=lambda: landing_frame(ctx),
         activity="checking what this kernel and cache can do…",
+    )
+
+
+def command_trace_frame(ctx: Context, command: str, served=None) -> Frame:
+    """One userspace command, traced down to the kernel function behind it."""
+    from ..operations.command_trace import command_trace
+
+    def make_rows() -> list[Row]:
+        return [
+            Row(
+                name=observation.label,
+                obj=None,
+                type_name=observation.value,
+                value=observation.why,
+                followable=False,
+                kind="derived" if observation.kind != "input" else "field",
+                doc=observation.doc_for or observation.why,
+            )
+            for observation in command_trace(ctx.prog, command, served)
+        ]
+
+    return Frame(f"trace: {command}", make_rows, doc=_trace_doc(command, served),
+                 columns=COMMAND_TRACE_COLUMNS)
+
+
+def _trace_doc(command: str, served) -> str:
+    """The route from command to kernel function, when the catalog knows it."""
+    if served is None:
+        return f"{command}  ->  file determined by trace"
+    return f"{command}  ->  {served.path}  ->  {served.function}"
+
+
+def command_trace_plan(ctx: Context, command: str, served=None) -> Plan:
+    """Deferred: the command runs under bpftrace, which takes seconds."""
+    watching = (
+        f"the read of {served.path}"
+        if served is not None
+        else "which file it reads"
+    )
+    return Plan(
+        f"trace: {command}",
+        doc=_trace_doc(command, served),
+        columns=COMMAND_TRACE_COLUMNS,
+        build=lambda: command_trace_frame(ctx, command, served),
+        activity=f"running {command} under bpftrace…",
+        placeholder=(
+            Row(f"running {command} under bpftrace…", None, "",
+                f"recording the files it opens, and {watching}", False,
+                kind="derived"),
+        ),
     )
 
 

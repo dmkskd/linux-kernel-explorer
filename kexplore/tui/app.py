@@ -23,7 +23,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tab, Tabs, Tree
 
+from ..catalog.procfs import served_by
 from ..catalog.registry import Subsystem, subsystems
+from ..catalog.userspace import UNFILLED, runnable
 from ..core import ctypes as ct
 from ..core.nav import Row, follow
 from ..core.source import KernelSource, StructDoc
@@ -189,6 +191,7 @@ class Explorer(App):
         Binding("r", "refresh", "refresh"),
         Binding("u", "userspace", "userspace"),
         Binding("s", "source", "source"),
+        Binding("t", "trace_command", "trace command"),
         Binding("g", "graph", "graph"),
         Binding("colon", "repl", "drgn repl"),
         # Escape undoes whatever is most local: the filter box, then the same
@@ -604,9 +607,10 @@ class Explorer(App):
                     cells[3].stylize("dim")
             # Colour the userspace command so it is obviously not a kernel path.
             if self.userspace and len(cells) > 1 and row.kind in ("link", "field"):
-                # Only colour cells that actually became a command: an
-                # untranslatable field keeps its C type and should look normal.
-                if row.kind == "link" or row.type_name != _type_of(row):
+                # Only colour cells that actually became a command: a field or
+                # link with no equivalent keeps its type or its origin, and
+                # should look normal.
+                if row.type_name != _type_of(row):
                     cells[1].stylize("cyan")
             table.add_row(*cells, key=str(index))
         self.update_hint()
@@ -953,6 +957,47 @@ class Explorer(App):
     def open_source(self, path: str, line: int, title: str) -> None:
         """Open a kernel source file, fetching it through debuginfod if needed."""
         self.open_plan(frames.source_plan(self.context, path, line, title))
+
+    def command_under_cursor(self) -> str:
+        """The userspace command the cursor is on, if it is on one.
+
+        Two places carry one: a field or link row in userspace mode, where the
+        command replaced the type and the type moved to ``original_type``, and
+        an entry frame, where it is in the doc line. Anything else, including a
+        type column that is still a type, is not a command.
+        """
+        row = self.current_row()
+        if row is not None and row.original_type and row.type_name:
+            return row.type_name
+        doc = self.stack[-1].doc if self.stack else ""
+        prefix = "from userspace:"
+        if doc.startswith(prefix):
+            return doc[len(prefix) :].strip()
+        return ""
+
+    def action_trace_command(self) -> None:
+        """Trace the command under the cursor into the kernel that serves it.
+
+        A pushed frame rather than a dialog: the result is a table of rows, its
+        stack frames carry file:line, and "s" opens the source of any of them.
+        A modal would end that chain at the first screen.
+        """
+        command = self.command_under_cursor()
+        if not command:
+            self.notify(
+                "no command on this row: press u, then select a row that "
+                "shows one",
+                severity="warning",
+            )
+            return
+        # A cell may show alternatives and a note; only one of them runs.
+        command = runnable(command)
+        if command in UNFILLED.values():
+            self.notify(f"nothing to run here: {command}", severity="warning")
+            return
+        # A command that names no file is not a dead end: the trace measures
+        # which one it read. Only it can say, so nothing is refused here.
+        self.open_plan(frames.command_trace_plan(self.context, command, served_by(command)))
 
     def action_repl(self) -> None:
         """Suspend the TUI and hand the current object to a drgn REPL."""

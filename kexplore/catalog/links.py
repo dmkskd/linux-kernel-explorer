@@ -924,28 +924,19 @@ def derived_for(obj: Object) -> list[Derived]:
 
 
 def userspace_for(link: "Link", obj: Object) -> str:
-    """The link's userspace command, with <pid> filled in where we know it."""
+    """The link's command, with whatever this struct can fill in filled in.
+
+    The rules live in ``userspace.placeholders`` and are shared with the field
+    commands, so a struct file resolves <pid> the same way whether the command
+    is on a link or on a field.
+    """
     if not link.userspace:
         return "no userspace equivalent"
-    if "<pid>" not in link.userspace:
+    if "<" not in link.userspace:
         return link.userspace
+    from .userspace import fill, placeholders
 
-    # Ask the type, not the exception: obj.pid raises AttributeError on a
-    # struct file or mount, and ct.safe deliberately does not catch that.
-    tag = ct.tag_of(obj.type_)
-    pid = None
-    if tag == "task_struct":
-        pid = ct.safe(lambda: obj.pid.value_(), None)
-    elif tag == "mm_struct":
-        owner = ct.safe(lambda: obj.owner, None)
-        if owner is not None and ct.safe(lambda: owner.value_(), 0):
-            pid = ct.safe(lambda: owner.pid.value_(), None)
-
-    if pid is None:
-        # Keep the placeholder rather than inventing a pid: the command is
-        # still correct, it just has to be filled in by hand.
-        return link.userspace
-    return link.userspace.replace("<pid>", str(pid))
+    return fill(link.userspace, placeholders(obj, ct.tag_of(obj.type_) or ""))
 
 
 def links_for(obj: Object) -> list[Link]:

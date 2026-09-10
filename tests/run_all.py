@@ -32,6 +32,7 @@ KERNEL = [
     "test_process.py",
     "test_socket.py",
     "test_skb_page.py",
+    "test_command_trace.py",
     "test_measure.py",
     "test_crawl.py",
 ]

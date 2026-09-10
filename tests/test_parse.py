@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import sys
 
-from kexplore.core.probe import parse_bpftrace
+from kexplore.catalog.procfs import SERVED_BY, fields_from, served_by
+from kexplore.catalog.userspace import UNFILLED, fill, runnable
+from kexplore.core.probe import parse_bpftrace, parse_stacks
 
 ok = True
 
@@ -44,6 +46,102 @@ SCALAR = """
 """
 
 MIXED = HISTOGRAM + COUNTS + SCALAR
+
+
+
+# A stack map, as bpftrace prints one: the key spans lines and the count sits
+# on the closing bracket. Recorded from kprobe:do_task_stat during one ps -e.
+STACKS = """
+Attaching 2 probes...
+@opens[/proc/1]: 1
+@serves[
+        do_task_stat+0
+        proc_single_show+100
+        seq_read_iter+292
+        vfs_read+204
+]: 153
+"""
+
+
+def test_stacks() -> None:
+    stacks = parse_stacks(STACKS)
+    check(list(stacks) == ["serves"], "only the stack map is a stack")
+    frames, count = stacks["serves"][0]
+    check(count == 153, f"the count sits on the closing bracket: {count}")
+    check(len(frames) == 4, f"{len(frames)} frames, leaf first")
+    check(frames[0] == "do_task_stat+0", "the leaf keeps its +offset")
+    check(parse_stacks("@opens[/proc/1]: 1\n") == {}, "a one-line map is not a stack")
+    sections = parse_bpftrace(STACKS)
+    names = [s.name for s in sections]
+    check("opens" in names, f"the row parser still reads the flat map: {names}")
+
+
+def test_served_by() -> None:
+    cases = {
+        "awk '{print $7}' /proc/1/stat": "do_task_stat",
+        "grep VmPTE /proc/1/status": "proc_pid_status",
+        "cat /sys/class/net/eth0/mtu": "sysfs_kf_seq_show",
+        "grep ^ctxt /proc/stat": "show_stat",
+        "ps -e": "do_task_stat",
+        "ss -tanH | awk '{print $2}'": None,
+        "": None,
+    }
+    for command, expected in cases.items():
+        found = served_by(command)
+        got = found.function if found else None
+        check(got == expected, f"{command[:34]!r} -> {got}")
+    check(
+        all(entry.path == path for path, entry in SERVED_BY.items()),
+        "every entry agrees with the key it is filed under",
+    )
+
+
+def test_fill() -> None:
+    # One substitution step for every command in the tables, so a struct either
+    # fills a placeholder everywhere it appears or nowhere. A command that
+    # cannot be completed is not shown as one: if no task owns the object, no
+    # /proc directory publishes it and there is nothing to run.
+    command = "stat -L /proc/<pid>/fd/<n>"
+    check(
+        fill(command, {"<pid>": "1", "<n>": "3"}) == "stat -L /proc/1/fd/3",
+        "every placeholder a struct knows is filled",
+    )
+    check(
+        fill(command, {"<pid>": "1"}) == UNFILLED["<n>"],
+        f"a half-filled command says why instead: {fill(command, {'<pid>': '1'})}",
+    )
+    check(
+        fill(command, {}) == UNFILLED["<pid>"],
+        "and so does one with nothing known",
+    )
+    check(
+        fill("ps -e", {}) == "ps -e",
+        "a command with no placeholders is untouched",
+    )
+
+
+def test_runnable() -> None:
+    cases = {
+        "ls /proc/1/task, or ps -L -p 1": "ls /proc/1/task",
+        "ps -o ni= -p 1  # nice": "ps -o ni= -p 1",
+        "slabtop, or cat /proc/slabinfo": "slabtop",
+        "ss -tanmH | grep -o 'skmem:([^)]*)'": "ss -tanmH | grep -o 'skmem:([^)]*)'",
+    }
+    for shown, expected in cases.items():
+        check(runnable(shown) == expected, f"{shown[:38]!r} runs as {runnable(shown)!r}")
+
+
+def test_proc_fields() -> None:
+    stat = [name for name, _command in fields_from("/proc/<pid>/stat")]
+    check(len(stat) == 7, f"{len(stat)} fields come out of /proc/<pid>/stat")
+    check(
+        all("status" not in command for _n, command in fields_from("/proc/<pid>/stat")),
+        "stat does not claim the fields that status publishes",
+    )
+    check(
+        fields_from("/proc/<pid>/status") != fields_from("/proc/<pid>/stat"),
+        "the prefix does not swallow the longer path",
+    )
 
 
 def main() -> int:
@@ -104,6 +202,13 @@ def main() -> int:
         parse_bpftrace("Attaching 2 probes...\n") == [],
         "a run that recorded nothing produces no sections",
     )
+
+    # --- stacks and the /proc field map ---------------------------------
+    test_stacks()
+    test_served_by()
+    test_fill()
+    test_runnable()
+    test_proc_fields()
 
     print("\nPASS" if ok else "\nFAIL")
     return 0 if ok else 1

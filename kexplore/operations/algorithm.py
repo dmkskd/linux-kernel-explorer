@@ -216,6 +216,6 @@ def algorithms() -> list[Algorithm]:
     than by the frontend importing it for its side effects and having to say so
     with a noqa.
     """
-    from . import clone_experiment  # noqa: F401
+    from . import clone_experiment, command_trace  # noqa: F401
 
     return list(ALGORITHMS)

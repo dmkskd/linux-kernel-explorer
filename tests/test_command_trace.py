@@ -1,0 +1,343 @@
+"""What the kernel runs when a userspace command is run.
+
+Pressing t on a row that shows a command runs that command once under bpftrace
+and reports what it opened, the stack that served the read, and the fields the
+leaf publishes. Everything except the leaf's name is measured, so this test
+needs bpftrace and root, like the other tracing tests.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+import sys
+import time
+
+import drgn
+from textual.widgets import DataTable, Tree
+
+from harness import settle
+from kexplore.catalog.registry import Entry
+from kexplore.catalog.userspace import UNFILLED
+from kexplore.tui.app import Explorer
+
+ok = True
+
+
+def check(condition: bool, message: str) -> None:
+    global ok
+    ok &= bool(condition)
+    print(("  ok   " if condition else "  FAIL ") + message)
+
+
+def open_entry(app, tree, key):
+    node = next(
+        n
+        for branch in tree.root.children
+        for n in branch.children
+        if isinstance(n.data, Entry) and n.data.key == key
+    )
+    app.stack.clear()
+    tree.select_node(node)
+
+
+async def main() -> int:
+    app = Explorer(drgn.program_from_kernel())
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        tree = app.query_one("#nav", Tree)
+        table = app.query_one("#fields", DataTable)
+        table.focus()
+
+        open_entry(app, tree, "processes")
+        await settle(app, pilot)
+        app.action_follow()
+        await settle(app, pilot)
+
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("flags"))
+        check(
+            app.command_under_cursor() == "",
+            "a type column that is still a type is not a command",
+        )
+
+        await pilot.press("u")
+        await settle(app, pilot)
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("flags"))
+        command = app.command_under_cursor()
+        check("/proc/" in command, f"the row carries a command: {command[:40]}")
+
+        depth = len(app.stack)
+        await pilot.press("t")
+        check(len(app.stack) == depth + 1, "t pushes a frame rather than a dialog")
+        check(
+            "under bpftrace" in app.stack[-1].rows[0].name,
+            "the placeholder says what is running while it runs",
+        )
+
+        await settle(app, pilot)
+        rows = app.stack[-1].rows
+        headings = [r.name for r in rows if r.name[:2] in ("1.", "2.", "3.", "4.")]
+        check(len(headings) == 4, f"four stages: {headings}")
+
+        stack = [r for r in rows if "fs/proc/array.c" in r.type_name]
+        check(bool(stack), "the measured stack reaches fs/proc/array.c")
+        leaf = next((r for r in rows if "do_task_stat" in r.name), None)
+        check(leaf is not None, "do_task_stat is in the stack, not asserted by a table")
+
+        published = [r.name.strip() for r in rows if r.name.strip().startswith("task_struct.")]
+        check(
+            "task_struct.flags" in published,
+            f"the field it was opened from is listed as published: {published[:3]}",
+        )
+
+        # A struct reached from a task does not carry its pid, and the command
+        # cannot run with the placeholder still in it. The mm_struct's owner is
+        # walked back to, which is what makes this row traceable at all.
+        while len(app.stack) > 1:
+            app.action_back()
+        await settle(app, pilot)
+        app.action_follow()  # back down into the first task
+        await settle(app, pilot)
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("mm"))
+        app.action_follow()
+        await settle(app, pilot)
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("pgtables_bytes"))
+        mm_command = app.command_under_cursor()
+        check(
+            "<pid>" not in mm_command and "/status" in mm_command,
+            f"an mm_struct row carries a runnable command: {mm_command}",
+        )
+        await pilot.press("t")
+        await settle(app, pilot)
+        mm_rows = app.stack[-1].rows
+        check(
+            any("proc_pid_status" in r.name for r in mm_rows),
+            "status descends to proc_pid_status, not to the stat function",
+        )
+        publishes = next((r for r in mm_rows if r.name.startswith("4.")), None)
+        check(
+            publishes is not None and "mm_struct" in publishes.type_name
+            and "task_struct" in publishes.type_name,
+            "one file publishing two structs names both: "
+            f"{publishes.type_name if publishes else '(missing)'}",
+        )
+
+        while len(app.stack) > 1:
+            app.action_back()
+        await settle(app, pilot)
+        app.action_follow()
+        await settle(app, pilot)
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("flags"))
+        await pilot.press("t")
+        await settle(app, pilot)
+        rows = app.stack[-1].rows
+        stack = [r for r in rows if "fs/proc/array.c" in r.type_name]
+
+        # A link row shows a command too, and one that names no file at all:
+        # the trace has to find out which file it read.
+        while len(app.stack) > 1:
+            app.action_back()
+        await settle(app, pilot)
+        app.action_follow()
+        await settle(app, pilot)
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("children"))
+        link_command = app.command_under_cursor()
+        check(
+            link_command.startswith("pgrep"),
+            f"a link row carries a command too: {link_command}",
+        )
+        await pilot.press("t")
+        await settle(app, pilot)
+        link_rows = app.stack[-1].rows
+        serves = next((r for r in link_rows if r.name.startswith("3.")), None)
+        check(
+            serves is not None and "reads; leaf from" in serves.value,
+            f"the file was measured, not read off the command: "
+            f"{serves.value if serves else '(missing)'}",
+        )
+        check(
+            serves is not None and "proc_pid_status" in serves.type_name,
+            f"and it leads to a real function: "
+            f"{serves.type_name if serves else '(missing)'}",
+        )
+
+        while len(app.stack) > 1:
+            app.action_back()
+        await settle(app, pilot)
+        app.action_follow()
+        await settle(app, pilot)
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("flags"))
+        await pilot.press("t")
+        await settle(app, pilot)
+        rows = app.stack[-1].rows
+        stack = [r for r in rows if "fs/proc/array.c" in r.type_name]
+
+        # The rung rows carry file:line, so the source key still works on them:
+        # a dialog would have ended the chain here.
+        table.move_cursor(row=rows.index(stack[-1]))
+        await pilot.press("s")
+        await settle(app, pilot)
+        check(
+            app.stack[-1].label.startswith("fs/proc/array.c:"),
+            f"s on a stack row opens its source: {app.stack[-1].label}",
+        )
+
+        # A struct file records no holder, so its commands can only be
+        # completed by finding the task that has it open. Same resolver as the
+        # task and mm rows above, which is the point of it being one resolver.
+        while len(app.stack) > 1:
+            app.action_back()
+        await settle(app, pilot)
+        open_entry(app, tree, "files_pid1")
+        await settle(app, pilot)
+        app.action_follow()
+        await settle(app, pilot)
+        rows = app.stack[-1].rows
+        commands = [r.type_name for r in rows if r.original_type]
+        check(bool(commands), f"the struct file view shows commands: {len(commands)}")
+        check(
+            all("<pid>" not in c and "<n>" not in c for c in commands),
+            f"a struct file fills both placeholders: {commands[:2]}",
+        )
+
+        # A command reaching the kernel through something other than a file
+        # read still resolves: ss goes over netlink and reads nothing.
+        from kexplore.operations.command_trace import command_trace
+
+        rows = list(command_trace(app.prog, "ss -tanH"))
+        entry = next((r for r in rows if r.label.startswith("3.")), None)
+        check(
+            entry is not None and "inet_diag_dump" in entry.value,
+            f"a netlink command resolves its entry point: "
+            f"{entry.value if entry else '(missing)'}",
+        )
+
+        # ss -tanp reads /proc/<pid>/stat for every process to put a name next
+        # to each socket, so both interfaces fire. The netlink request is what
+        # the command asked; the reads are how it decorates the answer.
+        rows = list(command_trace(app.prog, "ss -tanp"))
+        entry = next((r for r in rows if r.label.startswith("3.")), None)
+        check(
+            entry is not None and "inet_diag_dump" in entry.value,
+            f"the netlink request outranks the file reads: "
+            f"{entry.value if entry else '(missing)'}",
+        )
+        check(
+            entry is not None and "also read" in entry.why,
+            f"and the reads are still reported, not dropped: "
+            f"{entry.why if entry else '(missing)'}",
+        )
+
+        # m_show is defined in two translation units, so kallsyms holds two of
+        # them and no kprobe can name one. The stack is taken at the caller and
+        # the leaf added back from the address the seq_file gave.
+        rows = list(command_trace(app.prog, "findmnt"))
+        entry = next((r for r in rows if r.label.startswith("3.")), None)
+        check(
+            entry is not None and "m_show" in entry.value,
+            f"an ambiguous leaf still names the function: "
+            f"{entry.value if entry else '(missing)'}",
+        )
+        added = next((r for r in rows if r.label.strip().endswith("m_show")), None)
+        check(
+            added is not None and "not probed" in added.why,
+            "and marks the frame it could not probe",
+        )
+        check(
+            added is not None and added.value.startswith("fs/namespace.c:"),
+            f"resolved to the right one of the two: "
+            f"{added.value if added else '(missing)'}",
+        )
+
+        # "the busiest" is meaningless without the tally it won: name the
+        # interfaces and their counts, so the choice can be checked.
+        rows = list(command_trace(app.prog, "ls -l /proc/1/fd"))
+        entry = next((r for r in rows if r.label.startswith("3.")), None)
+        check(
+            entry is not None and "vfs_statx" in entry.why and "iterate_dir" in entry.why,
+            f"the losing interfaces are named with their counts: "
+            f"{entry.why if entry else '(missing)'}",
+        )
+
+        # And a /proc file with no entry in the catalog resolves its leaf from
+        # the seq_file the kernel is holding, rather than failing.
+        rows = list(command_trace(app.prog, "cat /proc/loadavg"))
+        entry = next((r for r in rows if r.label.startswith("3.")), None)
+        check(
+            entry is not None and "loadavg_proc_show" in entry.value,
+            f"an untabled file resolves its leaf: "
+            f"{entry.value if entry else '(missing)'}",
+        )
+        check(
+            entry is not None and "leaf from the seq_file" in entry.why,
+            "and says the leaf was measured, not looked up",
+        )
+
+        # A command that never exits is capped rather than waited on, and says
+        # so: vmstat -n 1 prints a line a second forever.
+        started = time.monotonic()
+        rows = list(command_trace(app.prog, "vmstat -n 1"))
+        elapsed = time.monotonic() - started
+        note = next((r for r in rows if r.label.strip() == "note"), None)
+        check(
+            note is not None and "does not exit on its own" in note.why,
+            f"a command that never exits is reported as capped: "
+            f"{note.why if note else '(missing)'}",
+        )
+        check(elapsed < 45, f"and the cap holds: {elapsed:.0f}s")
+
+        # Read counts alone rank the wrong file: grep reads its own
+        # /proc/self/maps twice while starting and the file it was asked about
+        # once. What the command names wins.
+        rows = list(command_trace(app.prog, "grep VmPin /proc/1/status"))
+        entry = next((r for r in rows if r.label.startswith("3.")), None)
+        check(
+            entry is not None and "proc_pid_status" in entry.value,
+            f"the file the command names outranks the busier one: "
+            f"{entry.value if entry else '(missing)'}",
+        )
+        provenance = {r.why for r in rows if r.label.strip().count(".") == 1
+                      and r.label.startswith("   ")}
+        check(
+            provenance <= {"source", "catalog", ""},
+            f"field rows carry a one-word provenance, not a sentence: {provenance}",
+        )
+        check(
+            subprocess.run(["pgrep", "-x", "vmstat"], capture_output=True).returncode != 0,
+            "with nothing left running afterwards",
+        )
+
+        # An mm with no owning task has no /proc directory at all, so its rows
+        # say that rather than showing a command that cannot be completed.
+        while len(app.stack) > 1:
+            app.action_back()
+        await settle(app, pilot)
+        open_entry(app, tree, "init_mm")
+        await settle(app, pilot)
+        app.action_follow()
+        await settle(app, pilot)
+        rows = app.stack[-1].rows
+        unfilled = [r.type_name for r in rows if r.original_type]
+        check(
+            bool(unfilled) and all(u == UNFILLED["<pid>"] for u in unfilled),
+            f"init_mm says why instead of showing <pid>: {set(unfilled)}",
+        )
+        table.move_cursor(row=rows.index(next(r for r in rows if r.original_type)))
+        depth = len(app.stack)
+        await pilot.press("t")
+        await settle(app, pilot)
+        check(len(app.stack) == depth, "and t refuses it rather than running it")
+
+    print("\nPASS" if ok else "\nFAIL")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
