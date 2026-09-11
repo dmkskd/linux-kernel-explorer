@@ -23,7 +23,7 @@ TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
 
 # The crawl goes last: it is the slowest and the most likely to be interrupted.
-HOST = ["test_layout.py", "test_parse.py", "test_catalog.py"]
+HOST = ["test_layout.py", "test_parse.py", "test_catalog.py", "test_probe_cleanup.py", "test_source_refs.py"]
 KERNEL = [
     "smoke.py",
     "test_views.py",
@@ -32,6 +32,7 @@ KERNEL = [
     "test_process.py",
     "test_socket.py",
     "test_skb_page.py",
+    "test_trace_attribution.py",
     "test_command_trace.py",
     "test_measure.py",
     "test_crawl.py",

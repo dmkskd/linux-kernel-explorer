@@ -160,6 +160,26 @@ def main() -> int:
         "a previewed measurement states what it measures and how to run it",
     )
 
+    # --- the userspace toggle on a list ---------------------------------
+    # An entry list keeps its userspace command in the doc line, and "t"
+    # traces whatever is there. Pressing "u" reloads the frame, so the doc
+    # has to be rebuilt by the reload rather than fixed when the frame was
+    # first opened, or the list keeps the mode it was entered with.
+    ctx = frames.Context(prog=None, source=None)
+    kthreads = next(e for key, e in everything if key == "process" and e.key == "kthreads")
+    frame = frames.entry_frame(ctx, kthreads, "process")
+    check(not frame.doc.startswith("from userspace:"), "a list opens showing what it lists")
+    ctx.userspace = True
+    frame.make_rows = list  # resolving the list needs a kernel; the doc does not
+    frame.load()
+    check(
+        frame.doc.startswith("from userspace:  ps "),
+        f"toggling userspace on an open list updates its doc line: {frame.doc!r}",
+    )
+    ctx.userspace = False
+    frame.load()
+    check(frame.doc == kthreads.doc, "toggling back restores what it lists")
+
     analyses = algorithms()
     check(len(analyses) >= 3, f"{len(analyses)} analyses register themselves")
     check(len(algorithms()) == len(analyses), "asking twice does not duplicate them")

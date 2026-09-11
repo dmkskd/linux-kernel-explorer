@@ -114,13 +114,6 @@ SERVED_BY: dict[str, ProcFile] = {
 }
 
 
-# Programs whose whole job is reading one of the files above. ps takes no path
-# on its command line, so the file it ends up in cannot be read off the command
-# the way it can for a grep or an awk.
-PROGRAM_READS: dict[str, str] = {
-    "ps": "/proc/<pid>/stat",
-}
-
 _CONCRETE_PID = re.compile(r"/proc/\d+/")
 
 
@@ -141,9 +134,7 @@ def served_by(command: str) -> ProcFile | None:
     for path, entry in SERVED_BY.items():
         if path in generic if entry.prefix else _ends_at(path).search(generic):
             return entry
-    program = command.strip().split()[0] if command.strip() else ""
-    path = PROGRAM_READS.get(program)
-    return SERVED_BY.get(path) if path else None
+    return None
 
 
 def fields_from(path: str) -> list[tuple[str, str]]:

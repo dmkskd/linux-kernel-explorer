@@ -998,12 +998,16 @@ class Explorer(App):
         # A command that names no file is not a dead end: the trace measures
         # which one it read. Only it can say, so nothing is refused here.
         row = self.current_row()
+        parent = self.stack[-1].obj if self.stack else None
+        tag = ct.tag_of(parent.type_) if parent is not None else None
+        selected_field = f"{tag}.{row.name}" if tag and row and row.kind == "field" else ""
         self.open_plan(
             frames.command_trace_plan(
                 self.context,
                 command,
                 served_by(command),
                 origin=row.name if row is not None else "",
+                selected_field=selected_field,
             )
         )
 

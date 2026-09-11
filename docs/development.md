@@ -31,3 +31,19 @@ are not run.
 from every entry and reports what raises. Every bug that reached a user was a
 type violating an assumption held elsewhere, and targeted tests only visit types
 someone already thought about.
+
+## Recording the README demo
+
+The README embeds an asciinema recording of a session. To refresh it:
+
+```sh
+./run.sh --record demo.cast    # record; the file lands on this host
+asciinema upload demo.cast     # prints the cast URL
+```
+
+then replace the cast id in the two `asciinema.org/a/…` links in the README.
+Recording wraps whichever backend `run.sh` resolves, so it works the same from
+a mac on the lima backend as from a Linux host. Keep the terminal at a
+sensible size (the player reproduces it) and pause a moment after pressing
+`t`: the trace frame builds in the background, and a recording that cuts away
+during the placeholder shows nothing.

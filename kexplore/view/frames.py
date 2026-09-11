@@ -94,8 +94,15 @@ class Frame:
     # closes: a child sorted away from its parent belongs to nothing.
     sort_column: int | None = None
     sort_reverse: bool = False
+    # A frame whose doc line depends on the display mode builds it here rather
+    # than passing a string, so that toggling userspace and reloading updates
+    # the line as well as the rows. An entry list keeps its userspace command
+    # in the doc, and that command is what "t" traces.
+    make_doc: Callable[[], str] | None = None
 
     def load(self) -> None:
+        if self.make_doc is not None:
+            self.doc = self.make_doc()
         self.rows = self.make_rows()
         if self.sort_column is not None:
             self.rows = sort_rows(self.rows, self.sort_column, self.sort_reverse)
@@ -260,17 +267,20 @@ def object_frame(label: str, obj: Object, ctx: Context | None = None, doc: str =
 
 def entry_frame(ctx: Context, entry: Entry, subsystem_key: str = "") -> Frame:
     """A frame listing whatever an entry's provider produced."""
-    doc = entry.doc
-    if ctx.userspace:
-        command = entry_command(subsystem_key, entry.key)
-        if command:
-            doc = f"from userspace:  {command}"
+
+    def make_doc() -> str:
+        if ctx.userspace:
+            command = entry_command(subsystem_key, entry.key)
+            if command:
+                return f"from userspace:  {command}"
+        return entry.doc
 
     return Frame(
         entry.label,
         lambda: collection_rows(entry.resolve(ctx.prog)),
-        doc=doc,
+        doc=make_doc(),
         columns=entry.columns or FIELD_COLUMNS,
+        make_doc=make_doc,
     )
 
 
@@ -562,7 +572,7 @@ def landing_plan(ctx: Context) -> Plan:
 
 
 def command_trace_frame(
-    ctx: Context, command: str, served=None, origin: str = ""
+    ctx: Context, command: str, served=None, origin: str = "", selected_field: str = ""
 ) -> Frame:
     """One userspace command, traced down to the kernel function behind it."""
     from ..operations.command_trace import command_trace
@@ -578,7 +588,7 @@ def command_trace_frame(
                 kind="derived" if observation.kind != "input" else "field",
                 doc=observation.doc_for or observation.why,
             )
-            for observation in command_trace(ctx.prog, command, served, origin)
+            for observation in command_trace(ctx.prog, command, served, origin, selected_field)
         ]
 
     return Frame(f"trace: {command}", make_rows, doc=_trace_doc(command, served),
@@ -586,30 +596,23 @@ def command_trace_frame(
 
 
 def _trace_doc(command: str, served) -> str:
-    """The route from command to kernel function, when the catalog knows it."""
-    if served is None:
-        return f"{command}  ->  file determined by trace"
-    return f"{command}  ->  {served.path}  ->  {served.function}"
+    """Every observed interface is retained; a named file is only a candidate."""
+    return f"{command}  ->  observed kernel interfaces and field references"
 
 
 def command_trace_plan(
-    ctx: Context, command: str, served=None, origin: str = ""
+    ctx: Context, command: str, served=None, origin: str = "", selected_field: str = ""
 ) -> Plan:
     """Deferred: the command runs under bpftrace, which takes seconds."""
-    watching = (
-        f"the read of {served.path}"
-        if served is not None
-        else "which file it reads"
-    )
     return Plan(
         f"trace: {command}",
         doc=_trace_doc(command, served),
         columns=COMMAND_TRACE_COLUMNS,
-        build=lambda: command_trace_frame(ctx, command, served, origin),
+        build=lambda: command_trace_frame(ctx, command, served, origin, selected_field),
         activity=f"running {command} under bpftrace…",
         placeholder=(
             Row(f"running {command} under bpftrace…", None, "",
-                f"recording the files it opens, and {watching}", False,
+                "recording the process tree's files and kernel interfaces", False,
                 kind="derived"),
         ),
     )

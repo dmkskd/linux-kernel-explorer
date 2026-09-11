@@ -82,7 +82,7 @@ def test_served_by() -> None:
         "grep VmPTE /proc/1/status": "proc_pid_status",
         "cat /sys/class/net/eth0/mtu": "sysfs_kf_seq_show",
         "grep ^ctxt /proc/stat": "show_stat",
-        "ps -e": "do_task_stat",
+        "ps -e": None,
         "ss -tanH | awk '{print $2}'": None,
         "": None,
     }

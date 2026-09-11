@@ -1,50 +1,25 @@
-"""What the kernel runs when a userspace command is run.
+"""Trace a command's process tree into each observed kernel interface.
 
-``userspace.py`` answers "how would I read this without a debugger" with a
-command. That is where most explanations stop, and it hides the part worth
-seeing: ps is not asking the kernel for a process list, it is opening a few
-hundred files, and each read runs a function that formats a task_struct.
-
-Four stages for one command:
-
-    1. the command itself
-    2. the files it opens, counted by path
-    3. the kernel entry point it used, and the stack that served it
-    4. what that function reads, from its source and from the catalog
-
-Stages 2 and 3 are measured on this kernel rather than listed. Stage 4 pairs a
-scan of the leaf's own source with the table the userspace column already keeps,
-and marks which is which.
-
-Not every command reads a file. One discovery pass covers the interfaces the
-catalog's commands actually use, and the leaf comes back from whichever fired:
-
-    seq_read_iter        a file read: ps, grep, awk, cat
-    vfs_readlink         readlink /proc/<pid>/exe, ls -l on a symlink
-    iterate_dir          ls of a directory
-    vfs_statx            stat, and ls -l per entry
-    rtnetlink_rcv_msg    ip
-    inet_diag_dump       ss
-    __netlink_dump_start any netlink dump
-
-``catalog/procfs.py`` maps a /proc path to the function serving it, which spares
-a second run when the command names its file. It is a shortcut, not a
-requirement: a file read with no entry in that table resolves its leaf from the
-seq_file the kernel is holding.
+Discovery retains procfs reads and non-file handlers with their own stacks.
+A second run probes file-serving functions together, using the current read's
+file context. Static field references, direct helpers, and catalog associations
+are labelled separately from measured function calls.
 """
 
 from __future__ import annotations
 
+import json
 import re
-from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 
 from drgn import Program
 
 from ..catalog.procfs import SERVED_BY, ProcFile, fields_from, path_from_dentry
 from ..core import ctypes as ct
-from ..core.probe import parse_stacks, trace_command
+from ..core.probe import TRACE_FILTER, parse_keyed_stacks, parse_stacks, trace_command
 from ..core.source import KernelSource
+from ..core.source_refs import field_references, function_body, parameter_calls
 from .algorithm import Algorithm, Observation, register_algorithm
 
 COMMAND = "ps -e"
@@ -54,28 +29,37 @@ COMMAND = "ps -e"
 # netlink handler for a dump. Probing one syscall entry instead would report
 # the same function for every command.
 DISCOVER = """
-kprobe:do_sys_openat2 /comm == "{comm}"/ {{ @opens[str(uptr(arg1))] = count(); }}
-kprobe:seq_read_iter /comm == "{comm}"/ {{
-  $i = (struct kiocb *)arg0;
-  $d = $i->ki_filp->f_path.dentry;
-  @reads[str($d->d_parent->d_parent->d_name.name),
-         str($d->d_parent->d_name.name), str($d->d_name.name)] = count();
-  $m = (struct seq_file *)$i->ki_filp->private_data;
-  @shows[(uint64)$m->op->show, (uint64)$m->private] = count();
+kprobe:do_sys_openat2 /{filter}/ {{ @opens[str(uptr(arg1))] = count(); }}
+kprobe:vfs_read /{filter}/ {{
+  $f = (struct file *)arg0;
+  if ($f->f_inode->i_sb->s_magic == 0x9fa0) {{
+    $d = $f->f_path.dentry;
+    @vfs_reads[str($d->d_parent->d_parent->d_name.name),
+               str($d->d_parent->d_name.name), str($d->d_name.name)] = count();
+    @file_stack[str($d->d_parent->d_parent->d_name.name),
+                str($d->d_parent->d_name.name), str($d->d_name.name), kstack(12)] = count();
+  }}
 }}
-kprobe:vfs_readlink /comm == "{comm}"/ {{ @entry[probe] = count(); }}
-kprobe:iterate_dir /comm == "{comm}"/ {{ @entry[probe] = count(); }}
-kprobe:vfs_statx /comm == "{comm}"/ {{ @entry[probe] = count(); }}
-kprobe:rtnetlink_rcv_msg /comm == "{comm}"/ {{ @entry[probe] = count(); }}
-kprobe:inet_diag_dump /comm == "{comm}"/ {{ @entry[probe] = count(); }}
-kprobe:__netlink_dump_start /comm == "{comm}"/ {{ @entry[probe] = count(); }}
-"""
-
-# Second run, once the leaf is known: the same opens, plus the stack that
-# reached it.
-STACK = """
-kprobe:do_sys_openat2 /comm == "{comm}"/ {{ @opens[str(uptr(arg1))] = count(); }}
-kprobe:{function} /comm == "{comm}"/ {{ @serves[kstack(12)] = count(); }}
+kprobe:seq_read_iter /{filter}/ {{
+  $f = ((struct kiocb *)arg0)->ki_filp;
+  if ($f->f_inode->i_sb->s_magic == 0x9fa0) {{
+    $d = $f->f_path.dentry;
+    @reads[str($d->d_parent->d_parent->d_name.name),
+           str($d->d_parent->d_name.name), str($d->d_name.name)] = count();
+    @read_stack[str($d->d_parent->d_parent->d_name.name),
+                str($d->d_parent->d_name.name), str($d->d_name.name), kstack(12)] = count();
+    $m = (struct seq_file *)$f->private_data;
+    @shows[str($d->d_parent->d_parent->d_name.name),
+           str($d->d_parent->d_name.name), str($d->d_name.name),
+           (uint64)$m->op->show, (uint64)$m->private] = count();
+  }}
+}}
+kprobe:vfs_readlink, kprobe:iterate_dir, kprobe:vfs_statx,
+kprobe:rtnetlink_rcv_msg, kprobe:inet_diag_dump, kprobe:__netlink_dump_start
+/{filter}/ {{
+  @entry[probe] = count();
+  @entry_stack[probe, kstack(12)] = count();
+}}
 """
 
 _PID_PATH = re.compile(r"^/proc/\d+")
@@ -84,12 +68,9 @@ _PID_PATH = re.compile(r"^/proc/\d+")
 # names against what it was measured reading.
 _NAMED_PID = re.compile(r"/proc/\d+/")
 
-# "task->comm", "p->mm". The name on the left has to be a parameter of the
-# function being scanned, or this matches locals and says nothing about the
-# structures the caller handed in.
-_FIELD_READ = re.compile(r"\b(\w+)->(\w+)")
-
-_SOURCE = KernelSource()
+# A multi-interface trace can visit several uncached source files. Do not let
+# each unavailable file hold the result for the browser's full download timeout.
+_SOURCE = KernelSource(source_timeout=5)
 
 
 def _grouped_opens(rows: list[tuple[str, str, str]]) -> list[tuple[str, int]]:
@@ -133,6 +114,21 @@ def _where(prog: Program, function: str) -> str:
     return f"{found[0]}:{found[1]}" if found else ""
 
 
+def _stack_where(prog: Program, frame: str) -> str:
+    """Resolve the recorded instruction offset, not just the function entry."""
+    name, sep, displacement = frame.partition("+")
+    try:
+        offset = (
+            int(displacement, 16 if displacement.startswith("0x") else 10) if sep else 0
+        )
+    except ValueError:
+        return ""
+    symbols = ct.safe(lambda: prog.symbols(name), [])
+    if len(symbols) != 1:
+        return ""  # A printed name cannot identify a duplicate static symbol.
+    return _where_at(prog, symbols[0].address + offset)
+
+
 def _symbol(prog: Program, address: int) -> str:
     return ct.safe(lambda: prog.symbol(address).name, "")
 
@@ -170,7 +166,7 @@ def _opens_stage(command: str, sections: dict) -> Iterator[Observation]:
 
     yield Observation(
         "2. files opened",
-        f"{sum(count for _path, count in opens)} files",
+        f"{sum(count for _path, count in opens)} open calls",
         "kprobe:do_sys_openat2",
         kind="heading",
     )
@@ -187,6 +183,21 @@ def _opens_stage(command: str, sections: dict) -> Iterator[Observation]:
         )
 
 
+def _read_path(grandparent: str, parent: str, name: str) -> str:
+    """Reconstruct known proc paths; retain an explicit suffix for deeper ones."""
+    return path_from_dentry(grandparent, parent, name) or "/proc/…/" + "/".join(
+        part for part in (grandparent, parent, name) if part != "/"
+    )
+
+
+def _merge_stacks(stacks):
+    counts = {}
+    for frames, count in stacks:
+        key = tuple(frames)
+        counts[key] = counts.get(key, 0) + count
+    return [(list(frames), count) for frames, count in counts.items()]
+
+
 def _files_read(sections: dict, command: str) -> list[tuple[str, int]]:
     """Every /proc path the command read, the one it is about first.
 
@@ -197,17 +208,23 @@ def _files_read(sections: dict, command: str) -> list[tuple[str, int]]:
     """
     named = _NAMED_PID.sub("/proc/<pid>/", command)
     counts: dict[str, int] = {}
-    for label, value, _bar in sections["reads"].rows if "reads" in sections else []:
-        parts = [part.strip() for part in label.split(",")]
-        if len(parts) != 3:
-            continue
-        path = path_from_dentry(*parts)
-        try:
-            count = int(value)
-        except ValueError:
-            continue
-        if path:
-            counts[path] = counts.get(path, 0) + count
+    for section_name in ("reads", "vfs_reads"):
+        per_path: dict[str, int] = {}
+        for label, value, _bar in (
+            sections[section_name].rows if section_name in sections else []
+        ):
+            parts = [part.strip() for part in label.split(",")]
+            if len(parts) != 3:
+                continue
+            path = _read_path(*parts)
+            try:
+                count = int(value)
+            except ValueError:
+                continue
+            if path:
+                per_path[path] = per_path.get(path, 0) + count
+        for path, count in per_path.items():
+            counts[path] = max(counts.get(path, 0), count)
     return sorted(
         counts.items(),
         key=lambda pair: (pair[0] in named, pair[1]),
@@ -226,15 +243,16 @@ def _proc_show_at(prog: Program, inode_address: int) -> tuple[str, int] | None:
 
     inode = Object(prog, "struct inode *", inode_address)
     address = ct.safe(
-        lambda: container_of(inode, "struct proc_inode", "vfs_inode")
-        .op.proc_show.value_(),
+        lambda: container_of(
+            inode, "struct proc_inode", "vfs_inode"
+        ).op.proc_show.value_(),
         0,
     )
     name = _symbol(prog, address)
     return (name, address) if name else None
 
 
-def _measured_leaf(prog: Program, sections: dict) -> tuple[str, int]:
+def _measured_leaf(prog: Program, sections: dict, path: str) -> tuple[str, int]:
     """The show function the kernel is holding for the file being read.
 
     A file with its own iterator keeps the real one in ``m->op->show``. A
@@ -245,10 +263,10 @@ def _measured_leaf(prog: Program, sections: dict) -> tuple[str, int]:
     best = ("", 0, 0)
     for label, value, _bar in sections["shows"].rows if "shows" in sections else []:
         parts = [part.strip() for part in label.split(",")]
-        if len(parts) != 2:
+        if len(parts) != 5 or _read_path(*parts[:3]) != path:
             continue
         try:
-            show, private, count = int(parts[0]), int(parts[1]), int(value)
+            show, private, count = int(parts[3]), int(parts[4]), int(value)
         except ValueError:
             continue
         address = show
@@ -262,22 +280,8 @@ def _measured_leaf(prog: Program, sections: dict) -> tuple[str, int]:
     return best[0], best[1]
 
 
-# A netlink handler means the command asked the kernel a question rather than
-# read a file. ss -tanp does both: the socket list comes over netlink, and the
-# /proc reads are how it puts a process name next to each socket. The question
-# is the point, so it outranks the reads.
-NETLINK = frozenset(
-    {"inet_diag_dump", "rtnetlink_rcv_msg", "__netlink_dump_start"}
-)
-
-
-def _tally(pairs: list[tuple[str, int]], limit: int = 3) -> str:
-    """"vfs_statx 160, vfs_readlink 156, iterate_dir 2", for the evidence cell.
-
-    The counts are calls during the discovery run, and the cell carrying this
-    says so: a bare number beside a function name explains nothing.
-    """
-    return ", ".join(f"{name} {count}" for name, count in pairs[:limit])
+# Netlink handlers are listed first for scanning; file interfaces are retained.
+NETLINK = frozenset({"inet_diag_dump", "rtnetlink_rcv_msg", "__netlink_dump_start"})
 
 
 def _entry_points(sections: dict) -> list[tuple[str, int]]:
@@ -291,47 +295,237 @@ def _entry_points(sections: dict) -> list[tuple[str, int]]:
     return sorted(found, key=lambda pair: pair[1], reverse=True)
 
 
-def _reads_from_source(
-    prog: Program, function: str, address: int = 0
-) -> list[tuple[str, str]]:
-    """Struct fields the leaf's own source reads, by scanning its body.
-
-    The parameter names and their types come from DWARF, so ``task->flags`` in
-    the body is reported as ``task_struct.flags`` rather than guessed at. This
-    is a floor and not a list: a field read through a helper, as utime is
-    through task_utime(), appears nowhere in this function's text.
-    """
+def _source_function(prog: Program, function: str, address: int = 0):
+    """A body and its DWARF parameters, or unavailable evidence."""
     found = _location_at(prog, address) if address else _location(prog, function)
     if not found:
-        return []
-    path, line = found
-    lines = _SOURCE.read(path)
-    if not lines:
-        return []
-
-    # From the opening line to the first line that is a closing brace in the
-    # first column, which is where a kernel function ends.
-    body: list[str] = []
-    for text in lines[line - 1 :]:
-        body.append(text)
-        if text.startswith("}"):
-            break
-
+        return None
+    lines = _SOURCE.read(found[0])
+    body = function_body(lines, found[1]) if lines else None
+    if body is None:
+        return None
     try:
+        if len(prog.symbols(function)) != 1:
+            return None
         parameters = {
             p.name: str(p.type) for p in prog.function(function).type_.parameters
         }
-    except Exception:  # noqa: BLE001 - a function without DWARF has no names
-        return []
+    except Exception:  # noqa: BLE001 - missing or ambiguous DWARF
+        return None
+    return body, parameters
 
-    seen: set[tuple[str, str]] = set()
-    for text in body:
-        for name, field in _FIELD_READ.findall(text):
-            type_name = parameters.get(name, "")
-            tag = type_name.removeprefix("struct ").removesuffix(" *").strip()
-            if type_name.startswith("struct ") and type_name.endswith("*"):
-                seen.add((f"{tag}.{field}", type_name))
-    return sorted(seen)
+
+def _reads_from_source(prog: Program, function: str, address: int = 0):
+    source = _source_function(prog, function, address)
+    return field_references(*source) if source is not None else None
+
+
+@dataclass
+class FieldEvidence:
+    direct: list[tuple[str, str]] | None
+    helpers: list[tuple[str, str, str]] = field(default_factory=list)
+    unavailable: list[str] = field(default_factory=list)
+    catalog: list[tuple[str, str]] = field(default_factory=list)
+    omitted: int = 0
+
+
+MAX_HELPERS = 12
+
+
+def _field_evidence(prog: Program, interface) -> FieldEvidence:
+    source = (
+        _source_function(prog, interface.function, interface.address)
+        if interface.function
+        else None
+    )
+    evidence = FieldEvidence(
+        field_references(*source) if source is not None else None,
+        catalog=fields_from(interface.path) if interface.path else [],
+    )
+    if source is None:
+        return evidence
+    calls = parameter_calls(*source)
+    calls.pop(interface.function, None)
+    evidence.omitted = max(0, len(calls) - MAX_HELPERS)
+    for helper, positions in sorted(calls.items())[:MAX_HELPERS]:
+        helper_source = _source_function(prog, helper)
+        if helper_source is None:
+            evidence.unavailable.append(helper)
+            continue
+        body, parameters = helper_source
+        passed = {
+            name: kind
+            for index, (name, kind) in enumerate(parameters.items())
+            if index in positions
+        }
+        for name, type_name in field_references(body, passed):
+            evidence.helpers.append((name, type_name, helper))
+    return evidence
+
+
+def _selected_evidence(selected: str, interfaces, analyses) -> Observation:
+    matches = []
+    for interface, analysis in zip(interfaces, analyses):
+        route = interface.path or interface.function
+        qualifier = (
+            "observed function"
+            if interface.probed
+            else "candidate function, not probed"
+        )
+        if selected in {name for name, _type in analysis.direct or []}:
+            matches.append(f"{route}: direct source reference ({qualifier})")
+        for name, _type, helper in analysis.helpers:
+            if name == selected:
+                matches.append(
+                    f"{route}: source reference via {helper} ({qualifier}; helper not probed)"
+                )
+        if selected in {name for name, _command in analysis.catalog}:
+            matches.append(f"{route}: catalog association")
+    return Observation(
+        "   selected field",
+        selected,
+        "; ".join(matches) + "; runtime access not established"
+        if matches
+        else "not established: no direct, helper, or catalog association found; "
+        "this trace does not explain the selected field",
+    )
+
+
+@dataclass
+class Interface:
+    path: str
+    function: str
+    address: int = 0
+    calls: int = 0
+    evidence: str = ""
+    stacks: list[tuple[list[str], int]] = field(default_factory=list)
+    probed: bool = False
+    keys: list[tuple[str, str, str]] = field(default_factory=list)
+
+
+def _interfaces(
+    prog: Program, sections: dict, raw: str, command: str, served: ProcFile | None
+) -> list[Interface]:
+    """Keep each observed file and non-file handler with its own evidence."""
+    keyed = parse_keyed_stacks(raw)
+    result = []
+    for function, count in _entry_points(sections):
+        stacks = [
+            (frames, hits)
+            for key, frames, hits in keyed.get("entry_stack", [])
+            if key.split(":")[-1] == function
+        ]
+        result.append(
+            Interface(
+                "",
+                function,
+                calls=count,
+                evidence="discovery handler calls",
+                stacks=stacks,
+                probed=True,
+            )
+        )
+    result.sort(key=lambda item: (item.function in NETLINK, item.calls), reverse=True)
+    for path, count in _files_read(sections, command):
+        known = SERVED_BY.get(path)
+        function, address = (
+            (known.function, 0) if known else _measured_leaf(prog, sections, path)
+        )
+        keys = set()
+        for section_name in ("reads", "vfs_reads"):
+            for label, _value, _bar in (
+                sections[section_name].rows if section_name in sections else []
+            ):
+                parts = tuple(part.strip() for part in label.split(","))
+                if len(parts) == 3 and _read_path(*parts) == path:
+                    keys.add(parts)
+        stacks = []
+        for name in ("read_stack", "file_stack"):
+            for key, frames, hits in keyed.get(name, []):
+                parts = tuple(part.strip() for part in key.split(","))
+                if parts in keys:
+                    stacks.append((frames, hits))
+            if stacks:
+                break
+        result.append(
+            Interface(
+                path,
+                function,
+                address,
+                count,
+                "leaf from the catalog" if known else "leaf from the seq_file",
+                _merge_stacks(stacks),
+                False,
+                sorted(keys),
+            )
+        )
+    # Named non-proc files (e.g. sysfs) have a catalog candidate, not an observed
+    # read path. Its function is probed in pass two and labelled accordingly.
+    if served and not any(item.path == served.path for item in result):
+        result.append(
+            Interface(
+                served.path,
+                served.function,
+                evidence="catalog candidate; path not observed in discovery",
+            )
+        )
+    return result
+
+
+def _stack_script(prog: Program, interfaces: list[Interface]) -> str:
+    """Attach all leaf probes together, with file context from the current read."""
+    clauses = []
+    probes = []
+    for index, item in enumerate(interfaces):
+        if not item.path or not item.function or not _probeable(prog, item.function):
+            continue
+        if item.keys:
+            conditions = set()
+            for grandparent, parent, name in item.keys:
+                parts = []
+                for expression, value in (
+                    ("$d->d_parent->d_parent->d_name.name", grandparent),
+                    ("$d->d_parent->d_name.name", parent),
+                    ("$d->d_name.name", name),
+                ):
+                    if value.isdigit():
+                        parts.append(f'str({expression}) != "/"')
+                    else:
+                        parts.append(f"str({expression}) == {json.dumps(value)}")
+                conditions.add(" && ".join(parts))
+            clauses.append(
+                f"if ({' || '.join('(' + c + ')' for c in sorted(conditions))}) "
+                f"{{ @trace_file[tid] = {index + 1}; }}"
+            )
+            predicate = f"{TRACE_FILTER} && @trace_file[tid] == {index + 1}"
+        else:
+            predicate = TRACE_FILTER
+        probes.append(
+            f"kprobe:{item.function} /{predicate}/ "
+            f"{{ @serves{index}[kstack(12)] = count(); }}"
+        )
+    if not probes:
+        return ""
+    context = "\n".join(clauses)
+    return f"""
+kprobe:vfs_read /{TRACE_FILTER}/ {{
+  delete(@trace_file[tid]);
+  $f = (struct file *)arg0;
+  if ($f->f_inode->i_sb->s_magic == 0x9fa0) {{
+    $d = $f->f_path.dentry;
+    {context}
+  }}
+}}
+kprobe:seq_read_iter /{TRACE_FILTER}/ {{
+  delete(@trace_file[tid]);
+  $f = ((struct kiocb *)arg0)->ki_filp;
+  if ($f->f_inode->i_sb->s_magic == 0x9fa0) {{
+    $d = $f->f_path.dentry;
+    {context}
+  }}
+}}
+kretprobe:vfs_read, kretprobe:seq_read_iter /{TRACE_FILTER}/ {{ delete(@trace_file[tid]); }}
+""" + "\n".join(probes)
 
 
 def command_trace(
@@ -339,204 +533,170 @@ def command_trace(
     command: str,
     served: ProcFile | None = None,
     origin: str = "",
+    selected_field: str = "",
 ) -> Iterator[Observation]:
-    """The four stages for one command, measured on this kernel.
-
-    ``served`` short-circuits discovery when the command names a file the
-    catalog knows. Everything else runs the command twice: once to find the
-    kernel entry point it used, once to record the stack that reached it.
-
-    ``origin`` is the row the command was taken from. The trace replaces that
-    view, so without it the first stage can only refer to a row that is no
-    longer on screen.
-    """
-    # The comm filter needs the program that runs, not the pipeline: in
-    # "awk … /proc/1/stat | head" it is awk that reads the file.
-    comm = Path(command.split("|")[0].strip().split()[0]).name[:15]
-
-    # Filled in by the first trace: a command that has to be killed is one the
-    # reader should know about, since everything below covers only the seconds
-    # it was allowed to run.
-    limit: list[str] = []
-
+    """Discover every interface, then collect file-serving stacks in one run."""
     yield Observation(
         "1. command",
         command,
         f"userspace column of {origin}" if origin else "the command traced",
         kind="heading",
     )
-
-    path = served.path if served is not None else ""
-    leaf = served.function if served is not None else ""
-    address = 0
-    how = "file named by the command"
-    others: list[tuple[str, int]] = []
-
-    if not leaf:
-        first = trace_command(DISCOVER.format(comm=comm), command)
-        if first.error:
-            yield Observation("trace failed", first.error, "", kind="result")
-            return
-        found = {section.name: section for section in first.sections}
-        if first.stopped:
-            limit.append("capped: the command does not exit on its own")
-
-        files = _files_read(found, command)
-        entries = _entry_points(found)
-        netlink = [pair for pair in entries if pair[0] in NETLINK]
-
-        if netlink:
-            leaf, _hits = netlink[0]
-            # Name the alternatives and their call counts: "busiest" means
-            # nothing without the tally it won.
-            how = f"netlink; discovery calls: {_tally(netlink)}"
-            if files:
-                # Said out loud rather than dropped: the file reads are real,
-                # they are just not the question the command asked.
-                aside = ", ".join(f"{p} {n}" for p, n in files[:2])
-                how += f"; also read {aside}"
-        elif files:
-            path, hits = files[0]
-            others = files[1:]
-            known = SERVED_BY.get(path)
-            if known is not None:
-                leaf, how = known.function, f"{path}, {hits} reads; leaf from the catalog"
-            else:
-                leaf, address = _measured_leaf(prog, found)
-                how = f"{path}, {hits} reads; leaf from the seq_file"
-        elif entries:
-            leaf, _hits = entries[0]
-            # Only say which won when something else was in the running.
-            contest = "; most frequent traced" if len(entries) > 1 else ""
-            how = f"no file read; discovery calls: {_tally(entries)}{contest}"
-        else:
-            leaf = ""
-
-        if not leaf:
-            yield from _opens_stage(command, found)
-            yield Observation(
-                "3. kernel entry point",
-                "none observed",
-                "none of the probed interfaces fired for this command",
-                kind="result",
-            )
-            return
-
-    # A static function's name can be ambiguous, and bpftrace refuses to attach
-    # to one that is. Probe the caller instead and put the leaf back on the end
-    # of the stack: it is known from the seq_file, just not probeable by name.
-    probe, unprobeable = leaf, ""
-    if not _probeable(prog, leaf):
-        probe = "seq_read_iter" if path else ""
-        unprobeable = leaf
-        if not probe:
-            yield Observation(
-                "3. kernel entry point",
-                f"{leaf} at {_where_at(prog, address) or 'no debuginfo'}",
-                "name is ambiguous, so no probe attaches, and no caller of "
-                "it is in the probe set",
-                kind="result",
-            )
-            yield from _reads_stage(prog, command, leaf, path, address)
-            return
-
-    result = trace_command(STACK.format(comm=comm, function=probe), command)
-    if result.error:
-        yield Observation("trace failed", result.error, "", kind="result")
+    yield Observation(
+        "   attribution",
+        "launcher and descendants",
+        "thread IDs tracked across fork, exec, and exit; both sides of pipelines included",
+    )
+    first = trace_command(DISCOVER.format(filter=TRACE_FILTER), command)
+    if first.error:
+        yield Observation("trace failed", first.error, kind="result")
         return
-
-    sections = {section.name: section for section in result.sections}
-    if result.stopped and not limit:
-        limit.append("capped: the command does not exit on its own")
-    if limit:
-        yield Observation("   note", "a slice, not a whole run", limit[0])
+    sections = {section.name: section for section in first.sections}
     yield from _opens_stage(command, sections)
-
-    stacks = parse_stacks(result.raw).get("serves", [])
-    if not stacks:
+    interfaces = _interfaces(prog, sections, first.raw, command, served)
+    script = _stack_script(prog, interfaces)
+    second = trace_command(script, command) if script else None
+    if first.stopped or (second and second.stopped):
         yield Observation(
-            "3. kernel entry point",
-            f"{probe} not called",
-            "probe attached, never fired: the second run differed from the "
-            "first",
-            kind="result",
+            "   note",
+            "capped at 5 seconds per run",
+            "the command did not exit within the observation interval",
         )
-        return
-
-    frames, hits = max(stacks, key=lambda pair: pair[1])
-    also = "; other files read are listed below the stack" if others else ""
-    plural = "s" if hits != 1 else ""
-    detail = f"{hits} call{plural} to {probe}"
-    evidence = f"{how}; stack at kprobe:{probe}, innermost last{also}"
-    if unprobeable:
-        detail = f"{hits} call{plural} reaching {unprobeable}"
-        evidence = (
-            f"{how}; {unprobeable} is not probeable by name, so the stack is "
-            f"taken at kprobe:{probe} and the leaf appended{also}"
-        )
-    yield Observation("3. kernel entry point", detail, evidence, kind="heading")
-    # bpftrace records leaf first; a call path reads the other way.
-    for number, frame in enumerate(reversed(frames), start=1):
+    if second and second.error:
         yield Observation(
-            f"   {number}. {frame}", _where(prog, frame.split("+")[0]), ""
+            "   stack pass failed", second.error, "discovery evidence retained"
         )
-    if unprobeable:
+    elif second:
+        stacks = parse_stacks(second.raw)
+        for index, item in enumerate(interfaces):
+            leaf_stacks = stacks.get(f"serves{index}", [])
+            if leaf_stacks:
+                item.stacks = leaf_stacks
+                item.probed = True
+                item.evidence += "; serving stack in second run"
+                if item.keys:
+                    item.evidence += "; matched to the current read's dentry"
+                else:
+                    item.evidence += "; function calls only, path not correlated"
+    analyses = [_field_evidence(prog, item) for item in interfaces]
+    if selected_field:
+        yield _selected_evidence(selected_field, interfaces, analyses)
+    yield Observation(
+        "3. kernel interfaces",
+        f"{len(interfaces)} interfaces",
+        "each interface keeps its own counts and stack; discovery and stack pass are separate runs",
+        kind="heading",
+    )
+    for item in interfaces:
+        function = item.function or "serving function unresolved"
         yield Observation(
-            f"   {len(frames) + 1}. {unprobeable}",
-            _where_at(prog, address) or "no debuginfo",
-            "from the seq_file; not probed, the name is ambiguous",
+            f"   {item.path or function}",
+            function if item.path else f"{item.calls} calls",
+            f"{item.calls} discovery calls; {item.evidence}",
+            kind="heading",
         )
-    for other, count in others[:3]:
-        yield Observation(f"   also read {other}", f"{count} reads", "")
-
-    yield from _reads_stage(prog, command, leaf, path, address)
+        if item.stacks:
+            frames, hits = max(item.stacks, key=lambda pair: pair[1])
+            yield Observation(
+                "      stack",
+                f"{hits} calls on this stack",
+                f"{len(item.stacks)} distinct stacks; showing the most frequent; innermost last",
+            )
+            for number, frame in enumerate(reversed(frames), 1):
+                yield Observation(f"      {number}. {frame}", _stack_where(prog, frame))
+        if item.path and not item.probed:
+            yield Observation(
+                f"      discovered function: {function}",
+                _where_at(prog, item.address)
+                if item.address
+                else _where(prog, item.function),
+                "not probed; read stack only, no measured call to this function",
+            )
+    if not interfaces:
+        yield Observation("   none observed", "", "none of the traced interfaces fired")
+    yield Observation(
+        "4. field references",
+        "static analysis and catalog",
+        "direct references and one level of helpers; not measured field accesses",
+        kind="heading",
+    )
+    for item, analysis in zip(interfaces, analyses):
+        yield from _reads_stage(
+            prog,
+            command,
+            item.function,
+            item.path,
+            item.address,
+            analysis=analysis,
+            heading=f"   {item.path or item.function}",
+        )
 
 
 def _reads_stage(
-    prog: Program, command: str, leaf: str, path: str, address: int = 0
+    prog: Program,
+    command: str,
+    leaf: str,
+    path: str,
+    address: int = 0,
+    analysis: FieldEvidence | None = None,
+    heading: str = "4. field references",
 ) -> Iterator[Observation]:
-    """Stage 4: what the leaf reads, from its source and from the catalog."""
-    from_source = _reads_from_source(prog, leaf, address)
-    published = fields_from(path) if path else []
-    # Spelled as C spells them. A bare "rq" is not obviously a type; the tables
-    # key on the tag, and the tag alone reads as an abbreviation.
+    """Direct references, one level of helpers, and catalog links kept distinct."""
+    if analysis is None:
+        analysis = _field_evidence(prog, Interface(path, leaf, address))
+    references = analysis.direct or []
     structs = sorted(
-        {"struct " + name.split(".")[0] for name, _ in from_source + published}
+        {name.split(".")[0] for name, _ in references + analysis.catalog}
+        | {name.split(".")[0] for name, _type, _helper in analysis.helpers}
     )
-
-    # The provenance goes in the heading, once. Repeating it on every field row
-    # is what pushed the useful half of each row off the screen: eighteen rows
-    # of the same sentence, each one truncated.
-    where = (_where_at(prog, address) if address else _where(prog, leaf)) or "no debuginfo"
-    if structs:
-        sources = "source scan of " + leaf
-        if published:
-            sources += f", then the catalog for {path}"
-        detail = ", ".join(structs)
-    else:
-        # "nothing resolved" states the outcome and hides the reason, and the
-        # reason is the useful half: the scan reports fields reached through the
-        # function's parameters, and a local says nothing about what the caller
-        # passed in.
-        detail = "none found"
-        sources = f"no parameter of {leaf} is dereferenced in its body"
-        if not path:
-            sources += "; no /proc file was read, so the catalog has no list"
+    where = (
+        _where_at(prog, address) if address else _where(prog, leaf)
+    ) or "no debuginfo"
+    reason = (
+        "source scan unavailable: source or unambiguous DWARF missing"
+        if analysis.direct is None
+        else f"parameter references in {leaf}; direct calls followed one level"
+    )
     yield Observation(
-        "4. what it reads", detail, f"{where}; {sources}", kind="heading"
+        heading,
+        ", ".join("struct " + tag for tag in structs)
+        or ("unavailable" if analysis.direct is None else "none found"),
+        f"{where}; {reason}",
+        kind="heading",
     )
-    for name, type_name in from_source:
-        yield Observation(f"   {name}", type_name, "source")
-    if from_source:
+    for name, type_name in references:
+        yield Observation(f"      {name}", type_name, "source")
+    for name, type_name, helper in analysis.helpers:
         yield Observation(
-            "   note",
-            "incomplete",
-            "a field read through a helper is not visible in this function",
+            f"      {name}", type_name, f"source via {helper}; helper not probed"
         )
-    for name, reads_it in published:
-        if any(name == scanned for scanned, _type in from_source):
-            continue
-        yield Observation(f"   {name}", reads_it.split("  #")[0], "catalog")
+    source_names = {name for name, _type in references} | {
+        name for name, _type, _helper in analysis.helpers
+    }
+    for name, catalog_command in analysis.catalog:
+        if name not in source_names:
+            yield Observation(
+                f"      {name}", catalog_command.split("  #")[0], "catalog"
+            )
+    if analysis.unavailable:
+        yield Observation(
+            "      helpers unavailable",
+            ", ".join(analysis.unavailable),
+            "no source or unambiguous DWARF; inline helpers may have no standalone symbol",
+        )
+    if analysis.omitted:
+        yield Observation(
+            "      helper limit",
+            f"{analysis.omitted} additional calls not followed",
+            f"at most {MAX_HELPERS} direct helpers per function, in name order",
+        )
+    if analysis.direct is not None:
+        yield Observation(
+            "      note",
+            "incomplete static analysis",
+            "references include writes and conditional code; only unchanged structure parameters "
+            "passed to direct helpers are followed; no measured field accesses",
+        )
 
 
 TRACE_PS = register_algorithm(

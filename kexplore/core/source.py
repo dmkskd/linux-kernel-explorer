@@ -91,12 +91,14 @@ def kernel_build_id() -> str | None:
 class KernelSource:
     """Locates and caches kernel source for the running build."""
 
-    def __init__(self, release: str | None = None, build_id: str | None = None) -> None:
+    def __init__(self, release: str | None = None, build_id: str | None = None,
+                 *, source_timeout: float = 120) -> None:
         self.release = release or os.uname().release
         self.build_id = build_id or kernel_build_id()
         self._debuginfo: str | None = None
         self._prefix: str | None = None
         self._available: bool | None = None
+        self.source_timeout = source_timeout
 
     # ------------------------------------------------------------- discovery
 
@@ -114,7 +116,11 @@ class KernelSource:
         if path:
             argv.append(path)
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(
+                argv, capture_output=True, text=True,
+                timeout=self.source_timeout if kind == "source" else 120,
+                check=False,
+            )
         except (OSError, subprocess.TimeoutExpired):
             return None
         return result.stdout.strip() or None

@@ -82,7 +82,8 @@ async def main() -> int:
         # Walk the skb this test queued, not whatever happened to be first: the
         # machine's own queued skbs come and go, and one that is freed between
         # the listing and the follow fails here as if the walk were broken.
-        mine = next((r for r in rows if f"[{os.getpid()}]" in r.name), None)
+        fixture = f"[{os.getpid()}] fd {listener.fileno()} "
+        mine = next((r for r in rows if fixture in r.name), None)
         check(mine is not None and mine.obj is not None,
               f"{len(rows)} queued skbs found, including this test's")
         print(f"         {mine.name if mine else rows[0].name if rows else '(none)'}")

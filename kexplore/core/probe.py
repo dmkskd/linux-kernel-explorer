@@ -69,6 +69,7 @@ def run_bpftrace(script: str, duration: int) -> ProbeResult:
             capture_output=True,
             text=True,
             timeout=duration + 25,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return ProbeResult(error=f"bpftrace did not exit within {duration + 25}s")
@@ -135,22 +136,69 @@ def _as_int(value: str) -> int:
         return 0
 
 
+# The caller uses this predicate in every event probe. The map follows thread
+# IDs across fork/clone and removes them at exit, avoiding comm collisions and
+# stale membership when the kernel reuses an ID.
+TRACE_FILTER = "@trace_tasks[tid]"
+
+
+def _tracking_script(root_pid: int) -> str:
+    return f"""
+BEGIN {{ @trace_tasks[(uint64){root_pid}] = 1; }}
+tracepoint:sched:sched_process_fork /@trace_tasks[(uint64)args->parent_pid]/ {{
+    @trace_tasks[(uint64)args->child_pid] = 1;
+}}
+tracepoint:sched:sched_process_exec /@trace_tasks[(uint64)args->old_pid]/ {{
+    delete(@trace_tasks[(uint64)args->old_pid]);
+    @trace_tasks[tid] = 1;
+}}
+tracepoint:sched:sched_process_exit /@trace_tasks[tid]/ {{
+    delete(@trace_tasks[tid]);
+}}
+"""
+
+
+def _start_stopped(path: str) -> subprocess.Popen:
+    """Obtain a PID before attaching probes without executing the command."""
+    child = subprocess.Popen(
+        ["/bin/sh", "-c", 'kill -STOP $$; exec /bin/sh "$1"', "trace-runner", path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            pid, status = os.waitpid(child.pid, os.WUNTRACED | os.WNOHANG)
+            if pid:
+                if os.WIFSTOPPED(status):
+                    return child
+                child.returncode = os.waitstatus_to_exitcode(status)
+                raise OSError("command launcher exited before stopping")
+            time.sleep(0.01)
+        raise OSError("command launcher did not stop within 5s")
+    except BaseException:
+        _kill_group(child)
+        raise
+
+
+def _kill_group(child: subprocess.Popen) -> None:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait(timeout=5)
+
+
 def trace_command(
     script: str, command: str, seconds: int = 5, attach: int = 40
 ) -> ProbeResult:
-    """Trace one run of ``command`` and return the maps bpftrace printed.
+    """Run a command with probes attached to its stopped launcher and descendants.
 
-    ``run_bpftrace`` watches whatever the machine happens to be doing for a few
-    seconds, which is right for rates and latencies. This traces a single run of
-    one program instead, so every event recorded belongs to that run.
-
-    bpftrace's own ``-c`` cannot be used for it. It waits for the command to
-    exit, and several commands in the catalog never do: ``vmstat -n 1`` prints a
-    line a second forever, and the frame would sit on a placeholder until a
-    timeout. So the command is started here instead, once bpftrace says it has
-    attached, in its own process group, and the whole group is killed after
-    ``seconds``. Killing the group and not the child is what stops ``vmstat``
-    surviving as an orphan when the shell around it is killed.
+    Event probes must use TRACE_FILTER. BEGIN seeds membership before attachment;
+    the launcher resumes only after bpftrace reports Attached, not at BEGIN.
+    The process group is cleaned up on success, timeout, and attachment failure.
     """
     if not tool_available("bpftrace"):
         return ProbeResult(error="bpftrace is not installed (dnf install bpftrace)")
@@ -161,62 +209,79 @@ def trace_command(
     ):
         runner.write(f"{command}\n")
         runner.flush()
+        child = None
+        tracer = None
+        watcher = None
+        noise: list[str] = []
+        ready = threading.Event()
         try:
+            child = _start_stopped(runner.name)
+            maps = sorted({"trace_tasks"} | set(re.findall(r"@(trace_\w+)", script)))
+            cleanup = "END { " + " ".join(f"clear(@{name});" for name in maps) + " }"
             tracer = subprocess.Popen(
-                ["bpftrace", "-o", sink.name, "-e", script],
+                [
+                    "bpftrace",
+                    "-o",
+                    sink.name,
+                    "-e",
+                    _tracking_script(child.pid) + script + cleanup,
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
             )
+
+            def watch() -> None:
+                for line in tracer.stderr:
+                    noise.append(line)
+                    if "Attached" in line:
+                        ready.set()
+
+            watcher = threading.Thread(target=watch, daemon=True)
+            watcher.start()
+            deadline = time.monotonic() + attach
+            while not ready.is_set() and tracer.poll() is None:
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(0.05)
+            if not ready.is_set() or tracer.poll() is not None:
+                detail = [line.strip() for line in noise if line.strip()]
+                return ProbeResult(
+                    error=next(
+                        (line for line in detail if "ERROR:" in line),
+                        detail[-1] if detail else "bpftrace did not attach",
+                    ),
+                    raw="".join(noise),
+                )
+            child.send_signal(signal.SIGCONT)
+            stopped = _wait_briefly(child, seconds)
         except OSError as exc:
-            return ProbeResult(error=f"could not run bpftrace: {exc}")
-
-        noise: list[str] = []
-        ready = threading.Event()
-
-        def watch() -> None:
-            # Drains the pipe as well as watching it: a full stderr would stop
-            # bpftrace mid-trace.
-            for line in tracer.stderr:  # type: ignore[union-attr]
-                noise.append(line)
-                if "Attached" in line:
-                    ready.set()
-
-        threading.Thread(target=watch, daemon=True).start()
-
-        deadline = time.monotonic() + attach
-        while not ready.is_set() and tracer.poll() is None:
-            if time.monotonic() > deadline:
-                break
-            time.sleep(0.05)
-
-        if not ready.is_set():
-            tracer.kill()
-            tracer.wait(timeout=5)
-            detail = [line.strip() for line in noise if line.strip()]
-            return ProbeResult(
-                error=detail[-1] if detail else "bpftrace did not attach",
-                raw="".join(noise),
-            )
-
-        stopped = _run_briefly(runner.name, seconds)
-        tracer.send_signal(signal.SIGINT)
-        try:
-            tracer.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            tracer.kill()
-            tracer.wait(timeout=5)
+            return ProbeResult(error=f"could not trace command: {exc}")
+        finally:
+            if child is not None:
+                _kill_group(child)
+            if tracer is not None:
+                if tracer.poll() is None:
+                    tracer.send_signal(signal.SIGINT)
+                try:
+                    tracer.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    tracer.kill()
+                    tracer.wait(timeout=5)
+                if watcher is not None:
+                    watcher.join(timeout=2)
+                if tracer.stderr is not None:
+                    tracer.stderr.close()
 
         output = Path(sink.name).read_text(errors="replace")
-
     if "@" not in output:
         detail = [line.strip() for line in noise if line.strip()]
-        hint = detail[-1] if detail else f"{command} triggered none of the probes"
-        return ProbeResult(error=hint, raw="".join(noise))
-
-    return ProbeResult(
-        sections=parse_bpftrace(output), raw=output, stopped=stopped
-    )
+        return ProbeResult(
+            error=detail[-1] if detail else "no events recorded",
+            raw="".join(noise),
+            stopped=stopped,
+        )
+    return ProbeResult(sections=parse_bpftrace(output), raw=output, stopped=stopped)
 
 
 def _run_briefly(path: str, seconds: int) -> bool:
@@ -233,52 +298,56 @@ def _run_briefly(path: str, seconds: int) -> bool:
         start_new_session=True,
     )
     try:
+        return _wait_briefly(child, seconds)
+    finally:
+        _kill_group(child)
+
+
+def _wait_briefly(child: subprocess.Popen, seconds: int) -> bool:
+    try:
         child.wait(timeout=seconds)
         return False
     except subprocess.TimeoutExpired:
-        for sig in (signal.SIGINT, signal.SIGKILL):
-            try:
-                os.killpg(os.getpgid(child.pid), sig)
-            except (ProcessLookupError, PermissionError):
-                break
-            try:
-                child.wait(timeout=2)
-                break
-            except subprocess.TimeoutExpired:
-                continue
+        try:
+            os.killpg(child.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
         return True
 
 
-def parse_stacks(text: str) -> dict[str, list[tuple[list[str], int]]]:
-    """Pull bpftrace's multi-line stack maps out of raw output.
-
-    A stack key spans several lines::
-
-        @where[
-                do_task_stat+0
-                proc_single_show+100
-        ]: 157
-
-    ``parse_bpftrace`` reads one line per row and cannot hold a key like that,
-    so stacks are parsed separately rather than by making the row parser
-    stateful for the one case that needs it. Frames keep their ``+offset``
-    suffix: it is what distinguishes a call site from the function's entry.
-    """
-    stacks: dict[str, list[tuple[list[str], int]]] = {}
+def parse_keyed_stacks(text: str) -> dict[str, list[tuple[str, list[str], int]]]:
+    """Parse stack maps, retaining any path or interface key before the stack."""
+    stacks: dict[str, list[tuple[str, list[str], int]]] = {}
     name = ""
+    key = ""
     frames: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
         if not name:
-            if stripped.startswith("@") and stripped.endswith("["):
-                name = stripped[1:-1]
+            header = re.match(r"^@(\w+)\[(.*)$", stripped)
+            if header and "]:" not in stripped:
+                name, key = header.groups()
+                key = key.rstrip(", ")
                 frames = []
             continue
         if stripped.startswith("]:"):
-            count = _as_int(stripped[2:].strip())
-            stacks.setdefault(name, []).append((frames, count))
+            stacks.setdefault(name, []).append(
+                (key, frames, _as_int(stripped[2:].strip()))
+            )
             name = ""
-            continue
-        if stripped:
+        elif stripped:
             frames.append(stripped)
     return stacks
+
+
+def parse_stacks(text: str) -> dict[str, list[tuple[list[str], int]]]:
+    """Parse maps with only a stack key, preserving instruction offsets."""
+    return {
+        name: [(frames, count) for key, frames, count in rows if not key]
+        for name, rows in parse_keyed_stacks(text).items()
+        if any(not key for key, _frames, _count in rows)
+    }
