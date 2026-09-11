@@ -16,8 +16,8 @@ seconds.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Callable
 
 from drgn import Object, Program, TypeKind
 
@@ -209,6 +209,28 @@ def _link_row(link: Link, obj: Object, userspace: bool) -> Row:
     )
 
 
+def _observation_row(observation) -> Row:
+    """An ``operations`` Observation as a Row.
+
+    Both the analyses and the command trace report through Observation, so both
+    turn into rows the same way. An observation that carries no cells, expansion
+    or object still fills the three columns, which is why the trace can share
+    this without naming the fields it never sets.
+    """
+    return Row(
+        name=observation.label,
+        obj=observation.obj,
+        type_name=observation.value,
+        value=observation.why,
+        followable=observation.obj is not None or observation.expand is not None,
+        kind="derived" if observation.kind != "input" else "field",
+        doc=observation.doc_for or observation.why,
+        cells=observation.cells,
+        expand=observation.expand,
+        expand_columns=observation.expand_columns,
+    )
+
+
 def _derived_row(derived: Derived, obj: Object) -> Row:
     """A computed value: read-only, shown above the real fields."""
     return Row(
@@ -310,21 +332,7 @@ def algorithm_frame(ctx: Context, algorithm: Algorithm) -> Frame:
     def make_rows() -> list[Row]:
         # The rule belongs above the table, not in a row: it applies to all of
         # them and would otherwise be repeated or truncated.
-        return [
-            Row(
-                name=observation.label,
-                obj=observation.obj,
-                type_name=observation.value,
-                value=observation.why,
-                followable=observation.obj is not None or observation.expand is not None,
-                kind="derived" if observation.kind != "input" else "field",
-                doc=observation.doc_for or observation.why,
-                cells=observation.cells,
-                expand=observation.expand,
-                expand_columns=observation.expand_columns,
-            )
-            for observation in algorithm.run(ctx.prog)
-        ]
+        return [_observation_row(o) for o in algorithm.run(ctx.prog)]
 
     return Frame(algorithm.label, make_rows, doc=algorithm.rule, columns=algorithm.columns)
 
@@ -579,24 +587,21 @@ def command_trace_frame(
 
     def make_rows() -> list[Row]:
         return [
-            Row(
-                name=observation.label,
-                obj=None,
-                type_name=observation.value,
-                value=observation.why,
-                followable=False,
-                kind="derived" if observation.kind != "input" else "field",
-                doc=observation.doc_for or observation.why,
-            )
-            for observation in command_trace(ctx.prog, command, served, origin, selected_field)
+            _observation_row(o)
+            for o in command_trace(ctx.prog, command, served, origin, selected_field)
         ]
 
-    return Frame(f"trace: {command}", make_rows, doc=_trace_doc(command, served),
+    return Frame(f"trace: {command}", make_rows, doc=_trace_doc(command),
                  columns=COMMAND_TRACE_COLUMNS)
 
 
-def _trace_doc(command: str, served) -> str:
-    """Every observed interface is retained; a named file is only a candidate."""
+def _trace_doc(command: str) -> str:
+    """The doc line for a trace frame: the command, and what the rows below are.
+
+    Takes no ``served`` file. Naming one up here would promise that the trace
+    confirmed it, and a candidate from procfs is only a guess until the run
+    says which file was actually read.
+    """
     return f"{command}  ->  observed kernel interfaces and field references"
 
 
@@ -606,7 +611,7 @@ def command_trace_plan(
     """Deferred: the command runs under bpftrace, which takes seconds."""
     return Plan(
         f"trace: {command}",
-        doc=_trace_doc(command, served),
+        doc=_trace_doc(command),
         columns=COMMAND_TRACE_COLUMNS,
         build=lambda: command_trace_frame(ctx, command, served, origin, selected_field),
         activity=f"running {command} under bpftrace…",

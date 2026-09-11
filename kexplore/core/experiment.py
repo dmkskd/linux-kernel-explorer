@@ -19,6 +19,7 @@ work, and those are the ones worth counting for kernel behaviour anyway.
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import time
@@ -30,11 +31,16 @@ from pathlib import Path
 class Running:
     """A helper process that is alive and holding kernel state in place."""
 
-    process: subprocess.Popen
+    # None when the helper could not be started at all; ``error`` says why.
+    # Every other field still reads normally, so a caller reports the failure
+    # the same way it reports one the helper announced itself.
+    process: subprocess.Popen | None
     lines: list[str] = field(default_factory=list)
     error: str = ""
 
     def stop(self) -> None:
+        if self.process is None:
+            return
         if self.process.poll() is None:
             try:
                 # The helper kills its children on SIGTERM; killing the group
@@ -83,17 +89,33 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
             start_new_session=True,
         )
     except OSError as exc:
-        return Running(process=None, error=f"could not start {binary}: {exc}")  # type: ignore[arg-type]
+        return Running(process=None, error=f"could not start {binary}: {exc}")
 
     running = Running(process=process)
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        line = process.stdout.readline() if process.stdout else ""
-        if not line:
-            if process.poll() is not None:
-                running.error = "helper exited before it was ready"
-                return running
+    # readline() blocks, so the deadline has to be enforced from outside the
+    # read rather than between reads: a helper that starts, prints nothing and
+    # never exits would otherwise hold this call open forever, and it is called
+    # from a UI worker thread that has already put "running the experiment…" on
+    # screen. select() gives the read a bounded wait.
+    while process.stdout is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if not select.select([process.stdout], [], [], remaining)[0]:
             continue
+        line = process.stdout.readline()
+        if not line:
+            # select said readable and the read came back empty, so this is
+            # EOF, not a short read. Either way the helper can no longer say it
+            # is ready; poll only decides which of the two to report.
+            running.error = (
+                "helper exited before it was ready"
+                if process.poll() is not None
+                else "helper closed its output before it was ready"
+            )
+            running.stop()
+            return running
         running.lines.append(line.rstrip())
         if ready in line:
             return running

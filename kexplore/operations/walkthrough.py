@@ -15,8 +15,8 @@ the source.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Callable, Iterator
 
 from drgn import Object, Program
 

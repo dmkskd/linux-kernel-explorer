@@ -6,9 +6,9 @@ import asyncio
 import sys
 
 import drgn
+from harness import settle
 from textual.widgets import DataTable, Tree
 
-from harness import settle
 from kexplore.catalog.registry import Measurement
 from kexplore.tui.app import Explorer
 

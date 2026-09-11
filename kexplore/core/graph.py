@@ -15,8 +15,9 @@ these pictures stop being readable.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 # A box is three lines: border, content, border. The type and the identity
 # share the content line -- stacking them doubled the height of every picture

@@ -29,8 +29,8 @@ from drgn.helpers.linux.list import hlist_for_each_entry
 from drgn.helpers.linux.net import SOCKET_I, sk_nulls_for_each
 
 from ..core import ctypes as ct
-from .registry import Entry, Subsystem, register
 from .format import task_comm
+from .registry import Entry, Subsystem, register
 from .walk import socket_files
 
 # AF_UNIX bucket count (UNIX_HASH_SIZE); the table has no mask field to read.

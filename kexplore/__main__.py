@@ -170,11 +170,14 @@ def main() -> int:
 
     from .tui.app import Explorer
 
-    Explorer(prog, source).run()
+    # source is None when the probe found nothing fetchable for this build, and
+    # the line above has just said the 's' key is disabled. Pass that through,
+    # or the key stays on the footer and contradicts it.
+    Explorer(prog, source, source_available=source is not None).run()
     return 0
 
 
-def _probe_source(timeout: float = 5.0) -> "KernelSource | None":
+def _probe_source(timeout: float = 5.0) -> KernelSource | None:
     """The KernelSource if source is fetchable for this build, else None.
 
     The probe shells out to debuginfod-find; a hung or slow server gets

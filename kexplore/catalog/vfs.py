@@ -7,8 +7,8 @@ from drgn.helpers.linux.fs import for_each_mount, mount_dst, mount_fstype
 from drgn.helpers.linux.list import list_for_each_entry
 from drgn.helpers.linux.pid import find_task
 
-from .registry import Entry, Subsystem, register
 from .format import as_text, task_comm
+from .registry import Entry, Subsystem, register
 from .walk import files_of, open_files, path_of
 
 

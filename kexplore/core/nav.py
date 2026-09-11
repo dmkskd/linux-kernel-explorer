@@ -13,8 +13,8 @@ rather than reaching into drgn itself.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Iterator
 
 import drgn
 from drgn import Object, TypeKind
@@ -66,7 +66,7 @@ class Row:
     note: str = ""
     kind: str = "field"
     doc: str = ""
-    expand: Callable[[], list["Row"]] | None = None
+    expand: Callable[[], list[Row]] | None = None
     # Views that are a matrix rather than field/type/value supply their own
     # cells; when set these replace the three default columns.
     cells: tuple[str, ...] | None = None
@@ -114,7 +114,7 @@ class Row:
             return "→"
         return "▸" if self.followable else " "
 
-    def children(self) -> list["Row"]:
+    def children(self) -> list[Row]:
         """The rows one level down, for opening this row without leaving the frame.
 
         A link brings its own expansion, because reaching the other end may

@@ -12,8 +12,8 @@ a row shows what one flag combination buys, and what it costs.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from drgn import Program
 
@@ -211,7 +211,6 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
 
         for pid, name in children:
             task = find_task(prog, pid)
-            mine = {f: task.member_(f).value_() for f in FIELDS}
             cells = [name]
             # What userspace calls a thread is exactly this: same thread group.
             cells.append(

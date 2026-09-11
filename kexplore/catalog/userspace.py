@@ -11,6 +11,7 @@ worth stating rather than leaving blank: it marks what only a debugger reaches.
 from __future__ import annotations
 
 import re
+import shlex
 
 # Keyed by (subsystem key, entry key).
 ENTRY_COMMANDS: dict[tuple[str, str], str] = {
@@ -256,9 +257,17 @@ _PLACEHOLDER = re.compile(r"<\w+>")
 
 
 def fill(command: str, found: dict[str, str]) -> str:
-    """Substitute what the struct knows, and say why where it knows nothing."""
+    """Substitute what the struct knows, and say why where it knows nothing.
+
+    Values are quoted before they go in. Most are pids and fds, which are
+    digits and come back from shlex.quote unchanged, so the command reads the
+    same as it always did. ``<name>`` is the exception: an interface name is a
+    string read out of kernel memory, and the "t" key hands the filled-in
+    command to /bin/sh as root. Quoting keeps a name with a shell character in
+    it an argument rather than the start of a second command.
+    """
     for placeholder, value in found.items():
-        command = command.replace(placeholder, value)
+        command = command.replace(placeholder, shlex.quote(value))
     left = _PLACEHOLDER.search(command)
     if left:
         return UNFILLED.get(left.group(), f"{left.group()} is not known here")

@@ -14,9 +14,8 @@ import socket
 import sys
 
 import drgn
-from textual.widgets import DataTable, Tree
-
 from harness import settle
+from textual.widgets import DataTable, Tree
 
 from kexplore.catalog.registry import Entry
 from kexplore.tui.app import Explorer

@@ -8,7 +8,8 @@ fault must never take down the explorer, so reads are wrapped and rendered as
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import drgn
 from drgn import Object, Type, TypeKind

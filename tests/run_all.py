@@ -76,8 +76,28 @@ def _inherited() -> dict[str, str]:
     }
 
 
+def unlisted() -> list[str]:
+    """Test files on disk that neither list names.
+
+    The two lists are written out rather than discovered, because which tests
+    need a kernel is not visible from a filename and the order matters. The
+    cost of writing them out is that a new file runs only if someone remembers
+    to add it, so say so here instead of passing and having proved nothing.
+    """
+    known = set(HOST) | set(KERNEL)
+    return sorted(
+        path.name
+        for path in TESTS.glob("test_*.py")
+        if path.name not in known
+    )
+
+
 def main() -> int:
     host_only = "--host" in sys.argv
+    missing = unlisted()
+    if missing:
+        print("WARNING: not in HOST or KERNEL, so not run: "
+              + "  ".join(missing), flush=True)
     names = list(HOST)
     if not host_only:
         if have_kernel():
@@ -93,6 +113,9 @@ def main() -> int:
     print(f"{len(names) - len(failed)}/{len(names)} passed")
     for name in failed:
         print(f"  FAILED {name}")
+    if missing:
+        print(f"  {len(missing)} test file(s) on disk were not run: "
+              + "  ".join(missing))
     return 1 if failed else 0
 
 

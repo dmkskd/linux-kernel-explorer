@@ -25,8 +25,8 @@ from drgn.helpers.linux.pid import find_task, for_each_task
 from drgn.helpers.linux.sched import task_state_to_char
 
 from ..core import ctypes as ct
-from .registry import Entry, Subsystem, register
 from .format import task_comm
+from .registry import Entry, Subsystem, register
 
 # include/linux/sched.h
 EXIT_ZOMBIE = 0x20

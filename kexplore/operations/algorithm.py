@@ -10,8 +10,8 @@ rather than asserted, so it can be checked against what the kernel actually did.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Callable, Iterator
 
 from drgn import Object, Program
 
@@ -32,7 +32,7 @@ class Observation:
     cells: tuple[str, ...] | None = None
     # A drill-down for this row, and the columns it wants. Used when a summary
     # cell ("shared") hides the evidence behind it (the two pointers).
-    expand: "Callable[[], list]" | None = None
+    expand: Callable[[], list] | None = None
     expand_columns: tuple[str, ...] | None = None
     # "heading", "input", "result" -- affects presentation only.
     kind: str = "input"
@@ -45,7 +45,7 @@ class Algorithm:
     subsystem: str
     rule: str
     doc: str
-    analyse: Callable[[Program], "Iterator[Observation]"] = field(repr=False)
+    analyse: Callable[[Program], Iterator[Observation]] = field(repr=False)
     # Each algorithm names its own columns; a comparison is not a list of inputs.
     columns: tuple[str, ...] = ("input", "value", "why")
     # Experiments run a program and take seconds; the UI runs them in a worker

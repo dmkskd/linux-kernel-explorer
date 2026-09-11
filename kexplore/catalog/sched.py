@@ -7,8 +7,8 @@ from drgn.helpers.linux.cpumask import for_each_online_cpu
 from drgn.helpers.linux.percpu import per_cpu
 from drgn.helpers.linux.sched import cpu_curr
 
-from .registry import Entry, Subsystem, register
 from .format import task_comm
+from .registry import Entry, Subsystem, register
 
 
 def runqueues(prog: Program):

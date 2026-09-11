@@ -15,11 +15,10 @@ side table keyed by its label, so renaming a label cannot silently drop them.
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Callable, Iterator
 
 from drgn import Object, TypeKind, cast
-
 from drgn.helpers.linux.fs import mount_dst
 from drgn.helpers.linux.list import hlist_for_each_entry, list_for_each_entry
 from drgn.helpers.linux.mm import (
@@ -34,15 +33,15 @@ from drgn.helpers.linux.mm import (
 )
 from drgn.helpers.linux.mmzone import for_each_online_pgdat
 from drgn.helpers.linux.net import SOCKET_I, netdev_name, skb_shinfo
+from drgn.helpers.linux.pid import for_each_task_in_group
 from drgn.helpers.linux.rbtree import rbtree_inorder_for_each_entry
+from drgn.helpers.linux.sched import task_rq, task_state_to_char
 from drgn.helpers.linux.slab import (
     slab_cache_for_each_allocated_object,
     slab_cache_is_merged,
     slab_cache_objects_per_slab,
     slab_cache_order,
 )
-from drgn.helpers.linux.pid import for_each_task_in_group
-from drgn.helpers.linux.sched import task_rq, task_state_to_char
 
 from ..core import ctypes as ct
 from .format import as_text, task_comm
@@ -923,7 +922,7 @@ def derived_for(obj: Object) -> list[Derived]:
     return DERIVED.get(ct.tag_of(obj.type_) or "", [])
 
 
-def userspace_for(link: "Link", obj: Object) -> str:
+def userspace_for(link: Link, obj: Object) -> str:
     """The link's command, with whatever this struct can fill in filled in.
 
     The rules live in ``userspace.placeholders`` and are shared with the field

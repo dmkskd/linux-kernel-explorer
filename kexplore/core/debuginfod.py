@@ -26,8 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable, Iterator
 
 # A port nothing listens on. Reaching the "server" fails immediately with
 # ECONNREFUSED, but the cache is still searched first. See the module docstring.

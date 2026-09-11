@@ -33,8 +33,8 @@ from drgn.helpers.linux.net import SOCKET_I, for_each_netdev, netdev_name
 from drgn.helpers.linux.percpu import per_cpu
 
 from ..core import ctypes as ct
-from .registry import Entry, Subsystem, register
 from .format import as_text, task_comm
+from .registry import Entry, Subsystem, register
 from .walk import socket_files
 
 MAX_SKBS = 64

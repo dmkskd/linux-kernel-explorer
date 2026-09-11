@@ -20,7 +20,8 @@ from drgn.helpers.linux.module import for_each_module
 from drgn.helpers.linux.sched import loadavg
 from drgn.helpers.linux.timekeeping import uptime_pretty
 
-from ..core import arch, ctypes as ct
+from ..core import arch
+from ..core import ctypes as ct
 from .registry import Fact, FactEntry, Subsystem, register
 
 # kernel/sched/core.c -- not emitted as a DWARF enum, so spelled out here.

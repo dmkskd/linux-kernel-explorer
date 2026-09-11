@@ -16,13 +16,13 @@ the tool does not.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from drgn import Object, TypeKind
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.color import Color
 from textual.binding import Binding
+from textual.color import Color
 from textual.containers import ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Footer, Static

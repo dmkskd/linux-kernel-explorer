@@ -8,7 +8,6 @@ architecture's own fallback when nothing readable holds it.
 
 from __future__ import annotations
 
-import drgn
 from drgn import Program
 
 # What L1_CACHE_BYTES is on every architecture Linux supports that we might

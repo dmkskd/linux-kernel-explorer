@@ -24,8 +24,8 @@ from drgn.helpers.linux.list import list_for_each_entry
 from drgn.helpers.linux.pci import for_each_pci_dev, pci_name
 
 from ..core import ctypes as ct
-from .registry import Entry, Subsystem, register
 from .format import as_text
+from .registry import Entry, Subsystem, register
 
 
 def kset_kobjects(kset):

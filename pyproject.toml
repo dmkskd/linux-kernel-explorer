@@ -1,0 +1,40 @@
+# Configuration only. kexplore is not pip-installable and has no [project]
+# table on purpose: drgn, textual and the C tools (pahole, addr2line, nm,
+# bpftrace) come from the distribution packages that setup.sh installs inside
+# the VM or container, because drgn has to match the kernel it attaches to.
+# setup.sh is the dependency contract; this file configures the linter.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Beyond the defaults: bugbear, import order, pyupgrade, and the simplify and
+# ruff sets. Deliberately not the whole of PL or PERF -- the rules below that
+# fire on this codebase fire on decisions it made on purpose, and a linter
+# nobody can run clean is a linter nobody runs.
+# BLE001 and S112 are here because the tree already carries "noqa" comments
+# for both: the author expected those rules on, and without them ruff reports
+# 29 of the existing suppressions as unused instead of checking anything.
+# The rest of the S set is not selected: this tool runs gcc, pahole and
+# bpftrace by name from PATH on purpose, and S607 objects to all of it.
+select = ["E4", "E7", "E9", "F", "B", "I", "UP", "SIM", "RUF", "BLE", "S112"]
+ignore = [
+    # ct.safe(lambda: obj.member_(name), default) is the house idiom for a read
+    # that may fault, and it runs its lambda immediately, inside the same
+    # iteration. Every B023 in this tree is that call and every one is a false
+    # positive; leaving the rule on hides the findings that are not.
+    "B023",
+    # The box markers, the arrows and the ellipsis are the UI, not typos.
+    "RUF001", "RUF002", "RUF003",
+    # The four sites this fires on are process teardown, where the try/except
+    # is next to other kill and wait calls that do handle their exception.
+    # contextlib.suppress would read as a different kind of step than its
+    # neighbours for no gain.
+    "SIM105",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# BINDINGS and CSS_PATH are how Textual declares a widget, and it wants real
+# lists on the class. ClassVar on them would satisfy the rule and say nothing.
+"kexplore/tui/*.py" = ["RUF012"]

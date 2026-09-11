@@ -10,8 +10,8 @@ from drgn.helpers.linux.net import (
     netdev_name,
 )
 
-from .registry import Entry, Subsystem, register
 from .format import as_text
+from .registry import Entry, Subsystem, register
 
 
 def namespaces(prog: Program):

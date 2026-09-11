@@ -10,15 +10,14 @@ import asyncio
 import sys
 
 import drgn
+from harness import settle
 from rich.text import Text
 from textual.widgets import DataTable, Input, Tabs, Tree
 
-from harness import settle
-from kexplore.catalog.registry import Entry
+from kexplore.catalog.registry import Entry, Measurement
+from kexplore.core.nav import Row
 from kexplore.operations.algorithm import Algorithm
 from kexplore.operations.walkthrough import Walkthrough
-from kexplore.catalog.registry import Measurement
-from kexplore.core.nav import Row
 from kexplore.tui.app import (
     MAX_CELL,
     PREVIEW_DELAY,

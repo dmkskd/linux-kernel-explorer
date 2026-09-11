@@ -451,20 +451,25 @@ class Explorer(App):
             "Sequences the kernel performs, and analyses of one moment in it.",
             tuple(items),
         )
-        groups: dict[str, object] = {}
-
-        def group(name: str, members) -> object:
-            if name not in groups:
-                groups[name] = tree.root.add(
-                    name,
-                    expand=True,
-                    data=Listing(name, f"Operations belonging to {name}.", members),
-                )
-            return groups[name]
-
+        # Grouped in one pass. The branch for a subsystem has to name every
+        # member when it is created, so collect them before building any of it
+        # rather than rescanning the list once per item.
+        members: dict[str, list] = {}
         for item in items:
-            members = tuple(i for i in items if i.subsystem == item.subsystem)
-            group(item.subsystem, members).add_leaf(item.label, data=item)
+            members.setdefault(item.subsystem, []).append(item)
+
+        for subsystem_key, group_items in members.items():
+            branch = tree.root.add(
+                subsystem_key,
+                expand=True,
+                data=Listing(
+                    subsystem_key,
+                    f"Operations belonging to {subsystem_key}.",
+                    tuple(group_items),
+                ),
+            )
+            for item in group_items:
+                branch.add_leaf(item.label, data=item)
 
     def _build_structure_tree(self, tree: Tree) -> None:
         all_subsystems = subsystems()

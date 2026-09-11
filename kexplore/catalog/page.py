@@ -14,11 +14,11 @@ from __future__ import annotations
 
 from drgn import Program
 from drgn.helpers.linux.mm import (
-    for_each_vma,
     follow_page,
+    for_each_valid_pfn_and_page,
+    for_each_vma,
     page_to_pfn,
     pfn_to_page,
-    for_each_valid_pfn_and_page,
 )
 from drgn.helpers.linux.pid import find_task
 

@@ -18,8 +18,8 @@ because helper availability varies with kernel version and config -- a missing
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
-from typing import Callable, Iterator
 
 from drgn import Object, Program
 
@@ -93,7 +93,7 @@ class FactEntry:
     key: str
     label: str
     doc: str
-    facts: Callable[[Program], "Iterator[Fact]"]
+    facts: Callable[[Program], Iterator[Fact]]
     group: str = ""
 
     def resolve(self, prog: Program) -> list[Fact]:
@@ -188,7 +188,10 @@ def subsystems() -> list[Subsystem]:
     to them. Importing is the side effect, and Python's module cache makes it
     happen exactly once however often this is called.
     """
-    from . import (  # noqa: F401,E401
+    # I001 is off for this block on purpose: this is the order the subsystems
+    # appear in the sidebar, and sorting it alphabetically would open the tool
+    # on "device" instead of "system".
+    from . import (  # noqa: F401,I001
         system, process, sched, mm, page, vfs, socket, net, skb, slab, device,
         measure,
     )
