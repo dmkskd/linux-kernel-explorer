@@ -5,6 +5,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core.source import KernelSource
 
 
 def main() -> int:
@@ -173,31 +177,33 @@ def main() -> int:
     # source is None when the probe found nothing fetchable for this build, and
     # the line above has just said the 's' key is disabled. Pass that through,
     # or the key stays on the footer and contradicts it.
-    Explorer(prog, source, source_available=source is not None).run()
+    Explorer(
+        prog,
+        source,
+        source_available=source is not None,
+        live=not bool(args.core),
+    ).run()
     return 0
 
 
 def _probe_source(timeout: float = 5.0) -> KernelSource | None:
     """The KernelSource if source is fetchable for this build, else None.
 
-    The probe shells out to debuginfod-find; a hung or slow server gets
-    ``timeout`` seconds, then the answer is "unavailable". An abandoned
-    probe thread is daemonized and dies with the process.
+    The probe shells out to debuginfod-find; all of its candidate lookups share
+    one deadline, so a hung or slow server gets ``timeout`` seconds in total.
     """
-    import threading
+    import time
 
     from .core.source import KernelSource
 
-    candidate = KernelSource()
-    result: list[bool] = []
-
-    def probe() -> None:
-        result.append(candidate.available)
-
-    thread = threading.Thread(target=probe, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    return candidate if result and result[0] else None
+    candidate = KernelSource(source_timeout=timeout, deadline=time.monotonic() + timeout)
+    if not candidate.available:
+        return None
+    # The deadline belongs only to startup discovery. Once accepted, this
+    # instance serves interactive source requests with their normal timeout.
+    candidate.deadline = None
+    candidate.source_timeout = 120
+    return candidate
 
 
 def _has_debug_info(prog) -> bool:

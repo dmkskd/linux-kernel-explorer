@@ -326,10 +326,9 @@ def _mapping_vmas(page: Object) -> Iterator[Object]:
             yield avc.vma
         return
     space = cast("struct address_space *", page.mapping)
-    for vma in rbtree_inorder_for_each_entry(
+    yield from rbtree_inorder_for_each_entry(
         "struct vm_area_struct", space.i_mmap.rb_root.address_of_(), "shared.rb"
-    ):
-        yield vma
+    )
 
 
 def _page_mappers(page: Object, limit: int = 64, scan: int = 4096):
@@ -475,10 +474,10 @@ def _fs_type_supers(fs_type: Object):
 
 LINKS: dict[str, list[Link]] = {
     "task_struct": [
-        Link("threads", "Every task sharing this thread group.", _threads,
+        Link("threads", "Tasks sharing task->signal and task->tgid.", _threads,
              origin="task->signal->thread_head (thread_node)",
              userspace="ls /proc/<pid>/task, or ps -L -p <pid>"),
-        Link("mm (address space)", "The mm_struct this task's memory lives in.",
+        Link("mm (address space)", "Userspace address space in task->mm.",
              lambda t: t.mm,
              origin="task->mm",
              userspace="grep VmRSS /proc/<pid>/status"),
@@ -496,7 +495,7 @@ LINKS: dict[str, list[Link]] = {
         Link("open files", "fd table: struct file per descriptor.", _open_files,
              origin="walks task->files->fdt->fd[]",
              userspace="ls -l /proc/<pid>/fd, or lsof -p <pid>"),
-        Link("sockets", "Just the fds that are sockets, as struct socket.", _sockets,
+        Link("sockets", "File descriptors whose file->f_op is socket_file_ops.", _sockets,
              origin="task->files->fdt->fd[], f_op==socket_file_ops",
              userspace="ss -tanp | grep pid=<pid>"),
         Link("children", "Tasks this one forked, linked by sibling.", _children,
@@ -542,10 +541,10 @@ LINKS: dict[str, list[Link]] = {
              userspace="ps -eo pid,psr,comm --sort=psr"),
         Link("idle task", "This CPU's swapper task.", lambda r: r.idle,
              origin="rq->idle"),
-        Link("cfs_rq (embedded root)", "rq embeds one cfs_rq directly; this is it.",
+        Link("cfs_rq (embedded root)", "Root CFS runqueue embedded in struct rq.",
              lambda r: r.cfs.address_of_(),
              origin="&rq->cfs (member, not a pointer)"),
-        Link("all cfs_rqs on this CPU", "One per cgroup, chained on leaf_cfs_rq_list.",
+        Link("all cfs_rqs on this CPU", "CFS runqueues on rq->leaf_cfs_rq_list.",
              _leaf_cfs_rqs,
              origin="walks rq->leaf_cfs_rq_list"),
         Link("rt_rq", "The realtime-class runqueue.", lambda r: r.rt.address_of_(),
@@ -566,15 +565,14 @@ LINKS: dict[str, list[Link]] = {
     "sched_entity": [
         Link(
             "cfs_rq it sits on",
-            "The queue this entity is queued in.",
+            "CFS runqueue containing this scheduling entity.",
             lambda se: se.cfs_rq,
             applies=lambda se: se.cfs_rq.value_() != 0,
             origin="se->cfs_rq",
         ),
         Link(
             "my_q (queue it owns)",
-            "Group entities own a child cfs_rq; task entities do not, and this "
-            "is how pick_next_entity descends the hierarchy.",
+            "Child cfs_rq for a group entity; NULL for a task entity.",
             lambda se: se.my_q,
             applies=lambda se: se.my_q.value_() != 0,
             origin="se->my_q (NULL for task entities)",
@@ -595,7 +593,7 @@ LINKS: dict[str, list[Link]] = {
              origin="signal->curr_target"),
     ],
     "mm_struct": [
-        Link("VMAs", "Every mapped region in this address space.",
+        Link("VMAs", "vm_area_struct instances in the address space's maple tree.",
              lambda m: ((f"{v.vm_start.value_():#x}", v) for v in for_each_vma(m)),
              origin="walks the VMA tree",
              userspace="cat /proc/<pid>/maps"),
@@ -611,7 +609,7 @@ LINKS: dict[str, list[Link]] = {
              userspace="awk '{print $6}' /proc/<pid>/maps"),
         Link(
             "resident pages",
-            "Physical pages actually backing this VMA, via page table walk.",
+            "Present struct page mappings found by walking the VMA's page tables.",
             lambda v: _vma_pages(v),
             origin="page table walk (follow_page)",
             userspace="grep Rss /proc/<pid>/smaps",
@@ -622,7 +620,7 @@ LINKS: dict[str, list[Link]] = {
     "kmem_cache": [
         Link(
             "allocated objects",
-            "Live objects in this cache, found by walking its slabs.",
+            "Allocated objects found by walking the cache's slabs.",
             lambda c: (
                 (f"{o.value_():#x}", o)
                 for o in slab_cache_for_each_allocated_object(c, "void *")
@@ -710,7 +708,7 @@ LINKS: dict[str, list[Link]] = {
         ),
         Link(
             "open files",
-            "Every non-NULL entry of fd[], bounded by max_fds.",
+            "Non-NULL fdt->fd[0..max_fds) entries.",
             lambda f: _fdtable_files(f.fdt),
             origin="files->fdt->fd[0..max_fds)",
             userspace="ls -l /proc/<pid>/fd",
@@ -726,18 +724,18 @@ LINKS: dict[str, list[Link]] = {
         ),
     ],
     "socket": [
-        Link("sk (protocol half)", "struct sock: where the protocol state lives.",
+        Link("sk (struct sock)", "Protocol state referenced by socket->sk.",
              lambda s: s.sk,
              origin="socket->sk",
              userspace="ss -tanie"),
         Link("file", "The struct file this socket is exposed through.", lambda s: s.file,
              origin="socket->file",
              userspace="ls -l /proc/<pid>/fd"),
-        Link("ops", "proto_ops: the protocol's VFS-facing operations.", lambda s: s.ops,
+        Link("ops", "Protocol-specific struct proto_ops table.", lambda s: s.ops,
              origin="socket->ops"),
     ],
     "sock": [
-        Link("socket (VFS half)", "Back to struct socket, if this has an fd.",
+        Link("socket (struct socket)", "Associated struct socket; NULL when no file descriptor exists.",
              lambda s: s.sk_socket,
              origin="sk->sk_socket"),
         Link("proto", "struct proto: tcp_prot, udp_prot, unix_stream_proto…",
@@ -785,7 +783,7 @@ LINKS: dict[str, list[Link]] = {
         Link("fs type", "file_system_type describing it.", lambda s: s.s_type,
              origin="sb->s_type",
              userspace="findmnt -o FSTYPE"),
-        Link("mounts", "Every place this filesystem is mounted.", _sb_mounts,
+        Link("mounts", "struct mount instances referencing this super_block.", _sb_mounts,
              applies=lambda s: _has_member(s, "s_mounts"),
              origin="sb->s_mounts",
              userspace="findmnt -o TARGET --source <device>"),
@@ -861,7 +859,7 @@ DERIVED: dict[str, list[Derived]] = {
     "page": [
         Derived("= pfn", "Page frame number: index into the vmemmap array.",
                 lambda p: page_to_pfn(p).value_()),
-        Derived("= physical address", "Where this page actually is in RAM.",
+        Derived("= physical address", "Physical address derived by page_to_phys().",
                 lambda p: hex(page_to_phys(p).value_())),
         Derived("= size", "Page size, accounting for compound pages.",
                 lambda p: page_size(p).value_()),
@@ -894,7 +892,7 @@ DERIVED: dict[str, list[Derived]] = {
                 "kstrdup'd heap for module ones.", lambda c: _name_storage(c)),
         Derived("= object size", "Size of one object, before SLUB padding.",
                 lambda c: c.object_size.value_()),
-        Derived("= slab size", "Size actually consumed per object.",
+        Derived("= slab size", "Per-object allocation size including SLUB metadata and alignment.",
                 lambda c: c.size.value_()),
         Derived("= order", "Page allocator order backing each slab.", slab_cache_order),
         Derived("= objects per slab", "How many objects fit in one slab.",

@@ -37,13 +37,13 @@ register(
             Entry(
                 "running",
                 "currently running",
-                "rq->curr for each online CPU -- what is on-cpu right now.",
+                "rq->curr for each online CPU.",
                 running,
             ),
             Entry(
                 "init_task",
                 "init_task",
-                "The root of the task list; every task links back here.",
+                "Statically allocated task_struct anchoring the global task list.",
                 lambda prog: prog["init_task"],
             ),
         ],

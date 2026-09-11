@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 from drgn import Program
@@ -365,7 +365,7 @@ def _field_evidence(prog: Program, interface) -> FieldEvidence:
 
 def _selected_evidence(selected: str, interfaces, analyses) -> Observation:
     matches = []
-    for interface, analysis in zip(interfaces, analyses):
+    for interface, analysis in zip(interfaces, analyses, strict=True):
         route = interface.path or interface.function
         qualifier = (
             "observed function"
@@ -534,8 +534,13 @@ def command_trace(
     served: ProcFile | None = None,
     origin: str = "",
     selected_field: str = "",
+    progress: Callable[[str], None] | None = None,
 ) -> Iterator[Observation]:
     """Discover every interface, then collect file-serving stacks in one run."""
+    def report(message: str) -> None:
+        if progress is not None:
+            progress(message)
+
     yield Observation(
         "1. command",
         command,
@@ -547,6 +552,7 @@ def command_trace(
         "launcher and descendants",
         "thread IDs tracked across fork, exec, and exit; both sides of pipelines included",
     )
+    report("trace pass 1/2: discovering files and kernel interfaces…")
     first = trace_command(DISCOVER.format(filter=TRACE_FILTER), command)
     if first.error:
         yield Observation("trace failed", first.error, kind="result")
@@ -554,8 +560,13 @@ def command_trace(
     sections = {section.name: section for section in first.sections}
     yield from _opens_stage(command, sections)
     interfaces = _interfaces(prog, sections, first.raw, command, served)
+    report(f"trace pass 1/2 complete: {len(interfaces)} interfaces observed")
     script = _stack_script(prog, interfaces)
-    second = trace_command(script, command) if script else None
+    if script:
+        report("trace pass 2/2: recording serving stacks…")
+        second = trace_command(script, command)
+    else:
+        second = None
     if first.stopped or (second and second.stopped):
         yield Observation(
             "   note",
@@ -578,7 +589,14 @@ def command_trace(
                     item.evidence += "; matched to the current read's dentry"
                 else:
                     item.evidence += "; function calls only, path not correlated"
-    analyses = [_field_evidence(prog, item) for item in interfaces]
+    analyses = []
+    for number, item in enumerate(interfaces, 1):
+        report(
+            f"analysing source evidence {number}/{len(interfaces)}: "
+            f"{item.path or item.function}"
+        )
+        analyses.append(_field_evidence(prog, item))
+    report("building trace results…")
     if selected_field:
         yield _selected_evidence(selected_field, interfaces, analyses)
     yield Observation(
@@ -620,7 +638,7 @@ def command_trace(
         "direct references and one level of helpers; not measured field accesses",
         kind="heading",
     )
-    for item, analysis in zip(interfaces, analyses):
+    for item, analysis in zip(interfaces, analyses, strict=True):
         yield from _reads_stage(
             prog,
             command,
@@ -710,7 +728,7 @@ TRACE_PS = register_algorithm(
             "kernel function that formats a task_struct. Traced under bpftrace: "
             "the files opened, and the stack that served the reads."
         ),
-        doc="One ps -e traced from the command to the struct it reads.",
+        doc="Traces ps -e through procfs handlers to referenced kernel structures.",
         analyse=lambda prog: command_trace(prog, COMMAND),
         columns=("stage", "detail", "evidence"),
         background=True,

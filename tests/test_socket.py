@@ -57,10 +57,10 @@ async def main() -> int:
         app.action_follow()
         await pilot.pause()
         names = [r.name for r in app.stack[-1].rows]
-        check("sk (protocol half)" in names, "struct socket links to its sock")
+        check("sk (struct sock)" in names, "struct socket links to its sock")
         check("ops" in names and "state" in names, "struct socket fields present")
 
-        follow_named(app, table, "sk (protocol half)")
+        follow_named(app, table, "sk (struct sock)")
         await pilot.pause()
         sock_names = [r.name for r in app.stack[-1].rows]
         check("sk_prot" in sock_names or "proto" in sock_names, "landed on struct sock")
@@ -117,7 +117,7 @@ async def main() -> int:
             for _, f in for_each_file(task)
             if f.value_() and f.f_op != prog["socket_file_ops"].address_of_()
         )
-        visible = [l.label for l in links_for(non_socket) if l.visible(non_socket)]
+        visible = [link.label for link in links_for(non_socket) if link.visible(non_socket)]
         check("socket" not in visible, f"non-socket file hides socket link: {visible}")
 
         # Regression: sock_common is mostly anonymous unions, and flattening
@@ -130,7 +130,7 @@ async def main() -> int:
                 continue
             try:
                 expected = drgn.offsetof(common, row.name)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S112
                 continue
             if row.offset != expected:
                 wrong.append(f"{row.name} {row.offset} != {expected}")

@@ -107,8 +107,8 @@ SERVED_BY: dict[str, ProcFile] = {
         path="/sys/class/net/",
         function="sysfs_kf_seq_show",
         tag="net_device",
-        doc="Every sysfs attribute is served by one function, which calls the "
-            "attribute's own show method; the stack says which.",
+        doc="sysfs_kf_seq_show dispatches to the selected attribute's show method; "
+            "the recorded stack identifies that method.",
         prefix=True,
     ),
 }

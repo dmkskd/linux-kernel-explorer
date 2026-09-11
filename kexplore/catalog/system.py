@@ -244,7 +244,7 @@ register(
     Subsystem(
         key="system",
         label="system",
-        doc="What kind of kernel this is, derived from structural evidence.",
+        doc="Kernel release, architecture, scheduler configuration, and memory topology.",
         entries=[
             FactEntry("overview", "overview", "Release, uptime, CPUs, memory, modules.", overview),
             FactEntry(

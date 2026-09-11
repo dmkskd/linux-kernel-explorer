@@ -101,7 +101,7 @@ def main() -> int:
             entries += 1
             if result.collection is None:
                 continue
-            for label, obj in result.collection.items[:ITEMS_PER_ENTRY]:
+            for _label, obj in result.collection.items[:ITEMS_PER_ENTRY]:
                 visit(f"{where}", deref(obj), ctx, failures, depth=1)
         print(f"  crawled {subsystem.label}")
 

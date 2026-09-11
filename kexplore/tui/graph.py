@@ -404,7 +404,7 @@ class GraphScreen(Screen):
 
     def rebuild(self, keep: str | None = None) -> None:
         """Re-resolve the picture. ``keep`` is the selection to restore."""
-        obj, label = self.history[-1]
+        obj, _label = self.history[-1]
         expanded = self.expanded
         self.query_one("#graph-info", Static).update("resolving links…")
 
@@ -558,15 +558,21 @@ class GraphScreen(Screen):
         # Right opens a shut box and then walks into it; left shuts an open one
         # and then walks back out. That is the flow a tree gives you, and it
         # means expanding never needs a second key.
-        if direction == "right" and self._expandable(node):
-            if self.selected not in self.expanded:
-                self.expanded = self.expanded | {self.selected}
-                self.rebuild(keep=self.selected)
-                return
-        if direction == "left" and self.selected in self.expanded:
-            if self.graph.children(self.selected):
-                self._collapse(self.selected)
-                return
+        if (
+            direction == "right"
+            and self._expandable(node)
+            and self.selected not in self.expanded
+        ):
+            self.expanded = self.expanded | {self.selected}
+            self.rebuild(keep=self.selected)
+            return
+        if (
+            direction == "left"
+            and self.selected in self.expanded
+            and self.graph.children(self.selected)
+        ):
+            self._collapse(self.selected)
+            return
 
         if direction in ("up", "down"):
             column = self._column(node.depth)

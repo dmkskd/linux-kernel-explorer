@@ -109,7 +109,7 @@ register(
         label="device",
         doc="The driver model: devices, buses, classes, and driver binding.",
         entries=[
-            Entry("devices", "all devices", "Every registered device (devices_kset).", all_devices),
+            Entry("devices", "all devices", "Registered struct device instances in devices_kset.", all_devices),
             Entry(
                 "bound",
                 "devices with a driver",
@@ -117,7 +117,7 @@ register(
                 bound_devices,
             ),
             Entry("buses", "buses", "Registered bus types, via subsys_private.", buses),
-            Entry("classes", "classes", "Registered classes -- the /sys/class view.", classes),
+            Entry("classes", "classes", "Registered struct class instances backing /sys/class.", classes),
             Entry("pci", "PCI devices", "struct pci_dev, with vendor:device ids.", pci_devices),
             Entry("disks", "block disks", "struct gendisk per disk.", disks),
             Entry("partitions", "partitions", "struct block_device per partition.", partitions),

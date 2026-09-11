@@ -18,12 +18,12 @@ register(
     Subsystem(
         key="slab",
         label="slab",
-        doc="kmem_cache list -- where task_struct, dentry and inode come from.",
+        doc="SLUB kmem_cache metadata, geometry, and per-CPU state.",
         entries=[
             Entry(
                 "caches",
                 "slab caches",
-                "Every kmem_cache: object size, order, per-cpu freelists.",
+                "Entries in slab_caches with object size, order, and per-CPU freelists.",
                 caches,
             ),
         ],

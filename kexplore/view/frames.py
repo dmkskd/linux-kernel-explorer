@@ -120,6 +120,10 @@ class Context:
     prog: Program
     source: KernelSource
     userspace: bool = False
+    # False for a vmcore. Operations which start processes or attach probes
+    # describe the running host and must not be offered for an offline dump.
+    live: bool = True
+    source_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -138,6 +142,7 @@ class Plan:
     build: Callable[[], Frame]
     activity: str = ""
     placeholder: tuple[Row, ...] = ()
+    build_with_progress: Callable[[Callable[[str], None]], Frame] | None = None
 
     @property
     def deferred(self) -> bool:
@@ -147,6 +152,17 @@ class Plan:
         if self.placeholder:
             return list(self.placeholder)
         return [Row(self.activity, None, "", "", False, kind="derived")]
+
+
+def _fixed_rows(make_rows: Callable[[], list[Row]]) -> Callable[[], list[Row]]:
+    """Run an effectful builder once and return a repeatable row snapshot.
+
+    Deferred plans call this in their worker. Later display-only reloads may
+    safely call the returned function without repeating a probe, command, or
+    source lookup.
+    """
+    snapshot = tuple(make_rows())
+    return lambda: list(snapshot)
 
 
 # --------------------------------------------------------------------- rows
@@ -334,7 +350,13 @@ def algorithm_frame(ctx: Context, algorithm: Algorithm) -> Frame:
         # them and would otherwise be repeated or truncated.
         return [_observation_row(o) for o in algorithm.run(ctx.prog)]
 
-    return Frame(algorithm.label, make_rows, doc=algorithm.rule, columns=algorithm.columns)
+    rows = _fixed_rows(make_rows) if algorithm.background else make_rows
+    return Frame(
+        algorithm.label,
+        rows,
+        doc=algorithm.rule,
+        columns=algorithm.columns,
+    )
 
 
 def walkthrough_frame(ctx: Context, walk: Walkthrough) -> Frame:
@@ -342,7 +364,7 @@ def walkthrough_frame(ctx: Context, walk: Walkthrough) -> Frame:
 
     def make_rows() -> list[Row]:
         offset = 0
-        if ct.safe(lambda: ctx.source.available, False):
+        if ctx.source_available and ct.safe(lambda: ctx.source.available, False):
             stext = ct.safe(lambda: ctx.prog.symbol("_stext").address, 0)
             if stext:
                 offset = ctx.source.kaslr_offset(stext)
@@ -371,7 +393,7 @@ def walkthrough_frame(ctx: Context, walk: Walkthrough) -> Frame:
             )
         return rows
 
-    return Frame(walk.label, make_rows, doc=walk.doc, columns=STEP_COLUMNS)
+    return Frame(walk.label, _fixed_rows(make_rows), doc=walk.doc, columns=STEP_COLUMNS)
 
 
 def _step_expander(prog: Program, step: Step) -> Callable[[], list[Row]] | None:
@@ -392,7 +414,7 @@ def measurement_frame(entry: Measurement) -> Frame:
     """
     return Frame(
         entry.label,
-        lambda: _measurement_rows(entry, entry.run()),
+        _fixed_rows(lambda: _measurement_rows(entry, entry.run())),
         doc=entry.doc,
         columns=MEASURE_COLUMNS,
     )
@@ -491,7 +513,9 @@ def source_frame(ctx: Context, path: str, line: int, title: str) -> Frame:
             )
         return rows
 
-    return Frame(f"{path}:{line}", make_rows, doc=title, columns=SOURCE_COLUMNS)
+    return Frame(
+        f"{path}:{line}", _fixed_rows(make_rows), doc=title, columns=SOURCE_COLUMNS
+    )
 
 
 def landing_frame(ctx: Context) -> Frame:
@@ -516,7 +540,7 @@ def landing_frame(ctx: Context) -> Frame:
         rows.append(Row("", None, "", "", False))
         rows.append(Row("── capabilities", None, "", "", False, kind="derived"))
 
-        docs_ok = ct.safe(lambda: ctx.source.available, False)
+        docs_ok = ctx.source_available and ct.safe(lambda: ctx.source.available, False)
         rows.append(
             Row(
                 "struct docs and source",
@@ -540,28 +564,34 @@ def landing_frame(ctx: Context) -> Frame:
             Row(
                 "measurements",
                 None, "",
-                "available" if tool_available("bpftrace") else "unavailable (needs bpftrace)",
+                (
+                    "available"
+                    if ctx.live and tool_available("bpftrace")
+                    else "unavailable for a vmcore"
+                    if not ctx.live
+                    else "unavailable (needs bpftrace)"
+                ),
                 False, kind="derived",
                 doc="The 'measure' groups run a tracer for a few seconds.",
             )
         )
 
         rows.append(Row("", None, "", "", False))
-        rows.append(Row("── start here", None, "", "", False, kind="derived"))
+        rows.append(Row("── entry points", None, "", "", False, kind="derived"))
         for label, where in (
-            ("what kind of kernel is this", "system > scheduler, memory"),
-            ("what is running right now", "sched > currently running"),
-            ("a process and everything in it", "process > processes, then follow the links"),
-            ("how long tasks wait for a CPU", "sched > measure"),
-            ("what a struct really contains", "any entry, then enter to follow, s for source"),
+            ("kernel configuration and topology", "system > scheduler, memory"),
+            ("current per-CPU tasks", "sched > currently running"),
+            ("task relationships", "process > processes"),
+            ("runqueue latency", "sched > measure > runqueue latency"),
+            ("structure layout and source", "open an entry; enter follows; s opens source"),
         ):
             rows.append(Row(label, None, "", where, False, kind="derived"))
         return rows
 
     return Frame(
         "kexplore",
-        make_rows,
-        doc="Browse live kernel structures. enter follows, backspace goes back, "
+        _fixed_rows(make_rows),
+        doc="Browse kernel structures. enter follows, backspace goes back, "
             "s opens the source, : opens a drgn REPL.",
     )
 
@@ -572,7 +602,7 @@ def landing_frame(ctx: Context) -> Frame:
 def landing_plan(ctx: Context) -> Plan:
     return Plan(
         "kexplore",
-        doc="Browse live kernel structures.",
+        doc="Inspect kernel structures, relationships, operations, and trace-derived measurements.",
         columns=FIELD_COLUMNS,
         build=lambda: landing_frame(ctx),
         activity="checking what this kernel and cache can do…",
@@ -580,7 +610,12 @@ def landing_plan(ctx: Context) -> Plan:
 
 
 def command_trace_frame(
-    ctx: Context, command: str, served=None, origin: str = "", selected_field: str = ""
+    ctx: Context,
+    command: str,
+    served=None,
+    origin: str = "",
+    selected_field: str = "",
+    progress: Callable[[str], None] | None = None,
 ) -> Frame:
     """One userspace command, traced down to the kernel function behind it."""
     from ..operations.command_trace import command_trace
@@ -588,11 +623,17 @@ def command_trace_frame(
     def make_rows() -> list[Row]:
         return [
             _observation_row(o)
-            for o in command_trace(ctx.prog, command, served, origin, selected_field)
+            for o in command_trace(
+                ctx.prog, command, served, origin, selected_field, progress=progress
+            )
         ]
 
-    return Frame(f"trace: {command}", make_rows, doc=_trace_doc(command),
-                 columns=COMMAND_TRACE_COLUMNS)
+    return Frame(
+        f"trace: {command}",
+        _fixed_rows(make_rows),
+        doc=_trace_doc(command),
+        columns=COMMAND_TRACE_COLUMNS,
+    )
 
 
 def _trace_doc(command: str) -> str:
@@ -619,6 +660,9 @@ def command_trace_plan(
             Row(f"running {command} under bpftrace…", None, "",
                 "recording the process tree's files and kernel interfaces", False,
                 kind="derived"),
+        ),
+        build_with_progress=lambda progress: command_trace_frame(
+            ctx, command, served, origin, selected_field, progress
         ),
     )
 
@@ -681,6 +725,8 @@ def plan_for(item, ctx: Context, subsystem_key: str = "",
         return Plan(item.label, item.doc, LISTING_COLUMNS,
                     lambda: listing_frame(item.label, item.doc, item.entries))
     if isinstance(item, Measurement):
+        if ctx is not None and not ctx.live:
+            return None
         if preview:
             return Plan(
                 item.label,
@@ -721,6 +767,8 @@ def plan_for(item, ctx: Context, subsystem_key: str = "",
             activity="resolving each step to its source line…",
         )
     if isinstance(item, Algorithm):
+        if item.background and ctx is not None and not ctx.live:
+            return None
         activity = "running the experiment…" if item.background else ""
         return Plan(
             item.label,

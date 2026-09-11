@@ -58,7 +58,7 @@ def unique_files(prog: Program):
         address = file.value_()
         count, obj = counts.get(address, (0, file))
         counts[address] = (count + 1, obj)
-    for address, (count, file) in counts.items():
+    for _address, (count, file) in counts.items():
         shared = f"  ({count} fds)" if count > 1 else ""
         yield f"{path_of(file)}{shared}", file
 
@@ -69,29 +69,29 @@ register(
         label="vfs",
         doc="The filesystem layer: mount tree, superblocks, open file tables.",
         entries=[
-            Entry("mounts", "mounts", "Every struct mount in the init namespace.", mounts),
+            Entry("mounts", "mounts", "struct mount instances in init_task's mount namespace.", mounts),
             Entry(
                 "superblocks",
                 "superblocks",
-                "The global super_blocks list -- one per mounted filesystem.",
+                "Entries in the global super_blocks list.",
                 super_blocks,
             ),
             Entry(
                 "all_files",
                 "all open files (lsof view)",
-                "Every (task, fd) pair on the system, with the resolved path.",
+                "Open (task_struct, fd, file) tuples with resolved paths.",
                 all_files,
             ),
             Entry(
                 "unique_files",
                 "distinct open files",
-                "One row per struct file, showing how many fds share it.",
+                "Distinct struct file addresses with descriptor reference counts.",
                 unique_files,
             ),
             Entry(
                 "files_pid1",
                 "open files of init (pid 1 only)",
-                "Just pid 1's own fd table -- what /proc/1/fd shows, not its children.",
+                "PID 1's files_struct descriptor table; child tasks are excluded.",
                 init_files,
             ),
         ],

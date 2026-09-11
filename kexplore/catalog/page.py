@@ -60,7 +60,7 @@ register(
     Subsystem(
         key="page",
         label="page",
-        doc="Physical page frames, and how virtual mappings resolve onto them.",
+        doc="Physical page frames and virtual-to-struct-page translation.",
         entries=[
             Entry(
                 "resident",
@@ -71,13 +71,13 @@ register(
             Entry(
                 "vmemmap",
                 "pages by pfn",
-                "A window onto the vmemmap array, in physical frame order.",
+                "Valid PFNs mapped to their vmemmap struct page instances.",
                 valid_pages,
             ),
             Entry(
                 "low",
                 "first 512 frames",
-                "The bottom of physical memory, frame by frame.",
+                "First 512 valid PFNs in ascending order.",
                 low_pages,
             ),
         ],

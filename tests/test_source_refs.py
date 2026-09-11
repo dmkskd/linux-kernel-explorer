@@ -21,6 +21,15 @@ class SourceTests(unittest.TestCase):
             self.assertIsNone(source._find("source", "test.c"))
             self.assertEqual(run.call_args.kwargs["timeout"], 5)
 
+    def test_expired_source_deadline_starts_no_subprocess(self):
+        source = KernelSource(build_id="test", deadline=1)
+        with (
+            patch("kexplore.core.source.time.monotonic", return_value=2),
+            patch("kexplore.core.source.subprocess.run") as run,
+        ):
+            self.assertIsNone(source._find("source", "test.c"))
+        run.assert_not_called()
+
     def test_body_ignores_comment_braces_and_preserves_nested_blocks(self):
         lines = [
             "void f(struct task *task) {",

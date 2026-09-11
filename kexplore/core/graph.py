@@ -287,7 +287,7 @@ def draw(
             continue
         trunk = spot.x + spot.w + 3
         ports = [placed[k].port for k in kids]
-        top, bottom = min(ports + [spot.port]), max(ports + [spot.port])
+        top, bottom = min([*ports, spot.port]), max([*ports, spot.port])
 
         # The stub out of the parent, into the trunk.
         canvas.hline(spot.port, spot.x + spot.w, trunk, "edge")

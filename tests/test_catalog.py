@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import sys
 import types
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ok = True
 
@@ -160,6 +162,33 @@ def main() -> int:
         "a previewed measurement states what it measures and how to run it",
     )
 
+    # An effectful plan computes once. Reloading its finished frame is a redraw,
+    # not permission to attach the tracer again.
+    with patch("kexplore.core.probe.run_bpftrace") as run_probe:
+        run_probe.return_value = SimpleNamespace(error="", sections=[])
+        frame = frames.measurement_frame(measurement)
+        frame.load()
+        frame.load()
+        check(run_probe.call_count == 1, "reloading a measurement result does not rerun it")
+
+    with patch("kexplore.operations.command_trace.command_trace", return_value=iter(())) as trace:
+        context = frames.Context(prog=None, source=None)
+        frame = frames.command_trace_frame(context, "true")
+        frame.load()
+        frame.load()
+        check(trace.call_count == 1, "reloading a command trace does not execute it again")
+
+    dump = frames.Context(prog=None, source=None, live=False)
+    check(
+        frames.plan_for(measurement, dump) is None,
+        "a vmcore cannot open a live measurement",
+    )
+    background = next(algorithm for algorithm in algorithms() if algorithm.background)
+    check(
+        frames.plan_for(background, dump) is None,
+        "a vmcore cannot open a live process experiment",
+    )
+
     # --- the userspace toggle on a list ---------------------------------
     # An entry list keeps its userspace command in the doc line, and "t"
     # traces whatever is there. Pressing "u" reloads the frame, so the doc
@@ -189,7 +218,7 @@ def main() -> int:
     check(
         all(link.origin for _, link in links),
         "every link states its origin: "
-        f"{[l.label for _, l in links if not l.origin] or 'all do'}",
+        f"{[link.label for _, link in links if not link.origin] or 'all do'}",
     )
     labels = [(tag, link.label) for tag, link in links]
     check(len(labels) == len(set(labels)), "no type has two links with one label")

@@ -72,7 +72,7 @@ def _sharers(obj, field: str) -> str:
             # A wrong path raises AttributeError, which ct.safe does not catch
             # because it is a programming error everywhere else.
             value = path(counter).value_()
-        except Exception:  # noqa: BLE001 - trying shapes until one fits
+        except Exception:  # noqa: BLE001, S112 - trying shapes until one fits
             continue
         if isinstance(value, int):
             return f" ({value})"
@@ -91,14 +91,22 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
 
     error = experiment.build(SOURCE, BINARY)
     if error:
-        yield Observation("cannot build helper", cells=(f"gcc: {error}",), kind="result")
+        yield Observation(
+            "cannot build helper",
+            cells=(f"gcc: {error}", *("" for _ in range(8))),
+            kind="result",
+        )
         return
 
     # The helper prints its timings, then one line per held child. Wait for the
     # last variant so every child exists before drgn looks.
     running = experiment.start(BINARY, ["120"], ready="READY", timeout=60)
     if running.error:
-        yield Observation("helper failed", cells=(running.error,), kind="result")
+        yield Observation(
+            "helper failed",
+            cells=(running.error, *("" for _ in range(8))),
+            kind="result",
+        )
         return
 
     try:
@@ -117,7 +125,9 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
 
         if not parent_pid or not children:
             yield Observation(
-                "helper produced no children", cells=(str(running.lines[:3]),), kind="result"
+                "helper produced no children",
+                cells=(str(running.lines[:3]), *("" for _ in range(8))),
+                kind="result",
             )
             return
 
@@ -225,6 +235,7 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
                 cells.append(f"{low/1000:.1f} / {mid/1000:.1f} / {high/1000:.1f}")
             else:
                 cells.append("?")
+            detail = build_detail(name, pid, task)
             yield Observation(
                 name,
                 cells=tuple(cells),
@@ -233,7 +244,7 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
                 # row could be followed. Enter opens the captured comparison
                 # instead, which is the only thing worth seeing here anyway.
                 # Rows are built now and merely handed back later.
-                expand=(lambda rows=build_detail(name, pid, task): rows),
+                expand=lambda rows=detail: rows,
                 expand_columns=(
                     "field",
                     "points to",
@@ -261,7 +272,7 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
 CLONE_MATRIX = register_algorithm(
     Algorithm(
         key="clone_matrix",
-        label="what each clone flag actually does",
+        label="clone flag isolation",
         subsystem="process",
         rule=(
             "Runs a helper that clones once per flag combination and holds the "
@@ -304,13 +315,15 @@ def _cow_after_fork(prog: Program) -> Iterator[Observation]:
 
     error = experiment.build(SOURCE, BINARY)
     if error:
-        yield Observation("cannot build helper", cells=(f"gcc: {error}",), kind="result")
+        yield Observation(
+            "cannot build helper", cells=(f"gcc: {error}", "", ""), kind="result"
+        )
         return
 
     # 64 MiB of dirtied anonymous memory, so there is something to share.
     running = experiment.start(BINARY, ["120", "64"], ready="READY", timeout=90)
     if running.error:
-        yield Observation("helper failed", cells=(running.error,), kind="result")
+        yield Observation("helper failed", cells=(running.error, "", ""), kind="result")
         return
 
     try:
@@ -326,7 +339,11 @@ def _cow_after_fork(prog: Program) -> Iterator[Observation]:
                 if first.isdigit():
                     child_pid = int(first)
         if not parent_pid or not child_pid:
-            yield Observation("no fork child", cells=("helper output unexpected",), kind="result")
+            yield Observation(
+                "no fork child",
+                cells=("helper output unexpected", "", ""),
+                kind="result",
+            )
             return
 
         parent, child = find_task(prog, parent_pid), find_task(prog, child_pid)

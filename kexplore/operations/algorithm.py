@@ -188,14 +188,14 @@ def _eevdf_pick(prog: Program) -> Iterator[Observation]:
 
 EEVDF = Algorithm(
     key="eevdf_pick",
-    label="which task runs next (EEVDF)",
+    label="EEVDF next-entity selection",
     subsystem="sched",
     rule=(
         "Among entities that are eligible (vruntime <= avg_vruntime, i.e. they "
         "have not yet had more than their share), pick the one with the earliest "
         "virtual deadline."
     ),
-    doc="Recomputes pick_next_entity from live runqueue state, per CPU.",
+    doc="Recomputes EEVDF selection from each CPU's live cfs_rq state.",
     analyse=_eevdf_pick,
 )
 

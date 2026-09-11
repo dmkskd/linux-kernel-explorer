@@ -33,7 +33,7 @@ async def main() -> int:
             n
             for branch in tree.root.children
             for group in branch.children
-            for n in ([group] + list(group.children))
+            for n in [group, *list(group.children)]
             if isinstance(n.data, Measurement) and n.data.key == "runq_wait"
         )
         tree.select_node(node)

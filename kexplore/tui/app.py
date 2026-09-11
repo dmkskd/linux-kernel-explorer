@@ -24,7 +24,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tab, Tabs, Tree
 
 from ..catalog.procfs import served_by
-from ..catalog.registry import Subsystem, subsystems
+from ..catalog.registry import Measurement, Subsystem, subsystems
 from ..catalog.userspace import UNFILLED, runnable
 from ..core import ctypes as ct
 from ..core.nav import Row, follow
@@ -82,7 +82,10 @@ def _highlight_source(rows: list[Row]) -> dict[str, Text]:
     """
     code = "\n".join(row.value for row in rows)
     highlighted = Syntax(code, "c", theme="ansi_dark").highlight(code)
-    return {row.name: line for row, line in zip(rows, highlighted.split("\n"))}
+    return {
+        row.name: line
+        for row, line in zip(rows, highlighted.split("\n"), strict=True)
+    }
 
 
 # One colour per row kind, applied to the name cell. Links and derived rows are
@@ -205,10 +208,16 @@ class Explorer(App):
         prog: Program,
         source: KernelSource | None = None,
         source_available: bool = True,
+        live: bool = True,
     ) -> None:
         super().__init__()
         self.prog = prog
-        self.context = Context(prog, source or KernelSource())
+        self.context = Context(
+            prog,
+            source or KernelSource(),
+            live=live,
+            source_available=source_available,
+        )
         # False means startup probed and found no kernel source (or a vmcore,
         # where a lookup would describe the host kernel): the 's' key is
         # hidden by check_action and refuses in action_source. The default
@@ -252,6 +261,10 @@ class Explorer(App):
         # refusal.
         if action == "source" and self._showing_source():
             return None
+        if action == "trace_command" and not self.context.live:
+            return None
+        if action == "userspace" and not self.context.live:
+            return None
         return True
 
     def _showing_source(self) -> bool:
@@ -267,7 +280,7 @@ class Explorer(App):
         a tag starts a worker and returns ``None``. The doc and hint lines are
         rewritten when the worker returns.
         """
-        if obj is None:
+        if obj is None or not self._source_available:
             return None
         # obj may be a pointer here (a NULL link target is pushed as-is), and
         # pointer types have no tag.
@@ -395,7 +408,12 @@ class Explorer(App):
 
         def work() -> None:
             try:
-                frame = plan.build()
+                if plan.build_with_progress is not None:
+                    frame = plan.build_with_progress(
+                        lambda text: self.call_from_thread(self.set_activity, text)
+                    )
+                else:
+                    frame = plan.build()
                 frame.load()
             except Exception as exc:  # noqa: BLE001 - report, don't kill the UI
                 frame = Frame(
@@ -445,10 +463,12 @@ class Explorer(App):
         both about one operation, so they belong in one list rather than two
         tabs.
         """
-        items = list(WALKTHROUGHS) + algorithms()
+        items = list(WALKTHROUGHS) + [
+            item for item in algorithms() if self.context.live or not item.background
+        ]
         tree.root.data = Listing(
             "operations",
-            "Sequences the kernel performs, and analyses of one moment in it.",
+            "Kernel execution paths, scheduling analyses, and controlled experiments.",
             tuple(items),
         )
         # Grouped in one pass. The branch for a subsystem has to name every
@@ -464,7 +484,7 @@ class Explorer(App):
                 expand=True,
                 data=Listing(
                     subsystem_key,
-                    f"Operations belonging to {subsystem_key}.",
+                    f"Operations associated with the {subsystem_key} subsystem.",
                     tuple(group_items),
                 ),
             )
@@ -473,21 +493,31 @@ class Explorer(App):
 
     def _build_structure_tree(self, tree: Tree) -> None:
         all_subsystems = subsystems()
+        visible_subsystems = []
+        for subsystem in all_subsystems:
+            entries = [
+                entry
+                for entry in subsystem.entries
+                if self.context.live or not isinstance(entry, Measurement)
+            ]
+            if entries:
+                visible_subsystems.append(replace(subsystem, entries=entries))
         tree.root.data = Listing(
             "subsystems",
-            "The parts of the kernel this tool has entry points into.",
-            tuple(all_subsystems),
+            "Kernel subsystems with registered structure entry points.",
+            tuple(visible_subsystems),
         )
-        for subsystem in all_subsystems:
+        for subsystem in visible_subsystems:
+            entries = subsystem.entries
             branch = tree.root.add(subsystem.label, data=subsystem, expand=True)
             groups: dict[str, object] = {}
-            for entry in subsystem.entries:
+            for entry in entries:
                 parent = branch
                 group = getattr(entry, "group", "")
                 if group:
                     if group not in groups:
                         members = tuple(
-                            e for e in subsystem.entries
+                            e for e in entries
                             if getattr(e, "group", "") == group
                         )
                         groups[group] = branch.add(
@@ -611,12 +641,16 @@ class Explorer(App):
                 if len(cells) > 3:
                     cells[3].stylize("dim")
             # Colour the userspace command so it is obviously not a kernel path.
-            if self.userspace and len(cells) > 1 and row.kind in ("link", "field"):
+            if (
+                self.userspace
+                and len(cells) > 1
+                and row.kind in ("link", "field")
+                and row.type_name != _type_of(row)
+            ):
                 # Only colour cells that actually became a command: a field or
                 # link with no equivalent keeps its type or its origin, and
                 # should look normal.
-                if row.type_name != _type_of(row):
-                    cells[1].stylize("cyan")
+                cells[1].stylize("cyan")
             table.add_row(*cells, key=str(index))
         self.update_hint()
 
@@ -874,6 +908,9 @@ class Explorer(App):
 
     def action_userspace(self) -> None:
         """Swap the origin column for how to get the same thing from userspace."""
+        if not self.context.live:
+            self.notify("userspace commands are unavailable for a vmcore", severity="warning")
+            return
         self.context.userspace = not self.context.userspace
         if self.stack:
             self.stack[-1].load()
@@ -987,6 +1024,9 @@ class Explorer(App):
         stack frames carry file:line, and "s" opens the source of any of them.
         A modal would end that chain at the first screen.
         """
+        if not self.context.live:
+            self.notify("command tracing is unavailable for a vmcore", severity="warning")
+            return
         command = self.command_under_cursor()
         if not command:
             self.notify(

@@ -26,7 +26,6 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 VM="${KEXPLORE_VM:-kernel-lab}"
 IMAGE=kexplore
-CACHE_VOLUME=kexplore-debuginfod
 
 usage() {
   cat <<USAGE

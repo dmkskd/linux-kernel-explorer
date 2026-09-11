@@ -41,12 +41,12 @@ register(
             Entry(
                 "init_net",
                 "init_net",
-                "The initial network namespace -- root of everything else.",
+                "Statically allocated initial network namespace.",
                 lambda prog: prog["init_net"],
             ),
-            Entry("namespaces", "net namespaces", "Every struct net on the system.", namespaces),
-            Entry("netdevs", "net devices", "struct net_device in the init namespace.", netdevs),
-            Entry("txqueues", "tx queues", "netdev_queue per device -- the qdisc side.", tx_queues),
+            Entry("namespaces", "net namespaces", "struct net instances in net_namespace_list.", namespaces),
+            Entry("netdevs", "net devices", "struct net_device instances in init_net.", netdevs),
+            Entry("txqueues", "TX queues", "struct netdev_queue instances for devices in init_net.", tx_queues),
         ],
     )
 )

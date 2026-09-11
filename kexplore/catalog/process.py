@@ -111,34 +111,33 @@ register(
     Subsystem(
         key="process",
         label="process",
-        doc="Group leaders, the threads in their groups, and kernel threads. "
-            "Every row is one task_struct.",
+        doc="task_struct instances grouped as thread-group leaders, tasks, kernel threads, and zombies.",
         entries=[
             Entry(
                 "init",
                 "init (pid 1)",
-                "The task that leads pid 1's group, as somewhere to start.",
+                "Thread-group leader for PID 1.",
                 init,
                 columns=task_columns(),
             ),
             Entry(
                 "processes",
                 "processes",
-                "Thread group leaders, one row each.",
+                "Thread-group leaders (task->pid == task->tgid).",
                 processes,
                 columns=task_columns("threads"),
             ),
             Entry(
                 "tasks",
                 "all tasks",
-                "Every task, threads included.",
+                "All task_struct instances, including non-leader threads.",
                 all_tasks,
                 columns=task_columns("thread of"),
             ),
             Entry(
                 "kthreads",
                 "kernel threads",
-                "Tasks with PF_KTHREAD set. Each leads a group of its own.",
+                "Tasks with task->flags & PF_KTHREAD.",
                 kernel_threads,
                 columns=task_columns(),
             ),

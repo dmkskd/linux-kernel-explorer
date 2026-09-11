@@ -92,17 +92,19 @@ def configure(offline_only: bool = False) -> None:
 
     # Signature enforcement without keys is worse than either alternative: it
     # pays for the whole transfer and then throws it away, every run.
-    if "ima:" in os.environ.get("DEBUGINFOD_URLS", ""):
-        if not os.environ.get("DEBUGINFOD_IMA_CERT_PATH"):
-            certs = ima_cert_path()
-            if certs:
-                os.environ["DEBUGINFOD_IMA_CERT_PATH"] = certs
-            else:
-                # No keys anywhere: enforcing can only fail, so ask for the
-                # download the caller actually wants and say what was given up.
-                os.environ["DEBUGINFOD_URLS"] = servers()
-                print("kernel debug info: no IMA certificates on this machine, "
-                      "so the download is not signature-checked", file=sys.stderr)
+    if (
+        "ima:" in os.environ.get("DEBUGINFOD_URLS", "")
+        and not os.environ.get("DEBUGINFOD_IMA_CERT_PATH")
+    ):
+        certs = ima_cert_path()
+        if certs:
+            os.environ["DEBUGINFOD_IMA_CERT_PATH"] = certs
+        else:
+            # No keys anywhere: enforcing can only fail, so ask for the
+            # download the caller actually wants and say what was given up.
+            os.environ["DEBUGINFOD_URLS"] = servers()
+            print("kernel debug info: no IMA certificates on this machine, "
+                  "so the download is not signature-checked", file=sys.stderr)
 
     cache = cache_path()
     try:

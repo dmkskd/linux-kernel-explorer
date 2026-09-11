@@ -140,7 +140,7 @@ register(
     Subsystem(
         key="skb",
         label="skb",
-        doc="Queued packet buffers. Packets in flight are not browsable -- trace those.",
+        doc="Queued struct sk_buff instances; packets outside queues require tracing.",
         entries=[
             Entry(
                 "nonempty",
@@ -151,13 +151,13 @@ register(
             Entry(
                 "receive",
                 "socket receive queues",
-                "skbs that arrived but haven't been read by userspace.",
+                "struct sk_buff instances on sk_receive_queue.",
                 receive_queues,
             ),
             Entry(
                 "write",
                 "socket write queues",
-                "skbs sent but not yet acknowledged/completed.",
+                "struct sk_buff instances on sk_write_queue.",
                 write_queues,
             ),
             Entry(

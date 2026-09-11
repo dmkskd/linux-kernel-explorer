@@ -49,7 +49,7 @@ def main() -> int:
     show(vma, "vm_flags", "{:#x}")
 
     print("\nfile / inode (first fd of pid 1):")
-    fd, file = next(iter(for_each_file(task)))
+    _fd, file = next(iter(for_each_file(task)))
     show(file, "f_mode", "{:#x}")
     show(file, "f_flags", "{:#x}")
     show(file.f_inode, "i_mode", "{:#o}")

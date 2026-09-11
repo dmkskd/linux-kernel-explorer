@@ -53,7 +53,7 @@ register(
             Entry(
                 "init_mm",
                 "init_mm",
-                "The kernel's own mm_struct -- page tables for kernel space.",
+                "Kernel address-space mm_struct and page-table root.",
                 lambda prog: prog["init_mm"],
             ),
             Entry("pgdat", "NUMA nodes (pglist_data)", "Per-node memory descriptors.", pgdats),
@@ -61,10 +61,10 @@ register(
             Entry(
                 "vmas_pid1",
                 "VMAs of pid 1",
-                "vm_area_struct list for init -- a real user address space.",
+                "vm_area_struct instances in PID 1's maple tree.",
                 init_vmas,
             ),
-            Entry("vmap", "vmap areas", "The vmalloc arena, area by area.", vmap_areas),
+            Entry("vmap", "vmap areas", "vmap_area instances in vmap_area_root.", vmap_areas),
         ],
     )
 )

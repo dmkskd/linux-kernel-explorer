@@ -97,16 +97,14 @@ def _vmas_of_init(prog: Program):
 
 WAKEUP = Walkthrough(
     key="wakeup",
-    label="a task is woken and starts running",
+    label="task wakeup to execution",
     subsystem="sched",
-    doc="From another task calling wake_up to this task executing on a CPU.",
+    doc="Path from try_to_wake_up() through enqueue and sched_switch to execution.",
     steps=[
         Step(
             "try_to_wake_up",
-            "Entry point. Checks the task is really blocked and claims it.",
-            "Emits sched_waking. From here the task is committed to being woken, "
-            "so this is the start of the interval that 'how long do runnable "
-            "tasks wait for a CPU' measures.",
+            "Validates the task state and atomically transitions it toward TASK_RUNNING.",
+            "Emits sched_waking; this marks the start of wakeup latency measurement.",
             _a_running_task,
         ),
         Step(
@@ -156,9 +154,9 @@ WAKEUP = Walkthrough(
 
 PAGE_FAULT = Walkthrough(
     key="page_fault",
-    label="a page fault is resolved",
+    label="page-fault resolution",
     subsystem="mm",
-    doc="From a userspace access on an unmapped address to a mapped page.",
+    doc="Path from an unresolved userspace virtual address to an installed PTE.",
     steps=[
         Step(
             "do_page_fault",

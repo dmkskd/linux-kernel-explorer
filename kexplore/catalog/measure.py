@@ -215,7 +215,7 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
     "sched": [
         Measurement(
             key="sched_rate",
-            label="how often are tasks scheduled?",
+            label="scheduler event rate",
             doc="Counts of sched_switch, sched_wakeup and sched_migrate_task per CPU.",
             measures=(
                 "Counts events, not durations. Per CPU: sched_switch (the CPU "
@@ -232,8 +232,8 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
         ),
         Measurement(
             key="runq_wait",
-            label="how long do runnable tasks wait for a CPU?",
-            doc="Time from being made runnable to actually getting a CPU.",
+            label="runqueue latency",
+            doc="Latency from sched_wakeup to the sched_switch selecting the task as next_pid.",
             measures=(
                 "Leg 1 of the task cycle: runnable but not yet running. From "
                 "sched_wakeup (the task is put on a runqueue and is now eligible) "
@@ -253,8 +253,8 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
         ),
         Measurement(
             key="wakeup_breakdown",
-            label="where does wakeup latency go?",
-            doc="Splits leg 1 into stages, and times the functions inside it.",
+            label="wakeup latency breakdown",
+            doc="Wakeup-to-enqueue and enqueue-to-on-CPU latency, plus scheduler function durations.",
             measures=(
                 "Two timeline stages: sched_waking (try_to_wake_up starts) to "
                 "sched_wakeup (task enqueued and visible as runnable), then "
@@ -275,8 +275,8 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
         ),
         Measurement(
             key="timeslice",
-            label="how long does a task hold a CPU?",
-            doc="On-CPU span per task, with idle reported separately.",
+            label="on-CPU duration",
+            doc="Per-task duration between incoming and outgoing sched_switch events; idle is separate.",
             measures=(
                 "Leg 2 of the task cycle: actually executing. From the sched_switch "
                 "that puts a task on a CPU (next_pid) to the one that takes it off "
@@ -293,8 +293,8 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
         ),
         Measurement(
             key="offcpu",
-            label="how long are tasks off-CPU?",
-            doc="Time between a task being switched out and switched back in.",
+            label="off-CPU duration",
+            doc="Per-task duration between outgoing and subsequent incoming sched_switch events.",
             measures=(
                 "Leg 3 of the task cycle: everything between two runs. From the "
                 "sched_switch where a task is prev_pid (leaves the CPU) to the one "
@@ -312,7 +312,7 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
     "process": [
         Measurement(
             key="clone_cost",
-            label="what does a fork cost versus a thread?",
+            label="fork and thread creation cost",
             doc="Times kernel_clone split by CLONE_THREAD, plus the work fork adds.",
             measures=(
                 "fentry/fexit on kernel_clone, split by whether CLONE_THREAD is "
@@ -351,7 +351,7 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
         ),
         Measurement(
             key="syscalls",
-            label="which syscalls, and how long?",
+            label="syscall rate and duration",
             doc="Syscall counts by number, and time spent inside syscalls.",
             measures=(
                 "Counts raw_syscalls:sys_enter by syscall number, and measures "
@@ -374,7 +374,7 @@ register(
     Subsystem(
         key="measure",
         label="measure",
-        doc="Cross-cutting measurements with no single owning subsystem yet.",
+        doc="Cross-subsystem event counts and latency distributions.",
         entries=list(MEASUREMENTS["measure"]),
     )
 )

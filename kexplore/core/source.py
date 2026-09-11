@@ -25,6 +25,7 @@ import os
 import re
 import struct
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,13 +93,14 @@ class KernelSource:
     """Locates and caches kernel source for the running build."""
 
     def __init__(self, release: str | None = None, build_id: str | None = None,
-                 *, source_timeout: float = 120) -> None:
+                 *, source_timeout: float = 120, deadline: float | None = None) -> None:
         self.release = release or os.uname().release
         self.build_id = build_id or kernel_build_id()
         self._debuginfo: str | None = None
         self._prefix: str | None = None
         self._available: bool | None = None
         self.source_timeout = source_timeout
+        self.deadline = deadline
 
     # ------------------------------------------------------------- discovery
 
@@ -115,10 +117,16 @@ class KernelSource:
         argv = ["debuginfod-find", kind, self.build_id]
         if path:
             argv.append(path)
+        timeout = self.source_timeout if kind == "source" else 120
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            timeout = min(timeout, remaining)
         try:
             result = subprocess.run(
                 argv, capture_output=True, text=True,
-                timeout=self.source_timeout if kind == "source" else 120,
+                timeout=timeout,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):

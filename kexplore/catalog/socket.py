@@ -105,34 +105,34 @@ register(
     Subsystem(
         key="socket",
         label="socket",
-        doc="Sockets from three directions: process fds, protocol hashes, AF_UNIX.",
+        doc="Socket state indexed by process descriptors, protocol hash tables, and AF_UNIX tables.",
         entries=[
             Entry(
                 "process_sockets",
                 "sockets by process (struct socket)",
-                "Every socket fd; the VFS-facing half. Follow 'sk' to cross over.",
+                "VFS struct socket instances referenced by process file descriptors.",
                 process_sockets,
             ),
             Entry(
                 "process_socks",
                 "sockets by process (struct sock)",
-                "The protocol half of each socket fd -- cast to inet_sock/tcp_sock.",
+                "Protocol-layer struct sock instances referenced by struct socket->sk.",
                 process_socks,
             ),
             Entry(
                 "tcp_listen",
                 "TCP listening",
-                "Per-netns lhash2 table: sockets in LISTEN.",
+                "TCP_LISTEN sockets in each network namespace's lhash2 table.",
                 tcp_listening,
             ),
             Entry(
                 "tcp_estab",
                 "TCP established",
-                "The ehash table -- includes sockets with no owning process.",
+                "Sockets in each network namespace's TCP ehash, including unowned sockets.",
                 tcp_established,
             ),
-            Entry("udp", "UDP sockets", "The per-netns UDP hash table.", udp_sockets),
-            Entry("unix", "unix sockets", "AF_UNIX has its own hash: net->unx.table.", unix_sockets),
+            Entry("udp", "UDP sockets", "Sockets in each network namespace's UDP hash table.", udp_sockets),
+            Entry("unix", "UNIX sockets", "Sockets in net->unx.table for each network namespace.", unix_sockets),
         ],
     )
 )
