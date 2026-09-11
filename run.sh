@@ -12,6 +12,7 @@
 #   ./run.sh              # the explorer
 #   ./run.sh --check      # resolve every entry against this kernel, no UI
 #   ./run.sh --test       # the test suite, somewhere it can attach
+#   ./run.sh --record F   # record the session to F with asciinema, for a demo
 #   ./run.sh --help       # every option, and the environment it reads
 set -euo pipefail
 
@@ -33,7 +34,7 @@ CACHE_VOLUME=kexplore-debuginfod
 # backend set up, at the cost of keeping the two in step.
 usage() {
   cat <<USAGE
-usage: ./run.sh [--test] [options]
+usage: ./run.sh [--record file.cast] [--test] [options]
 
 Run kexplore as root against a live kernel. Where it runs:
 
@@ -41,6 +42,9 @@ Run kexplore as root against a live kernel. Where it runs:
   native    this Linux host, with kexplore's packages installed
   docker    a container reading the host kernel through /proc/kcore
 
+  --record F     record the whole session to F with asciinema, wrapping
+                 whichever backend was resolved, so the file is written on
+                 this host; upload it with \`asciinema upload F\`
   --test         run the test suite instead of the explorer; remaining
                  arguments go to tests/run_all.py
   --check        resolve every subsystem entry and report, without the UI
@@ -51,7 +55,7 @@ Run kexplore as root against a live kernel. Where it runs:
   -c, --core F   explore the vmcore F instead of the live kernel
   -h, --help     this message
 
-Everything other than --test is passed through to kexplore.
+Everything other than --record and --test is passed through to kexplore.
 
 Environment:
 
@@ -70,6 +74,14 @@ USAGE
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
+fi
+
+# --record is consumed here; it wraps the final exec below and never reaches
+# kexplore. The file lands on this host whichever backend runs the explorer.
+RECORD=""
+if [[ "${1:-}" == "--record" ]]; then
+  RECORD="${2:?--record needs a file to write to}"
+  shift 2
 fi
 
 TARGET=(python3 -m kexplore "$@")
@@ -109,14 +121,14 @@ case "$BACKEND" in
     # The repo is virtiofs-mounted into the VM read-only at the same path, so
     # there is nothing to sync. PYTHONDONTWRITEBYTECODE is required because
     # that mount is read-only.
-    exec limactl shell "$VM" sudo env \
-      PYTHONDONTWRITEBYTECODE=1 \
-      PYTHONPATH="$REPO" \
-      DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend lima)}" \
-      KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}" \
-      TERM="${TERM:-xterm-256color}" \
-      COLORTERM="${COLORTERM:-truecolor}" \
-      "${TARGET[@]}"
+    LAUNCH=(limactl shell "$VM" sudo env
+      PYTHONDONTWRITEBYTECODE=1
+      PYTHONPATH="$REPO"
+      DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend lima)}"
+      KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
+      TERM="${TERM:-xterm-256color}"
+      COLORTERM="${COLORTERM:-truecolor}"
+      "${TARGET[@]}")
     ;;
   native)
     if ! kexplore_native_ready; then
@@ -126,11 +138,11 @@ case "$BACKEND" in
     fi
     # No PYTHONDONTWRITEBYTECODE here: the repo is a normal writable
     # directory, and no TERM forwarding: there is no SSH layer in between.
-    exec sudo env \
-      PYTHONPATH="$REPO" \
-      DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend native)}" \
-      KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}" \
-      "${TARGET[@]}"
+    LAUNCH=(sudo env
+      PYTHONPATH="$REPO"
+      DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend native)}"
+      KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
+      "${TARGET[@]}")
     ;;
   docker)
     if ! RUNTIME="$(kexplore_container_runtime)"; then
@@ -144,17 +156,33 @@ case "$BACKEND" in
     # no translation and PYTHONDONTWRITEBYTECODE is back. The kernel flags
     # matter: both runtimes mask /proc/kcore to /dev/null by default, and
     # the read then succeeds returning nothing.
-    # shellcheck disable=SC2086,SC2046
-    exec $RUNTIME run --rm "${TTY[@]}" \
-      $(kexplore_container_kernel_flags "$RUNTIME") \
-      -v "$REPO:$REPO:ro" -w "$REPO" \
-      -v "$CACHE_VOLUME:/root/.cache/debuginfod_client" \
-      -e PYTHONDONTWRITEBYTECODE=1 \
-      -e PYTHONPATH="$REPO" \
-      -e DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend docker)}" \
-      -e KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}" \
-      -e TERM="${TERM:-xterm-256color}" \
-      -e COLORTERM="${COLORTERM:-truecolor}" \
-      "$IMAGE" "${TARGET[@]}"
+    # shellcheck disable=SC2206,SC2207
+    LAUNCH=($RUNTIME run --rm "${TTY[@]}"
+      $(kexplore_container_kernel_flags "$RUNTIME")
+      -v "$REPO:$REPO:ro" -w "$REPO"
+      -v "$CACHE_VOLUME:/root/.cache/debuginfod_client"
+      -e PYTHONDONTWRITEBYTECODE=1
+      -e PYTHONPATH="$REPO"
+      -e DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend docker)}"
+      -e KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
+      -e TERM="${TERM:-xterm-256color}"
+      -e COLORTERM="${COLORTERM:-truecolor}"
+      "$IMAGE" "${TARGET[@]}")
     ;;
 esac
+
+if [ -n "$RECORD" ]; then
+  # Recording happens on this host, around whichever command the backend
+  # resolved to, so one code path covers lima, native and docker. asciinema
+  # runs its command through a shell, so the array is re-quoted into a
+  # string here.
+  if ! command -v asciinema >/dev/null 2>&1; then
+    echo "--record needs asciinema on this host (brew install asciinema)" >&2
+    exit 1
+  fi
+  printf '%-11s%s\n' record "$RECORD" >&2
+  printf -v COMMAND '%q ' "${LAUNCH[@]}"
+  exec asciinema rec --overwrite --command "$COMMAND" "$RECORD"
+fi
+
+exec "${LAUNCH[@]}"
