@@ -12,15 +12,25 @@ from __future__ import annotations
 
 import code
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 import drgn
 from drgn import Object, Program
+from rich.markup import escape
 from rich.syntax import Syntax
 from rich.text import Text
+
+
+def safe_escape(text: str) -> str:
+    """Escape text for Textual markup, ensuring unmatched brackets do not break markup parsing."""
+    if not text:
+        return ""
+    escaped = escape(str(text))
+    return re.sub(r"(?<!\\)\[", r"\\[", escaped)
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tab, Tabs, Tree
 
 from ..catalog.procfs import served_by
@@ -30,6 +40,7 @@ from ..core import ctypes as ct
 from ..core.nav import Row, follow
 from ..core.source import KernelSource, StructDoc
 from ..operations.algorithm import algorithms
+from ..operations.tour import GuidedTour, GuidedTutorial, TourStep, TutorialStep, tours, tutorials
 from ..operations.walkthrough import WALKTHROUGHS
 from ..view import frames
 from ..view.frames import (
@@ -41,7 +52,9 @@ from ..view.frames import (
     Listing,
     Plan,
 )
+from .clipboard import copy_to_system_clipboard
 from .graph import GraphScreen, graph_key
+from .navigator import CursorNavigator
 
 # Textual sizes a column to its widest cell, so a single long value pushes the
 # remaining columns off screen. Truncate for display; the hint line still shows
@@ -169,11 +182,423 @@ class FieldsTable(DataTable):
     follow in the table and open in the sidebar.
     """
 
-    BINDINGS = [Binding("enter", "select_cursor", "follow")]
+    BINDINGS = [
+        Binding("enter", "select_cursor", "follow"),
+        Binding("c", "copy", "copy", show=False),
+        Binding("C", "copy_row", "copy row", show=False),
+        Binding("y", "copy", "copy", show=False),
+        Binding("m", "toggle_mouse", "mouse", show=False),
+    ]
+
+    def action_copy(self) -> None:
+        if hasattr(self.app, "action_copy"):
+            self.app.action_copy()
+
+    def action_copy_row(self) -> None:
+        if hasattr(self.app, "action_copy_row"):
+            self.app.action_copy_row()
+
+    def action_toggle_mouse(self) -> None:
+        if hasattr(self.app, "action_toggle_mouse"):
+            self.app.action_toggle_mouse()
 
 
 class NavTree(Tree):
-    BINDINGS = [Binding("enter", "select_cursor", "open")]
+    BINDINGS = [
+        Binding("enter", "select_cursor", "open"),
+        Binding("c", "copy", "copy", show=False),
+        Binding("y", "copy", "copy", show=False),
+        Binding("m", "toggle_mouse", "mouse", show=False),
+    ]
+
+    def action_copy(self) -> None:
+        if hasattr(self.app, "action_copy"):
+            self.app.action_copy()
+
+    def action_toggle_mouse(self) -> None:
+        if hasattr(self.app, "action_toggle_mouse"):
+            self.app.action_toggle_mouse()
+
+
+class TutorialBanner(Static):
+    """Commentary and navigation banner for live guided tutorials."""
+
+    header_variant: int = 2  # 1 = Minimal HUD (2 lines), 2 = Pipeline + Insight (3 lines)
+
+    def update_step(
+        self,
+        tutorial_label: str,
+        step_num: int,
+        total_steps: int,
+        step: TutorialStep,
+        steps: list[TutorialStep] | None = None,
+        auto_play: bool = False,
+        variant: int | None = None,
+        seconds_left: int | None = None,
+        is_travelling: bool = False,
+    ) -> None:
+        if variant is not None:
+            self.header_variant = variant
+        lines: list[str] = []
+
+        # 1. Step title + auto-play status
+        if auto_play:
+            if is_travelling:
+                auto_badge = "[bold white on #059669] ▶ AUTO PLAYING (navigating...) [/] [dim]('a' to pause)[/]"
+            else:
+                secs_str = f" (advancing in {seconds_left}s)" if seconds_left is not None else ""
+                auto_badge = f"[bold white on #059669] ▶ AUTO PLAYING{secs_str} [/] [dim]('a' to pause)[/]"
+        else:
+            auto_badge = "[dim]('a' for auto-play)[/]"
+        lines.append(
+            f"[bold yellow]Step {step_num} of {total_steps}:[/] [bold white]{safe_escape(step.title)}[/]   {auto_badge}"
+        )
+
+        # 2. Compact, single-line Flow roadmap showing progression through data structures
+        if steps:
+            flow_nodes = []
+            for i, s in enumerate(steps, start=1):
+                name = s.get_flow_label() if hasattr(s, "get_flow_label") else getattr(s, "flow_label", "")
+                if not name:
+                    name = s.action.split("›")[-1].strip().split("(")[0].strip()[:14]
+                if i < step_num:
+                    flow_nodes.append(f"[dim green]✓ {safe_escape(name)}[/]")
+                elif i == step_num:
+                    flow_nodes.append(f"[bold bright_yellow]▶ {safe_escape(name)}[/]")
+                else:
+                    flow_nodes.append(f"[dim]{safe_escape(name)}[/]")
+            lines.append("   [dim]Flow:[/] " + " [bold dim cyan]──▶[/] ".join(flow_nodes))
+
+        # 3. Short context / insight (Variant 2)
+        if self.header_variant >= 2:
+            insight_fn = getattr(step, "get_insight", None)
+            insight_text = (
+                insight_fn()
+                if callable(insight_fn)
+                else (
+                    getattr(step, "insight", "")
+                    or (step.commentary.split(". ")[0].strip() + "." if step.commentary else "")
+                )
+            )
+            if insight_text:
+                lines.append(f"   [dim]Insight:[/] [white]{safe_escape(insight_text)}[/]")
+
+        self.update("\n".join(lines))
+        self.display = True
+
+
+TourBanner = TutorialBanner
+
+
+class TutorialLanding(VerticalScroll):
+    """Full-screen scrollable landing page and itinerary for a guided tutorial."""
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("enter", "start_step_1", "begin step 1", priority=True),
+        Binding("space", "start_step_1", "begin step 1", priority=True, show=False),
+        Binding("n", "start_step_1", "begin step 1", priority=True, show=False),
+        Binding("a", "start_auto", "auto-play walkthrough", priority=True),
+        Binding("p", "prev", "back", priority=True, show=False),
+        Binding("c", "copy", "copy link / overview", priority=True),
+        Binding("y", "copy", "copy link / overview", priority=True, show=False),
+        Binding("m", "toggle_mouse", "mouse selection", priority=True),
+        Binding("escape", "exit", "exit", priority=True, show=False),
+        Binding("down", "scroll_down", "scroll ↓", show=True),
+        Binding("up", "scroll_up", "scroll ↑", show=True),
+        Binding("j", "scroll_down", "scroll down", show=False),
+        Binding("k", "scroll_up", "scroll up", show=False),
+        Binding("page_down,pagedown", "page_down", "pgdn", show=True),
+        Binding("page_up,pageup", "page_up", "pgup", show=True),
+        Binding("home", "scroll_home", "top", show=False),
+        Binding("end", "scroll_end", "bottom", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="tutorial-landing-content")
+
+    def update(self, content: str | Text) -> None:
+        try:
+            self.query_one("#tutorial-landing-content", Static).update(content)
+        except Exception:
+            pass
+
+    def render(self):
+        try:
+            return self.query_one("#tutorial-landing-content", Static).render()
+        except Exception:
+            return ""
+
+    def action_start_step_1(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_tutorial_next"):
+            app.action_tutorial_next()
+
+    def action_start_auto(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_toggle_auto"):
+            app.action_toggle_auto()
+
+    def action_prev(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_tutorial_prev"):
+            app.action_tutorial_prev()
+
+    def action_copy(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_copy"):
+            app.action_copy()
+
+    def action_toggle_mouse(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_toggle_mouse"):
+            app.action_toggle_mouse()
+
+    def action_exit(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "exit_tutorial"):
+            app.exit_tutorial()
+
+    def on_click(self) -> None:
+        self.focus()
+
+    def update_tutorial(
+        self,
+        tutorial: GuidedTutorial,
+        steps: list[TutorialStep],
+        is_active: bool = True,
+    ) -> None:
+        lines: list[str] = []
+
+        # Status badge and header
+        status_badge = (
+            "[bold white on #15803d] TUTORIAL SELECTED [/]"
+            if is_active
+            else "[bold white on #374151] TUTORIAL PREVIEW [/]"
+        )
+        lines.append(
+            f"{status_badge}  [bold white]{safe_escape(tutorial.label)}[/]   "
+            f"[dim cyan]({safe_escape(tutorial.category)})[/]   "
+            f"[bold white on #1e3a8a] {len(steps)} Live Steps [/]"
+        )
+        lines.append("")
+
+        # Prominent launch action bar right at top of screen
+        if is_active:
+            lines.append(
+                "  [bold white on #1e3a8a]  ▶ Press \\[Enter], \\[Space], or \\[n] to Begin Step 1  [/]    "
+                "[bold white on #059669]  \\[a] Auto-Play Walkthrough  [/]    "
+                "[dim]•  \\[c] Copy Link  •  \\[Esc] Exit[/dim]"
+            )
+        else:
+            lines.append(
+                "  [bold white on #0284c7]  👉 Press \\[Enter] to Select & Launch Tutorial  [/]    "
+                "[bold white on #059669]  \\[a] Auto-Play  [/]    "
+                "[dim]•  \\[c] Copy Link[/dim]"
+            )
+        lines.append("")
+
+        # Overview / Scope
+        lines.append("[bold green]What You'll Explore:[/]")
+        lines.append(f"  {safe_escape(tutorial.doc)}")
+        lines.append("")
+
+        # Video companion (if available)
+        video_url = getattr(tutorial, "video_url", "")
+        video_title = getattr(tutorial, "video_title", "")
+        if video_url:
+            title_text = f"[bold white]{safe_escape(video_title)}[/]  " if video_title else ""
+            lines.append(f"  [bold cyan]Video companion:[/] {title_text}[bold underline bright_blue]{safe_escape(video_url)}[/]  [dim]('c' to copy link)[/dim]")
+            lines.append("")
+
+        # Architectural Traversal Flow
+        flow_parts = []
+        for i, s in enumerate(steps, start=1):
+            target = s.get_flow_label() if hasattr(s, "get_flow_label") else getattr(s, "flow_label", "")
+            if not target:
+                target = s.action.split("›")[-1].strip() or s.title.split("(")[0].strip()
+            flow_parts.append(f"[bold bright_yellow]{safe_escape(target)}[/]")
+        lines.append("[bold green]Architectural Traversal Flow:[/]")
+        lines.append("  " + " [bold dim cyan]──▶[/] ".join(flow_parts))
+        lines.append("")
+
+        # Tutorial steps
+        lines.append(f"[bold cyan]Tutorial steps & itinerary ({len(steps)} live steps):[/]  [bold bright_yellow]▼ Scroll down (↓ / j / PgDn / mouse wheel) to view all steps[/]")
+        lines.append("  [dim]" + "─" * 72 + "[/dim]")
+        for idx, step in enumerate(steps, start=1):
+            action_field = step.get_action_field() if hasattr(step, "get_action_field") else (step.action_field or step.highlight_field)
+            action_badge = f"[bold bright_cyan]👉 \\[ENTER] {safe_escape(action_field)}[/]" if action_field else "[dim](inspect)[/]"
+            val_fields = step.get_value_fields() if hasattr(step, "get_value_fields") else step.value_fields
+            val_names = ", ".join(val_fields)
+            val_badge = f"   [dim]Value:[/] [bold bright_yellow]💡 {safe_escape(val_names)}[/]" if val_names else ""
+            lines.append(f"  [bold yellow]{idx}. {safe_escape(step.title)}[/]   [dim]›[/]  [cyan]{safe_escape(step.action)}[/]")
+            lines.append(f"     [dim]Action:[/] {action_badge}{val_badge}")
+            if step.userspace:
+                lines.append(f"     [dim]Userspace:[/] [green]{safe_escape(step.userspace)}[/]")
+            insight = step.get_insight() if hasattr(step, "get_insight") else (step.commentary.split(". ")[0].strip() + ".")
+            if insight:
+                lines.append(f"     [dim]Takeaway:[/] [italic white]{safe_escape(insight)}[/]")
+            lines.append("")
+            if idx == 5 and len(steps) > 5:
+                lines.append(f"  [bold bright_yellow]─── ▼ Scroll down (↓ / PgDn) for remaining steps 6 to {len(steps)} ▼ ───[/]")
+                lines.append("")
+
+        lines.append("  [bold bright_yellow]▲ End of itinerary · Scroll up (↑ / k / PgUp) to return to top[/]")
+        lines.append("  [dim]" + "─" * 72 + "[/dim]")
+        lines.append(
+            "  [bold white on #1e3a8a]  Press \\[Enter] or \\[n] to Begin Step 1  [/]    "
+            "[bold white on #059669]  \\[a] Auto-Play  [/]    "
+            "[bold white on #374151]  \\[c] Copy Link  [/]"
+        )
+        lines.append(
+            "  [dim]Shortcuts: [bold bright_yellow]\\[m][/] Mouse Select   •   "
+            "[bold bright_yellow]\\[p][/] Overview   •   "
+            "[bold bright_yellow]\\[Esc][/] Exit[/dim]"
+        )
+        lines.append("")
+        lines.append("")
+
+        self.update("\n".join(lines))
+        self.display = True
+        try:
+            self.scroll_home(animate=False)
+        except Exception:
+            pass
+
+    update_tour = update_tutorial
+
+
+TourLanding = TutorialLanding
+
+
+@dataclass
+class TutorialSession:
+    tutorial: GuidedTutorial
+    steps: list[TutorialStep]
+    current_idx: int = 0
+    step_frames: dict[int, Frame] = field(default_factory=dict)
+
+    @property
+    def tour(self) -> GuidedTutorial:
+        return self.tutorial
+
+    @tour.setter
+    def tour(self, val: GuidedTutorial) -> None:
+        self.tutorial = val
+
+
+TourSession = TutorialSession
+
+
+def _matches_field(needle: str, row_name: str, display_name: str = "") -> bool:
+    """Check if row_name or display_name matches a tutorial target field."""
+    if not needle:
+        return False
+    n = needle.lower().strip()
+    rn = row_name.lower().strip()
+    dn = display_name.lower().strip()
+
+    # Exact match
+    if n == rn or n == dn:
+        return True
+
+    # Strip tree and status prefixes
+    clean_rn = re.sub(r"^[→▸•\s]+", "", rn).strip()
+    clean_dn = re.sub(r"^[→▸•\s]+", "", dn).strip()
+    if n == clean_rn or n == clean_dn:
+        return True
+
+    # Link format: "mm (address space)" -> first token is "mm"
+    first_token_rn = clean_rn.split()[0] if clean_rn else ""
+    first_token_dn = clean_dn.split()[0] if clean_dn else ""
+    if n == first_token_rn or n == first_token_dn:
+        return True
+
+    # Whole-word / token boundary match (e.g. "vmas" in "vmas", but not "mm" in "comm")
+    pattern = r"(?:\b|_)" + re.escape(n) + r"(?:\b|_)"
+    if re.search(pattern, clean_rn) or re.search(pattern, clean_dn):
+        return True
+
+    # Path components match (e.g. "/usr/lib/systemd/systemd" matches "systemd")
+    if "/" in rn and n in rn:
+        parts = rn.split("/")
+        if any(n == p.strip() for p in parts):
+            return True
+
+    return False
+
+
+def get_action_cell_text(
+    clean_name: str,
+    variant: int = 1,
+    blink_phase: bool = True,
+) -> Text:
+    """Return the styled text for the action row name cell, honoring the blink phase."""
+    if variant == 1:
+        # Software blink alternating between navy-backed and bright-yellow-backed styles
+        style = "bold bright_yellow on #1e3a8a" if blink_phase else "bold black on bright_yellow"
+        return Text(f"👉 [ENTER] {clean_name}", style=style)
+    else:
+        # Variant 2: Subtle arrow pulse
+        style = "bold bright_yellow" if blink_phase else "bold bright_cyan on #374151"
+        return Text(f"▶ {clean_name} ↵", style=style)
+
+
+def style_action_row(
+    clean_name: str,
+    values: list[str],
+    cells: list[Text],
+    next_target: str,
+    is_final: bool,
+    variant: int = 1,
+    blink_phase: bool = True,
+) -> None:
+    """Style the action row that user navigates to advance the tutorial."""
+    if variant == 1:
+        # Variant 1: Interactive coach-mark badge with alternating high-contrast blink
+        if not is_final:
+            cells[0] = get_action_cell_text(clean_name, variant=1, blink_phase=blink_phase)
+            if len(cells) > 1:
+                cells[1].stylize("bold cyan")
+            if len(cells) > 2:
+                cells[2] = Text(f"──▶ follow into {next_target}", style="bold bright_green")
+        else:
+            cells[0] = Text(f"✓ {clean_name}", style="bold bright_green")
+            if len(cells) > 2:
+                cells[2] = Text(f"{values[2]}  ──▶ traversal complete!", style="bold bright_green")
+    else:
+        # Variant 2: Subtle arrow marker and direct action target
+        if not is_final:
+            cells[0] = get_action_cell_text(clean_name, variant=2, blink_phase=blink_phase)
+            if len(cells) > 1:
+                cells[1].stylize("cyan")
+            if len(cells) > 2:
+                cells[2] = Text(f"{values[2]}  [follow ──▶ {next_target}]", style="bold bright_green")
+        else:
+            cells[0] = Text(f"✓ {clean_name}", style="bold bright_green")
+            if len(cells) > 2:
+                cells[2] = Text(f"{values[2]}  [done]", style="bold bright_green")
+
+
+def style_value_row(
+    clean_name: str,
+    values: list[str],
+    cells: list[Text],
+    variant: int = 1,
+) -> None:
+    """Style the value row displaying key data payoff for current step."""
+    clean_val = values[2].strip() if len(values) > 2 else ""
+    if variant == 1:
+        # Variant 1: Insight bulb icon + golden star payoff
+        cells[0] = Text(f"💡 {clean_name}", style="bold bright_cyan")
+        if len(cells) > 2 and clean_val:
+            cells[2] = Text(f"★ {clean_val}", style="bold bright_yellow")
+    else:
+        # Variant 2: Tag pill + highlighted value block
+        cells[0] = Text(f"• {clean_name}", style="bold white on #0369a1")
+        if len(cells) > 2 and clean_val:
+            cells[2] = Text(f" {clean_val} ", style="bold bright_yellow on #374151")
 
 
 class Explorer(App):
@@ -193,6 +618,16 @@ class Explorer(App):
         Binding("O", "sort_reverse", "reverse", show=False),
         Binding("r", "refresh", "refresh"),
         Binding("u", "userspace", "userspace"),
+        Binding("v", "cycle_view", "view"),
+        Binding("a", "toggle_auto", "autoplay"),
+        Binding("H", "toggle_header_variant", "header variant", show=False),
+        Binding("Y", "toggle_highlight_style", "highlight style", show=False),
+        Binding("c", "copy", "copy"),
+        Binding("C", "copy_row", "copy row", show=False),
+        Binding("y", "copy", "copy", show=False),
+        Binding("m", "toggle_mouse", "mouse"),
+        Binding("n", "tutorial_next", "next step"),
+        Binding("p", "tutorial_prev", "prev step"),
         Binding("s", "source", "source"),
         Binding("t", "trace_command", "trace command"),
         Binding("g", "graph", "graph"),
@@ -209,9 +644,34 @@ class Explorer(App):
         source: KernelSource | None = None,
         source_available: bool = True,
         live: bool = True,
+        initial_tutorial: str | None = None,
+        initial_tour: str | None = None,
     ) -> None:
         super().__init__()
         self.prog = prog
+        self.initial_tutorial = initial_tutorial or initial_tour
+        self.active_tutorial: TutorialSession | None = None
+        self._tutorial_action_idx: int | None = None
+        self._tutorial_action_clean_name: str = ""
+        self._tutorial_action_target: str = ""
+        self._tutorial_action_is_final: bool = False
+        self.auto_play: bool = False
+        self._auto_timer = None
+        self._blink_timer = None
+        self._blink_phase: bool = True
+        self.blink_interval: float = 0.85
+        self.auto_dwell_travel_settled: float = 3.0
+        self.auto_dwell_already_in_place: float = 2.0
+        self.auto_dwell_time: float = 3.0
+        self._auto_seconds_remaining: float = 2.0
+        self.highlight_variant: int = 1
+        self.mouse_tracking: bool = True
+        self._navigator = CursorNavigator(
+            self,
+            on_step=self._on_nav_step,
+            on_settled=self._on_nav_settled,
+        )
+        self.animate_cursor: bool | None = None
         self.context = Context(
             prog,
             source or KernelSource(),
@@ -233,7 +693,7 @@ class Explorer(App):
         # the token it started with, so a result that arrives after the user
         # moved on is dropped instead of overwriting whatever is on screen now.
         self._token = 0
-        # The last graph's shape, so returning to it from a detail view does
+        # The last graph's layout, so returning to it from a detail view does
         # not throw away the branches the user opened.
         self.graph_state: dict | None = None
         # Pending sidebar preview, cancelled by the next cursor move and by any
@@ -244,6 +704,33 @@ class Explorer(App):
         self._synced_node = None
 
     @property
+    def active_tour(self) -> TutorialSession | None:
+        return self.active_tutorial
+
+    @active_tour.setter
+    def active_tour(self, value: TutorialSession | None) -> None:
+        self.active_tutorial = value
+
+    @property
+    def initial_tour(self) -> str | None:
+        return self.initial_tutorial
+
+    @initial_tour.setter
+    def initial_tour(self, value: str | None) -> None:
+        self.initial_tutorial = value
+
+    def query_one(self, *args: Any, **kwargs: Any) -> Any:
+        if args and isinstance(args[0], str):
+            selector = args[0]
+            if selector == "#tour-banner":
+                args = ("#tutorial-banner", *args[1:])
+            elif selector == "#tour-landing":
+                args = ("#tutorial-landing", *args[1:])
+            elif selector == "view-tours":
+                args = ("view-tutorials", *args[1:])
+        return super().query_one(*args, **kwargs)
+
+    @property
     def source(self) -> KernelSource:
         return self.context.source
 
@@ -251,20 +738,140 @@ class Explorer(App):
     def userspace(self) -> bool:
         return self.context.userspace
 
+    def _landing_displayed(self) -> bool:
+        """Whether a tutorial landing / overview page is currently displayed."""
+        if self.active_tutorial is not None and self.active_tutorial.current_idx == 0:
+            return True
+        try:
+            landing = self.query_one(TutorialLanding)
+            return bool(landing.display)
+        except Exception:
+            return False
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        # Returning None hides the binding from the footer: the source view
-        # needs kernel source, which this build may not have.
-        if action == "source" and not self._source_available:
+        if action in ("copy", "copy_row", "toggle_mouse"):
+            return True
+
+        landing_shown = self._landing_displayed()
+        showing_src = self._showing_source()
+
+        # Step navigation: strictly context-dependent
+        if action in ("tutorial_next", "tour_next"):
+            if self.active_tutorial is not None:
+                # In an active tutorial session: available until the final step
+                if self.active_tutorial.current_idx < len(self.active_tutorial.steps):
+                    return True
+                return None
+            if landing_shown:
+                return True
+            try:
+                tree = self.query_one("#nav", Tree)
+                node = getattr(tree, "cursor_node", None)
+                if node and isinstance(getattr(node, "data", None), (GuidedTutorial, GuidedTour)):
+                    return True
+            except Exception:
+                pass
             return None
-        # Already looking at source: its rows are lines of C, not objects, so
-        # "s" has nothing to resolve. Hide it rather than answering with a
-        # refusal.
-        if action == "source" and self._showing_source():
+
+        if action in ("tutorial_prev", "tour_prev"):
+            # Previous step is only valid inside an active tutorial session past step 0
+            if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+                return True
             return None
-        if action == "trace_command" and not self.context.live:
+
+        if action == "toggle_auto":
+            if self.active_tutorial is not None:
+                return True
+            if landing_shown:
+                return True
+            try:
+                tree = self.query_one("#nav", Tree)
+                node = getattr(tree, "cursor_node", None)
+                if node and isinstance(getattr(node, "data", None), (GuidedTutorial, GuidedTour)):
+                    return True
+            except Exception:
+                pass
             return None
-        if action == "userspace" and not self.context.live:
-            return None
+
+        # When the tutorial landing page is displayed, hide all actions that operate on
+        # data tables, structs, or commands (none of which exist on the landing page)
+        if landing_shown:
+            if action in (
+                "search",
+                "sort",
+                "sort_reverse",
+                "refresh",
+                "userspace",
+                "source",
+                "trace_command",
+                "graph",
+                "expand",
+            ):
+                return None
+
+        # Source code view context: suppress struct/table manipulations
+        if showing_src:
+            if action in (
+                "source",
+                "sort",
+                "sort_reverse",
+                "refresh",
+                "userspace",
+                "trace_command",
+                "graph",
+                "expand",
+            ):
+                return None
+
+        # Expand: only available when stack is active
+        if action == "expand":
+            if not self.stack:
+                return None
+            return True
+
+
+        # Source inspection: requires source available and a loaded stack frame
+        if action == "source":
+            if not self._source_available or not self.stack:
+                return None
+            return True
+
+        # Tracing commands: requires live kernel and an active stack frame
+        if action == "trace_command":
+            if not self.context.live or not self.stack:
+                return None
+            return True
+
+        # Userspace equivalents: requires live kernel and an active stack frame
+        if action == "userspace":
+            if not self.context.live or not self.stack:
+                return None
+            return True
+
+        # Sorting: requires an active stack frame
+        if action in ("sort", "sort_reverse"):
+            if not self.stack:
+                return None
+            return True
+
+        # Refresh: requires live kernel and an active stack frame
+        if action == "refresh":
+            if not self.context.live or not self.stack:
+                return None
+            return True
+
+        # Search / filter: requires an active stack frame
+        if action == "search":
+            if not self.stack:
+                return None
+            return True
+
+        # Graph: requires an active stack frame
+        if action == "graph":
+            if not self.stack:
+                return None
+            return True
+
         return True
 
     def _showing_source(self) -> bool:
@@ -351,18 +958,23 @@ class Explorer(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static("select a subsystem", id="path")
+        yield Static("select a subsystem", id="path", markup=False)
         with Horizontal():
             with Vertical(id="sidebar"):
+                initial_tab = "view-tutorials" if self.initial_tutorial else "view-structures"
                 yield Tabs(
                     Tab("structures", id="view-structures"),
                     Tab("operations", id="view-operations"),
+                    Tab("tutorials", id="view-tutorials"),
                     id="views",
+                    active=initial_tab,
                 )
                 yield NavTree("subsystems", id="nav")
             with Vertical(id="detail"):
-                yield Static("", id="doc")
-                yield Static("", id="activity")
+                yield Static("", id="doc", markup=False)
+                yield Static("", id="activity", markup=False)
+                yield TutorialBanner(id="tutorial-banner")
+                yield TutorialLanding(id="tutorial-landing")
                 yield FieldsTable(id="fields", cursor_type="row", zebra_stripes=True)
                 yield Static("", id="hint")
         yield Input(placeholder="filter fields…", id="search")
@@ -370,10 +982,28 @@ class Explorer(App):
 
     def on_mount(self) -> None:
         self.refresh_bindings()
-        self.build_tree("structures")
         self.query_one("#search", Input).display = False
         self.query_one("#activity", Static).display = False
-        self.open_plan(frames.landing_plan(self.context))
+        self.query_one(TutorialBanner).display = False
+        self.query_one(TutorialLanding).display = False
+        if self.initial_tutorial:
+            tabs = self.query_one("#views", Tabs)
+            tabs.active = "view-tutorials"
+            self.build_tree("tutorials")
+            matched = None
+            query = self.initial_tutorial.lower().replace("-", "_").replace(" ", "_")
+            for t in tutorials():
+                if query in t.key.lower() or query in t.label.lower().replace("-", "_").replace(" ", "_"):
+                    matched = t
+                    break
+            if matched is not None:
+                self.sync_tree(matched)
+                self.start_tutorial(matched)
+            else:
+                self.open_plan(frames.landing_plan(self.context))
+        else:
+            self.build_tree("structures")
+            self.open_plan(frames.landing_plan(self.context))
 
     # ------------------------------------------------------------- background
 
@@ -444,17 +1074,65 @@ class Explorer(App):
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
         """Switch which view the sidebar lists. The views are independent."""
         view = (event.tab.id or "").removeprefix("view-")
-        if view:
-            self.build_tree(view)
+        if not view:
+            return
+        if view == "tours":
+            view = "tutorials"
+        if view != "tutorials":
+            if self.active_tutorial is not None:
+                self.exit_tutorial()
+            self.query_one(TutorialLanding).display = False
+            self.query_one("#fields", DataTable).display = True
+            self.query_one("#doc", Static).display = True
+        tree: Tree = self.query_one("#nav", Tree)
+        current_data = getattr(getattr(tree, "root", None), "data", None)
+        current_label = getattr(current_data, "label", "")
+        if (view == "structures" and current_label == "subsystems") or (view == current_label):
+            return
+        self.build_tree(view)
 
     def build_tree(self, view: str) -> None:
         tree: Tree = self.query_one("#nav", Tree)
         tree.clear()
         tree.root.expand()
         if view == "operations":
+            tree.root.set_label("operations")
             self._build_operation_tree(tree)
+        elif view in ("tutorials", "tours"):
+            tree.root.set_label("tutorials")
+            self._build_tutorial_tree(tree)
         else:
+            tree.root.set_label("subsystems")
             self._build_structure_tree(tree)
+
+    def _build_tutorial_tree(self, tree: Tree) -> None:
+        """Live guided exploration tutorials grouped by category."""
+        from ..operations.tutorial import tutorials
+
+        items = tutorials()
+        tree.root.data = Listing(
+            "tutorials",
+            "Live guided tutorials driving through running kernel structures with commentary.",
+            tuple(items),
+        )
+        members: dict[str, list] = {}
+        for item in items:
+            members.setdefault(item.category, []).append(item)
+
+        for category, group_items in members.items():
+            branch = tree.root.add(
+                category,
+                expand=True,
+                data=Listing(
+                    category,
+                    f"Live guided tutorials in the {category} category.",
+                    tuple(group_items),
+                ),
+            )
+            for item in group_items:
+                branch.add_leaf(item.label, data=item)
+
+    _build_tour_tree = _build_tutorial_tree
 
     def _build_operation_tree(self, tree: Tree) -> None:
         """Both kinds of entry, grouped by the subsystem they belong to.
@@ -542,6 +1220,410 @@ class Explorer(App):
             current = current.parent
         return ""
 
+    # ------------------------------------------------------------ guided tutorials
+
+    def start_tutorial(self, tutorial: GuidedTutorial) -> None:
+        """Start a guided tutorial in driver mode on the tutorial landing page."""
+        steps = tutorial.steps(self.context.prog)
+        if not steps:
+            self.notify("No steps available for this tutorial on this kernel", severity="warning")
+            return
+        self.active_tutorial = TutorialSession(tutorial=tutorial, steps=steps, current_idx=0)
+        self.refresh_bindings()
+        self._show_tutorial_step(0)
+
+    start_tour = start_tutorial
+
+    def _show_tutorial_step(self, step_idx: int) -> None:
+        """Render the landing page (step 0) or real Frame for the tutorial step (steps 1..N)."""
+        if self.active_tutorial is None:
+            return
+
+        banner = self.query_one(TutorialBanner)
+        landing = self.query_one(TutorialLanding)
+        table = self.query_one("#fields", DataTable)
+        doc = self.query_one("#doc", Static)
+        hint = self.query_one("#hint", Static)
+
+        if step_idx == 0:
+            if hasattr(self, "_navigator"):
+                self._navigator.cancel()
+            self._stop_blink_timer()
+            self.active_tutorial.current_idx = 0
+            self._tutorial_action_idx = None
+            self._tutorial_action_clean_name = ""
+            self._tutorial_action_target = ""
+            self._tutorial_action_is_final = False
+            banner.display = False
+            table.display = False
+            doc.display = False
+            hint.update("")
+            landing.update_tutorial(self.active_tutorial.tutorial, self.active_tutorial.steps, is_active=True)
+            self.query_one("#path", Static).display = True
+            self.query_one("#path", Static).update(
+                f"tutorial › {self.active_tutorial.tutorial.category} › {self.active_tutorial.tutorial.label} (Selected · Press Enter to Begin)"
+            )
+            nav = self.query_one("#nav", Tree)
+            if not nav.has_focus:
+                landing.focus()
+            self.refresh_bindings()
+            return
+
+        self.query_one("#path", Static).display = False
+
+        real_step_idx = step_idx - 1
+        if not (0 <= real_step_idx < len(self.active_tutorial.steps)):
+            return
+
+        self.active_tutorial.current_idx = step_idx
+        step = self.active_tutorial.steps[real_step_idx]
+
+        # Progressive stack: load/cache frame for each step in order to show connected flow
+        if step_idx not in self.active_tutorial.step_frames:
+            frame = frames.tutorial_step_frame(self.context, step)
+            frame.load()
+            self.active_tutorial.step_frames[step_idx] = frame
+
+        self.stack = [self.active_tutorial.step_frames[i] for i in range(1, step_idx + 1) if i in self.active_tutorial.step_frames]
+        self.filter = ""
+        self.set_activity("")
+
+        # Position cursor on action field if present, or on first value field
+        action_needle = (
+            step.get_action_field()
+            if hasattr(step, "get_action_field")
+            else (step.action_field or step.highlight_field)
+        )
+        val_needles = (
+            step.get_value_fields()
+            if hasattr(step, "get_value_fields")
+            else step.value_fields
+        )
+        target_idx = None
+        action_idx = None
+        current_frame = self.stack[-1]
+
+        if action_needle:
+            for idx, row in enumerate(current_frame.rows):
+                if row.name.startswith("→ ") and _matches_field(action_needle, row.name, row.display_name):
+                    action_idx = idx
+                    target_idx = idx
+                    break
+            if action_idx is None:
+                for idx, row in enumerate(current_frame.rows):
+                    if _matches_field(action_needle, row.name, row.display_name):
+                        action_idx = idx
+                        target_idx = idx
+                        break
+
+        if target_idx is None and val_needles:
+            for idx, row in enumerate(current_frame.rows):
+                if any(_matches_field(v, row.name, row.display_name) for v in val_needles):
+                    target_idx = idx
+                    break
+
+        self._tutorial_action_idx = action_idx
+        self.render_frame()
+
+        landing.display = False
+        table.display = True
+        doc.display = False
+
+        animating = False
+        if target_idx is not None:
+            if self._should_animate_cursor() and target_idx > 0:
+                animating = True
+                self._auto_seconds_remaining = self.auto_dwell_travel_settled
+                self._navigator.navigate(table, start_row=0, target_row=target_idx, total_duration=1.1)
+            else:
+                self._auto_seconds_remaining = self.auto_dwell_already_in_place
+                table.move_cursor(row=target_idx, animate=False)
+                self.update_hint()
+                self._ensure_blink_timer()
+        else:
+            self._auto_seconds_remaining = self.auto_dwell_already_in_place
+
+        banner.update_step(
+            self.active_tutorial.tutorial.label,
+            step_idx,
+            len(self.active_tutorial.steps),
+            step,
+            self.active_tutorial.steps,
+            auto_play=self.auto_play,
+            seconds_left=int(round(self._auto_seconds_remaining)) if self.auto_play else None,
+            is_travelling=animating,
+        )
+        if not animating:
+            self._ensure_blink_timer()
+        table.focus()
+        self.refresh_bindings()
+
+    def _on_nav_step(self, row_idx: int) -> None:
+        self.update_hint()
+
+    def _on_nav_settled(self, row_idx: int) -> None:
+        self.update_hint()
+        # When the cursor arrives at its place, wait a full 3 seconds
+        self._auto_seconds_remaining = self.auto_dwell_travel_settled
+        self._ensure_blink_timer()
+        if self.auto_play and self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+            step_idx = self.active_tutorial.current_idx - 1
+            if 0 <= step_idx < len(self.active_tutorial.steps):
+                try:
+                    banner = self.query_one(TutorialBanner)
+                    banner.update_step(
+                        self.active_tutorial.tutorial.label,
+                        self.active_tutorial.current_idx,
+                        len(self.active_tutorial.steps),
+                        self.active_tutorial.steps[step_idx],
+                        self.active_tutorial.steps,
+                        auto_play=True,
+                        seconds_left=int(round(self._auto_seconds_remaining)),
+                        is_travelling=False,
+                    )
+                except Exception:
+                    pass
+
+    def _should_animate_cursor(self) -> bool:
+        if self.animate_cursor is not None:
+            return self.animate_cursor
+        return not getattr(self, "is_headless", False)
+
+    _show_tour_step = _show_tutorial_step
+
+    def action_tutorial_next(self, from_auto: bool = False) -> None:
+        """Advance to the next step of the active guided tutorial."""
+        if hasattr(self, "_navigator") and self._navigator.is_active:
+            self._navigator.cancel(snap_to_target=True)
+        if not from_auto and self.auto_play:
+            self._pause_auto()
+        if self.active_tutorial is None:
+            tree: Tree = self.query_one("#nav", Tree)
+            node = getattr(tree, "cursor_node", None)
+            data = getattr(node, "data", None)
+            if node is not None and isinstance(data, (GuidedTutorial, GuidedTour)):
+                self.start_tutorial(data)
+                self._show_tutorial_step(1)
+                return
+            return
+        if self.active_tutorial.current_idx < len(self.active_tutorial.steps):
+            self._show_tutorial_step(self.active_tutorial.current_idx + 1)
+        else:
+            self.notify("Completed tutorial! Press Esc to exit or 'p' to go back.", severity="information")
+
+    action_tour_next = action_tutorial_next
+
+    def action_tutorial_prev(self) -> None:
+        """Return to the previous step of the active guided tutorial (or landing page)."""
+        if hasattr(self, "_navigator") and self._navigator.is_active:
+            self._navigator.cancel(snap_to_target=True)
+        if self.auto_play:
+            self._pause_auto()
+        if self.active_tutorial is None:
+            return
+        if self.active_tutorial.current_idx > 0:
+            self._show_tutorial_step(self.active_tutorial.current_idx - 1)
+
+    action_tour_prev = action_tutorial_prev
+
+    def exit_tutorial(self) -> None:
+        """Exit the active guided tutorial and hide the commentary banner and landing page."""
+        if hasattr(self, "_navigator"):
+            self._navigator.cancel()
+        if self.auto_play:
+            self._pause_auto(silent=True)
+        self._stop_blink_timer()
+        if self.active_tutorial is None:
+            return
+        self.active_tutorial = None
+        self._tutorial_action_idx = None
+        self._tutorial_action_clean_name = ""
+        self._tutorial_action_target = ""
+        self._tutorial_action_is_final = False
+        self.query_one(TutorialBanner).display = False
+        self.query_one(TutorialLanding).display = False
+        self.query_one("#fields", DataTable).display = True
+        self.query_one("#doc", Static).display = True
+        self.query_one("#path", Static).display = True
+        self.refresh_bindings()
+        self.notify("Exited tutorial")
+
+    exit_tour = exit_tutorial
+
+    def action_toggle_auto(self) -> None:
+        """Toggle auto-play demo walkthrough mode."""
+        if self.auto_play:
+            self._pause_auto()
+            return
+
+        if self.active_tutorial is None:
+            tree: Tree = self.query_one("#nav", Tree)
+            node = getattr(tree, "cursor_node", None)
+            data = getattr(node, "data", None)
+            if node is not None and isinstance(data, (GuidedTutorial, GuidedTour)):
+                self.start_tutorial(data)
+            else:
+                self.notify("Select a tutorial to auto-play", severity="warning")
+                return
+
+        if self.active_tutorial is not None:
+            if self.active_tutorial.current_idx == 0:
+                self._show_tutorial_step(1)
+            self._start_auto()
+
+    def _start_auto(self) -> None:
+        self.auto_play = True
+        is_active = hasattr(self, "_navigator") and self._navigator.is_active
+        self._auto_seconds_remaining = (
+            self.auto_dwell_travel_settled if is_active else self.auto_dwell_already_in_place
+        )
+        self._ensure_blink_timer()
+        self.notify("▶ Auto-play started ('a' or navigation keys to pause)", severity="information")
+        if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+            step_idx = self.active_tutorial.current_idx - 1
+            if 0 <= step_idx < len(self.active_tutorial.steps):
+                banner = self.query_one(TutorialBanner)
+                banner.update_step(
+                    self.active_tutorial.tutorial.label,
+                    self.active_tutorial.current_idx,
+                    len(self.active_tutorial.steps),
+                    self.active_tutorial.steps[step_idx],
+                    self.active_tutorial.steps,
+                    auto_play=True,
+                    seconds_left=int(round(self._auto_seconds_remaining)),
+                    is_travelling=is_active,
+                )
+        self.refresh_bindings()
+
+    def _pause_auto(self, silent: bool = False) -> None:
+        if self.auto_play:
+            self.auto_play = False
+            if not silent:
+                self.notify("⏸ Auto-play paused")
+            if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+                step_idx = self.active_tutorial.current_idx - 1
+                if 0 <= step_idx < len(self.active_tutorial.steps):
+                    try:
+                        banner = self.query_one(TutorialBanner)
+                        banner.update_step(
+                            self.active_tutorial.tutorial.label,
+                            self.active_tutorial.current_idx,
+                            len(self.active_tutorial.steps),
+                            self.active_tutorial.steps[step_idx],
+                            self.active_tutorial.steps,
+                            auto_play=False,
+                        )
+                    except Exception:
+                        pass
+            self.refresh_bindings()
+
+    def _ensure_blink_timer(self) -> None:
+        if self._blink_timer is None:
+            self._blink_timer = self.set_interval(self.blink_interval, self._tick_blink)
+
+    def _stop_blink_timer(self) -> None:
+        if self._blink_timer is not None:
+            self._blink_timer.stop()
+            self._blink_timer = None
+
+    def _tick_blink(self) -> None:
+        """Pulse the action row and update auto-play countdown if active."""
+        if self.active_tutorial is None or self.active_tutorial.current_idx == 0:
+            self._stop_blink_timer()
+            return
+
+        self._blink_phase = not self._blink_phase
+
+        # 1. Pulse action row cell in DataTable
+        if (
+            self._tutorial_action_idx is not None
+            and self._tutorial_action_clean_name
+            and not getattr(self, "_tutorial_action_is_final", False)
+        ):
+            try:
+                table = self.query_one("#fields", DataTable)
+                cell_text = get_action_cell_text(
+                    self._tutorial_action_clean_name,
+                    variant=self.highlight_variant,
+                    blink_phase=self._blink_phase,
+                )
+                table.update_cell_at(Coordinate(self._tutorial_action_idx, 0), cell_text)
+            except Exception:
+                pass
+
+        # 2. If auto-play is active, only countdown AFTER the cursor has arrived at its place
+        if self.auto_play:
+            if hasattr(self, "_navigator") and self._navigator.is_active:
+                return  # do not count down while cursor is still travelling to its destination
+            self._auto_seconds_remaining = max(0.0, self._auto_seconds_remaining - self.blink_interval)
+            if self._auto_seconds_remaining <= 0.0:
+                self._auto_seconds_remaining = self.auto_dwell_time
+                self._run_auto_step()
+            else:
+                try:
+                    banner = self.query_one(TutorialBanner)
+                    step_idx = self.active_tutorial.current_idx - 1
+                    if 0 <= step_idx < len(self.active_tutorial.steps):
+                        banner.update_step(
+                            self.active_tutorial.tutorial.label,
+                            self.active_tutorial.current_idx,
+                            len(self.active_tutorial.steps),
+                            self.active_tutorial.steps[step_idx],
+                            self.active_tutorial.steps,
+                            auto_play=True,
+                            seconds_left=int(round(self._auto_seconds_remaining)),
+                        )
+                except Exception:
+                    pass
+
+    def _run_auto_step(self) -> None:
+        if self.active_tutorial is None:
+            self._pause_auto(silent=True)
+            return
+        if self.active_tutorial.current_idx < len(self.active_tutorial.steps):
+            self.action_tutorial_next(from_auto=True)
+            if self.active_tutorial.current_idx >= len(self.active_tutorial.steps):
+                self._pause_auto(silent=True)
+                self.notify("✓ Tutorial walkthrough completed!", severity="information")
+        else:
+            self._pause_auto(silent=True)
+
+    def action_toggle_header_variant(self) -> None:
+        """Toggle between 2-line minimal HUD and 3-line pipeline+insight header."""
+        banner = self.query_one(TutorialBanner)
+        banner.header_variant = 1 if banner.header_variant == 2 else 2
+        mode = "Variant A (2 lines - Minimal HUD)" if banner.header_variant == 1 else "Variant B (3 lines - Pipeline + Insight)"
+        self.notify(f"Header: {mode}")
+        if self.active_tutorial and self.active_tutorial.current_idx > 0:
+            step_idx = self.active_tutorial.current_idx - 1
+            if 0 <= step_idx < len(self.active_tutorial.steps):
+                banner.update_step(
+                    self.active_tutorial.tutorial.label,
+                    self.active_tutorial.current_idx,
+                    len(self.active_tutorial.steps),
+                    self.active_tutorial.steps[step_idx],
+                    self.active_tutorial.steps,
+                    auto_play=self.auto_play,
+                )
+
+    def action_toggle_highlight_style(self) -> None:
+        """Toggle between Style 1 (Coach mark + Bulb) and Style 2 (Chevron + Pill)."""
+        self.highlight_variant = 2 if self.highlight_variant == 1 else 1
+        mode = "Style 1 (Coach mark + Bulb)" if self.highlight_variant == 1 else "Style 2 (Chevron + Pill)"
+        self.notify(f"Highlight: {mode}")
+        self.render_frame()
+
+    exit_tour = exit_tutorial
+
+    def action_expand_or_tutorial_next(self) -> None:
+        """In a tutorial landing screen, advance to step 1; otherwise expand the row."""
+        if self.active_tutorial is not None and self.active_tutorial.current_idx == 0:
+            self.action_tutorial_next()
+        else:
+            self.action_expand()
+
+    action_expand_or_tour_next = action_expand_or_tutorial_next
+
     # ------------------------------------------------------------ navigation
 
     def push(self, frame: Frame) -> None:
@@ -596,8 +1678,12 @@ class Explorer(App):
             return
 
         frame = self.stack[-1]
-        breadcrumb = " › ".join(f.label for f in self.stack)
-        self.query_one("#path", Static).update(f"{breadcrumb}{self._type_suffix(frame)}")
+        if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+            self.query_one("#path", Static).display = False
+        else:
+            self.query_one("#path", Static).display = True
+            breadcrumb = " › ".join(f.label for f in self.stack)
+            self.query_one("#path", Static).update(f"{breadcrumb}{self._type_suffix(frame)}")
 
         self.update_doc()
 
@@ -651,8 +1737,59 @@ class Explorer(App):
                 # link with no equivalent keeps its type or its origin, and
                 # should look normal.
                 cells[1].stylize("cyan")
+            # In an active tutorial step, apply dual highlighting: Action ⚡ vs Value 💡
+            if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+                step_idx = self.active_tutorial.current_idx - 1
+                if 0 <= step_idx < len(self.active_tutorial.steps):
+                    step = self.active_tutorial.steps[step_idx]
+                    action_needle = (
+                        step.get_action_field()
+                        if hasattr(step, "get_action_field")
+                        else (step.action_field or step.highlight_field)
+                    )
+                    val_needles = (
+                        step.get_value_fields()
+                        if hasattr(step, "get_value_fields")
+                        else step.value_fields
+                    )
+                    if self._tutorial_action_idx is not None:
+                        is_action = (index == self._tutorial_action_idx)
+                    else:
+                        is_action = bool(action_needle and _matches_field(action_needle, row.name, row.display_name))
+                    is_value = (not is_action) and any(_matches_field(v, row.name, row.display_name) for v in val_needles)
+                    clean_name = values[0].strip()
+
+                    if is_action:
+                        is_final = (step_idx + 1 >= len(self.active_tutorial.steps))
+                        next_target = ""
+                        if not is_final:
+                            next_step = self.active_tutorial.steps[step_idx + 1]
+                            next_target = next_step.action.split("›")[-1].strip().split("(")[0].strip()
+                        style_action_row(
+                            clean_name,
+                            values,
+                            cells,
+                            next_target,
+                            is_final,
+                            variant=self.highlight_variant,
+                            blink_phase=self._blink_phase,
+                        )
+                        self._tutorial_action_clean_name = clean_name
+                        self._tutorial_action_target = next_target
+                        self._tutorial_action_is_final = is_final
+                    elif is_value:
+                        style_value_row(clean_name, values, cells, variant=self.highlight_variant)
+
             table.add_row(*cells, key=str(index))
         self.update_hint()
+        self.refresh_bindings()
+        if source_view:
+            target_idx = next(
+                (i for i, row in enumerate(self.visible_rows()) if row.kind == "derived" or row.type_name == "▸"),
+                None,
+            )
+            if target_idx is not None and table.row_count > target_idx:
+                table.move_cursor(row=target_idx, animate=False)
 
     def update_hint(self) -> None:
         """Show documentation for the row under the cursor."""
@@ -662,12 +1799,51 @@ class Explorer(App):
             return
         doc = self.struct_doc(self.stack[-1].obj if self.stack else None)
         source = doc.members.get(row.name, "") if doc else ""
-        # Kernel source comment first, then whatever the decoder/link explains.
-        parts = [p for p in (source, row.doc) if p]
-        self.query_one("#hint", Static).update("  ·  ".join(parts))
+
+        hint_text = Text()
+        if source:
+            hint_text.append(source)
+        if row.doc:
+            if len(hint_text):
+                hint_text.append("  ·  ")
+            hint_text.append(row.doc)
+
+        if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+            step_idx = self.active_tutorial.current_idx - 1
+            if 0 <= step_idx < len(self.active_tutorial.steps):
+                step = self.active_tutorial.steps[step_idx]
+                action_field = (
+                    step.get_action_field()
+                    if hasattr(step, "get_action_field")
+                    else (step.action_field or step.highlight_field)
+                )
+                val_fields = (
+                    step.get_value_fields()
+                    if hasattr(step, "get_value_fields")
+                    else step.value_fields
+                )
+
+                if action_field and _matches_field(action_field, row.name, row.display_name):
+                    next_target = ""
+                    if step_idx + 1 < len(self.active_tutorial.steps):
+                        next_step = self.active_tutorial.steps[step_idx + 1]
+                        next_target = next_step.action.split("›")[-1].strip().split("(")[0].strip()
+                    if len(hint_text):
+                        hint_text.append("  ·  ")
+                    if next_target:
+                        hint_text.append(f"👉 Press [Enter] to follow flow into {next_target}", style="bold bright_yellow")
+                    else:
+                        hint_text.append("✓ Traversal complete on this structure", style="bold bright_green")
+                elif any(_matches_field(v, row.name, row.display_name) for v in val_fields):
+                    if len(hint_text):
+                        hint_text.append("  ·  ")
+                    hint_text.append("💡 Key data payoff value for this step", style="bold bright_cyan")
+
+        self.query_one("#hint", Static).update(hint_text)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self.update_hint()
+        self.refresh_bindings()
 
     def visible_rows(self) -> list[Row]:
         if not self.stack:
@@ -706,6 +1882,7 @@ class Explorer(App):
         if node is self._synced_node:
             self._synced_node = None
             return
+        self.refresh_bindings()
         if node.data is None:
             return
         self._preview_timer = self.set_timer(
@@ -721,7 +1898,14 @@ class Explorer(App):
         occupies no line for the cursor to reach.
         """
         tree: Tree = self.query_one("#nav", Tree)
-        node = next((n for n in _descendants(tree.root) if n.data is item), None)
+        node = next(
+            (
+                n for n in _descendants(tree.root)
+                if n.data is item
+                or (getattr(n.data, "key", None) and getattr(n.data, "key", None) == getattr(item, "key", None))
+            ),
+            None,
+        )
         if node is None:
             return
         parent = node.parent
@@ -751,6 +1935,35 @@ class Explorer(App):
         data = node.data
         if data is None:
             return
+        if isinstance(data, (GuidedTutorial, GuidedTour)):
+            if preview:
+                steps = data.steps(self.context.prog)
+                self.query_one(TutorialBanner).display = False
+                self.query_one("#fields", DataTable).display = False
+                self.query_one("#doc", Static).display = False
+                self.query_one("#hint", Static).update("")
+                landing = self.query_one(TutorialLanding)
+                landing.update_tutorial(data, steps, is_active=False)
+                self.query_one("#path", Static).display = True
+                self.query_one("#path", Static).update(
+                    f"tutorial › {data.category} › {data.label} (Press Enter to Launch)"
+                )
+                self.refresh_bindings()
+            else:
+                if (
+                    self.active_tutorial is not None
+                    and self.active_tutorial.tutorial.key == data.key
+                    and self.active_tutorial.current_idx == 0
+                ):
+                    self._show_tutorial_step(1)
+                else:
+                    self.start_tutorial(data)
+            return
+        self.query_one(TutorialLanding).display = False
+        self.query_one("#fields", DataTable).display = True
+        self.query_one("#doc", Static).display = True
+        if self.active_tutorial is not None:
+            self.exit_tutorial()
         plan = frames.plan_for(
             data, self.context, self._subsystem_of(node), preview=preview
         )
@@ -763,8 +1976,42 @@ class Explorer(App):
         self.action_follow()
 
     def action_follow(self) -> None:
+        if hasattr(self, "_navigator") and self._navigator.is_active:
+            self._navigator.cancel(snap_to_target=True)
+        if self.active_tutorial is not None:
+            if self.auto_play:
+                self._pause_auto()
+            if self.active_tutorial.current_idx == 0:
+                self.action_tutorial_next()
+                return
+            real_idx = self.active_tutorial.current_idx - 1
+            if 0 <= real_idx < len(self.active_tutorial.steps):
+                step = self.active_tutorial.steps[real_idx]
+                row = self.current_row()
+                action_field = (
+                    step.get_action_field()
+                    if hasattr(step, "get_action_field")
+                    else (step.action_field or step.highlight_field)
+                )
+                if row is not None:
+                    table = self.query_one("#fields", DataTable)
+                    current_cursor_row = table.cursor_row
+                    is_last_step = (self.active_tutorial.current_idx == len(self.active_tutorial.steps))
+                    if (
+                        (self._tutorial_action_idx is not None and current_cursor_row == self._tutorial_action_idx)
+                        or (action_field and _matches_field(action_field, row.name, row.display_name))
+                    ):
+                        if not is_last_step:
+                            self.action_tutorial_next()
+                            return
+                        else:
+                            self.action_expand()
+                            return
         row = self.current_row()
         if row is None or not row.followable:
+            if row is not None and (row.expand is not None or (row.obj is not None and hasattr(row, "children"))):
+                self.action_expand()
+                return
             self.bell()
             return
 
@@ -816,6 +2063,22 @@ class Explorer(App):
         on a second press. The expansion lives in the frame's row list, so a
         refresh or a re-entry rebuilds the frame closed.
         """
+        if self.active_tutorial is not None and self.active_tutorial.current_idx == 0:
+            if self.auto_play:
+                self._pause_auto()
+            self.action_tutorial_next()
+            return
+
+        landing = self.query_one(TutorialLanding)
+        if landing.display:
+            tree: Tree = self.query_one("#nav", Tree)
+            node = getattr(tree, "cursor_node", None)
+            data = getattr(node, "data", None)
+            if node is not None and isinstance(data, (GuidedTutorial, GuidedTour)):
+                self.start_tutorial(data)
+                self._show_tutorial_step(1)
+                return
+
         row = self.current_row()
         if row is None or not self.stack:
             self.bell()
@@ -845,6 +2108,17 @@ class Explorer(App):
             if not children:
                 self.notify(f"nothing to expand under {row.name}", severity="warning")
                 return
+            if row.name == "rss_stat":
+                rss_names = {
+                    0: "MM_FILEPAGES (file cache)",
+                    1: "MM_ANONPAGES (heap/stack)",
+                    2: "MM_SWAPENTS (swap entries)",
+                    3: "MM_SHMEMPAGES (shared mem)",
+                }
+                children = [
+                    replace(child, note=rss_names.get(i, child.note))
+                    for i, child in enumerate(children)
+                ]
             rows[index] = replace(row, expanded=True)
             rows[index + 1 : index + 1] = [
                 replace(child, depth=row.depth + 1) for child in children
@@ -905,6 +2179,13 @@ class Explorer(App):
             self.filter = ""
             self._token += 1
             self.render_frame()
+            return
+        if self.active_tutorial is not None:
+            if self.active_tutorial.current_idx > 0:
+                self.action_tutorial_prev()
+            else:
+                self.exit_tutorial()
+            return
 
     def action_userspace(self) -> None:
         """Swap the origin column for how to get the same thing from userspace."""
@@ -919,6 +2200,20 @@ class Explorer(App):
             "showing userspace equivalents" if self.userspace else "showing kernel origins"
         )
 
+    def action_cycle_view(self) -> None:
+        """Cycle between structures, operations, and tutorials views."""
+        tabs = self.query_one("#views", Tabs)
+        order = ["view-structures", "view-operations", "view-tutorials"]
+        current = tabs.active or "view-structures"
+        if current == "view-tours":
+            current = "view-tutorials"
+        next_idx = (order.index(current) + 1) % len(order) if current in order else 0
+        next_tab_id = order[next_idx]
+        tabs.active = next_tab_id
+        view = next_tab_id.removeprefix("view-")
+        self.build_tree(view)
+        self.refresh_bindings()
+
     def action_refresh(self) -> None:
         """Re-read the current frame from live memory."""
         if not self.stack:
@@ -926,6 +2221,127 @@ class Explorer(App):
         self.stack[-1].load()
         self.render_frame()
         self.notify("re-read from live kernel")
+
+    def action_copy(self) -> None:
+        """Copy the current value, command, link, or item under cursor to clipboard."""
+        if self._landing_displayed():
+            tutorial = None
+            if self.active_tutorial is not None:
+                tutorial = self.active_tutorial.tutorial
+            else:
+                try:
+                    tree = self.query_one("#nav", Tree)
+                    node = getattr(tree, "cursor_node", None)
+                    if node and isinstance(getattr(node, "data", None), (GuidedTutorial, GuidedTour)):
+                        tutorial = node.data
+                except Exception:
+                    pass
+            if tutorial is not None:
+                video_url = getattr(tutorial, "video_url", "")
+                if video_url:
+                    copy_to_system_clipboard(video_url, self)
+                    self.notify(f"Copied video URL: {video_url}", title="Clipboard", timeout=3.0, markup=False)
+                    return
+                summary = f"{tutorial.label}\n{tutorial.doc}"
+                copy_to_system_clipboard(summary, self)
+                self.notify(f"Copied tutorial overview: {tutorial.label}", title="Clipboard", timeout=3.0, markup=False)
+                return
+
+        # If sidebar tree is focused, copy the tree item label
+        try:
+            tree = self.query_one("#nav", Tree)
+            if tree.has_focus:
+                node = tree.cursor_node
+                if node is not None:
+                    text = str(node.label)
+                    copy_to_system_clipboard(text, self)
+                    self.notify(f"Copied item: {text}", title="Clipboard", timeout=2.5, markup=False)
+                    return
+        except Exception:
+            pass
+
+        # In userspace mode, prefer copying the userspace command under cursor
+        if self.userspace:
+            cmd = self.command_under_cursor()
+            if cmd:
+                copy_to_system_clipboard(cmd, self)
+                self.notify(f"Copied command: {cmd}", title="Clipboard", timeout=2.5, markup=False)
+                return
+
+        row = self.current_row()
+        if row is None:
+            self.notify("No item selected to copy", title="Clipboard", severity="warning", timeout=2.0)
+            return
+
+        # Choose the most relevant text from the row
+        if row.value:
+            text = row.value
+        elif row.name:
+            text = row.name
+        elif row.cells:
+            text = "  ".join(str(c) for c in row.cells if str(c).strip())
+        else:
+            text = ""
+
+        if not text:
+            self.notify("Current row is empty", title="Clipboard", severity="warning", timeout=2.0)
+            return
+
+        copy_to_system_clipboard(text, self)
+        preview = _clip(text.replace("\n", " "), 50)
+        self.notify(f"Copied value: {preview}", title="Clipboard", timeout=2.5, markup=False)
+
+    def action_copy_row(self) -> None:
+        """Copy the entire formatted row under the cursor to clipboard."""
+        row = self.current_row()
+        if row is None:
+            self.notify("No row selected to copy", title="Clipboard", severity="warning", timeout=2.0)
+            return
+
+        if row.cells:
+            row_text = "\t".join(str(c).strip() for c in row.cells)
+        else:
+            parts = [row.name]
+            if row.type_name:
+                parts.append(row.type_name)
+            if row.value:
+                parts.append(row.value)
+            if row.note:
+                parts.append(row.note)
+            row_text = "\t".join(parts)
+
+        copy_to_system_clipboard(row_text, self)
+        preview = _clip(row_text.replace("\t", "  │  "), 60)
+        self.notify(f"Copied row: {preview}", title="Clipboard", timeout=2.5, markup=False)
+
+    def action_toggle_mouse(self) -> None:
+        """Toggle between TUI mouse capture and native terminal text selection."""
+        driver = getattr(self, "_driver", None)
+        self.mouse_tracking = not self.mouse_tracking
+        if self.mouse_tracking:
+            if driver is not None and hasattr(driver, "_enable_mouse_support"):
+                try:
+                    driver._enable_mouse_support()
+                except Exception:
+                    pass
+            self.notify(
+                "Mouse: TUI scrolling & clicking enabled (Tip: Hold Option/Shift to select text)",
+                title="Mouse Mode",
+                timeout=3.5,
+                markup=False,
+            )
+        else:
+            if driver is not None and hasattr(driver, "_disable_mouse_support"):
+                try:
+                    driver._disable_mouse_support()
+                except Exception:
+                    pass
+            self.notify(
+                "Mouse: Terminal text selection enabled (drag to select & copy). Press 'm' to restore TUI mouse.",
+                title="Mouse Mode",
+                timeout=4.0,
+                markup=False,
+            )
 
     def action_search(self) -> None:
         search = self.query_one("#search", Input)
@@ -1121,6 +2537,9 @@ class Explorer(App):
             self.filter = ""
             self.query_one("#fields", DataTable).focus()
             self.render_frame()
+            return
+        if self.active_tutorial is not None:
+            self.exit_tutorial()
             return
         self.action_back()
 

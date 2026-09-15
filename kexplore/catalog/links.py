@@ -474,7 +474,7 @@ def _fs_type_supers(fs_type: Object):
 
 LINKS: dict[str, list[Link]] = {
     "task_struct": [
-        Link("threads", "Tasks sharing task->signal and task->tgid.", _threads,
+        Link("threads", "Tasks sharing task->signal and task->tgid (thread group).", _threads,
              origin="task->signal->thread_head (thread_node)",
              userspace="ls /proc/<pid>/task, or ps -L -p <pid>"),
         Link("mm (address space)", "Userspace address space in task->mm.",

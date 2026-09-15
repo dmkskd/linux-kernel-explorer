@@ -35,6 +35,7 @@ KERNEL = [
     "test_trace_attribution.py",
     "test_command_trace.py",
     "test_measure.py",
+    "test_tutorials.py",
     "test_crawl.py",
 ]
 
@@ -94,18 +95,22 @@ def unlisted() -> list[str]:
 
 def main() -> int:
     host_only = "--host" in sys.argv
+    specific = [Path(arg).name for arg in sys.argv[1:] if not arg.startswith("-")]
     missing = unlisted()
-    if missing:
+    if missing and not specific:
         print("WARNING: not in HOST or KERNEL, so not run: "
               + "  ".join(missing), flush=True)
-    names = list(HOST)
-    if not host_only:
-        if have_kernel():
-            names += KERNEL
-        else:
-            print("no live kernel attachable here (needs root and the DWARF): "
-                  "running host tests only", flush=True)
-            print("  skipping  " + "  ".join(KERNEL), flush=True)
+    if specific:
+        names = specific
+    else:
+        names = list(HOST)
+        if not host_only:
+            if have_kernel():
+                names += KERNEL
+            else:
+                print("no live kernel attachable here (needs root and the DWARF): "
+                      "running host tests only", flush=True)
+                print("  skipping  " + "  ".join(KERNEL), flush=True)
 
     failed = [name for name in names if not run(name)]
 

@@ -47,6 +47,7 @@ Run kexplore as root against a live kernel. Where it runs:
                  this host; upload it with \`asciinema upload F\`
   --test         run the test suite instead of the explorer; remaining
                  arguments go to tests/run_all.py
+  --tutorial T   open directly into a live guided tutorial (or '--tutorial list'; alias: --tour)
   --check        resolve every subsystem entry and report, without the UI
   --prefetch     download the kernel debuginfo to completion and exit; a cold
                  first run does this anyway, so this is for preparing offline
@@ -79,9 +80,23 @@ fi
 # --record is consumed here; it wraps the final exec below and never reaches
 # kexplore. The file lands on this host whichever backend runs the explorer.
 RECORD=""
-if [[ "${1:-}" == "--record" ]]; then
-  RECORD="${2:?--record needs a file to write to}"
-  shift 2
+PASSTHROUGH=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --record)
+      RECORD="${2:?--record needs a file to write to}"
+      shift 2
+      ;;
+    *)
+      PASSTHROUGH+=("$1")
+      shift
+      ;;
+  esac
+done
+if [ ${#PASSTHROUGH[@]} -gt 0 ]; then
+  set -- "${PASSTHROUGH[@]}"
+else
+  set --
 fi
 
 TARGET=(python3 -m kexplore "$@")

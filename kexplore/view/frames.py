@@ -16,7 +16,7 @@ seconds.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 
 from drgn import Object, Program, TypeKind
@@ -30,6 +30,7 @@ from ..core import debuginfod
 from ..core.nav import Row, collect, collection_rows, rows_for
 from ..core.source import KernelSource
 from ..operations.algorithm import Algorithm
+from ..operations.tour import GuidedTour, GuidedTutorial, TourStep, TutorialStep
 from ..operations.walkthrough import Step, Walkthrough
 
 # Struct views show field/type/value; the other views name their own columns.
@@ -39,6 +40,8 @@ STEP_COLUMNS = ("step", "source", "what happens")
 SOURCE_COLUMNS = ("line", "", "source")
 LISTING_COLUMNS = ("entry", "what it shows")
 COMMAND_TRACE_COLUMNS = ("stage", "detail", "evidence")
+TUTORIAL_COLUMNS = ("step", "action / path", "live commentary", "userspace")
+TOUR_COLUMNS = TUTORIAL_COLUMNS
 
 # What a branch of the sidebar is, when the branch is not itself a catalog
 # item. The tree groups entries by ``entry.group``; this says what that group
@@ -84,7 +87,7 @@ class Frame:
     """One level of the navigation stack."""
 
     label: str
-    make_rows: Callable[[], list[Row]]
+    make_rows: Callable[[], list[Row]] | Sequence[Row]
     obj: Object | None = None
     doc: str = ""
     rows: list[Row] = field(default_factory=list)
@@ -103,7 +106,10 @@ class Frame:
     def load(self) -> None:
         if self.make_doc is not None:
             self.doc = self.make_doc()
-        self.rows = self.make_rows()
+        if callable(self.make_rows):
+            self.rows = self.make_rows()
+        else:
+            self.rows = list(self.make_rows)
         if self.sort_column is not None:
             self.rows = sort_rows(self.rows, self.sort_column, self.sort_reverse)
 
@@ -405,6 +411,93 @@ def _step_expander(prog: Program, step: Step) -> Callable[[], list[Row]] | None:
     )
 
 
+def tutorial_frame(ctx: Context | None, tutorial: GuidedTutorial) -> Frame:
+    """The steps of a live guided tutorial, with live commentary and userspace equivalents."""
+
+    def make_rows() -> list[Row]:
+        rows: list[Row] = []
+        prog = ctx.prog if ctx is not None else None
+        steps = tutorial.steps(prog)
+        for number, step in enumerate(steps, start=1):
+            name = f"{number}. {step.title}"
+            has_structs = step.structures is not None and prog is not None
+            rows.append(
+                Row(
+                    name=name,
+                    obj=None,
+                    type_name=step.action,
+                    value=step.commentary,
+                    followable=has_structs,
+                    kind="link" if has_structs else "derived",
+                    doc=step.commentary or step.title,
+                    cells=(
+                        name,
+                        step.action,
+                        step.commentary,
+                        step.userspace,
+                    ),
+                    marked=has_structs,
+                    expand=_tutorial_step_expander(prog, step) if prog is not None else None,
+                )
+            )
+        return rows
+
+    return Frame(
+        tutorial.label,
+        _fixed_rows(make_rows),
+        doc=tutorial.doc,
+        columns=TUTORIAL_COLUMNS,
+    )
+
+
+tour_frame = tutorial_frame
+
+
+def _tutorial_step_expander(
+    prog: Program, step: TutorialStep
+) -> Callable[[], list[Row]] | None:
+    """Closure that opens the live kernel structures a tutorial step touches."""
+    if step.structures is None:
+        return None
+    return lambda: collection_rows(
+        collect(step.title, lambda: step.structures(prog))
+    )
+
+
+_tour_step_expander = _tutorial_step_expander
+
+
+def tutorial_step_frame(ctx: Context, step: TutorialStep) -> Frame:
+    """Build the real live Frame for a tutorial step using core object_frame or collection_rows."""
+    if step.action == "kexplore" or step.action.startswith("kexplore ›"):
+        frame = landing_frame(ctx)
+        if step.commentary:
+            return Frame(frame.label, frame.make_rows, doc=step.commentary)
+        return frame
+    if step.structures is not None and ctx.prog is not None:
+        try:
+            items = list(step.structures(ctx.prog))
+            if len(items) == 1:
+                return object_frame(items[0][0], items[0][1], ctx, doc=step.commentary)
+            elif len(items) > 1:
+                return Frame(
+                    step.title,
+                    lambda: collection_rows(collect(step.title, lambda: step.structures(ctx.prog))),
+                    doc=step.commentary,
+                )
+        except Exception as exc:  # noqa: BLE001
+            err_msg = f"{type(exc).__name__}: {exc}"
+            return Frame(
+                step.title,
+                lambda msg=err_msg: [Row(msg, None, "", "", False, kind="error")],
+                doc=step.commentary,
+            )
+    return Frame(step.title, lambda: [], doc=step.commentary)
+
+
+tour_step_frame = tutorial_step_frame
+
+
 def measurement_frame(entry: Measurement) -> Frame:
     """Run the tracer, then render its sections as rows.
 
@@ -502,10 +595,8 @@ def source_frame(ctx: Context, path: str, line: int, title: str) -> Frame:
         if lines is None:
             return [Row(f"could not fetch {path}", None, "", "", False, kind="error")]
 
-        start = max(1, line - 12)
-        end = min(len(lines), start + 140)
         rows: list[Row] = []
-        for number in range(start, end + 1):
+        for number in range(1, len(lines) + 1):
             marker = "▸" if number == line else " "
             rows.append(
                 Row(str(number), None, marker, lines[number - 1], False,
@@ -580,7 +671,7 @@ def landing_frame(ctx: Context) -> Frame:
         rows.append(Row("── entry points", None, "", "", False, kind="derived"))
         for label, where in (
             ("kernel configuration and topology", "system > scheduler, memory"),
-            ("current per-CPU tasks", "sched > currently running"),
+            ("what is running right now", "sched > currently running"),
             ("task relationships", "process > processes"),
             ("runqueue latency", "sched > measure > runqueue latency"),
             ("structure layout and source", "open an entry; enter follows; s opens source"),
@@ -765,6 +856,13 @@ def plan_for(item, ctx: Context, subsystem_key: str = "",
             # Each step is resolved to a file:line through nm and addr2line
             # over the vmlinux debuginfo, so this is not instant.
             activity="resolving each step to its source line…",
+        )
+    if isinstance(item, (GuidedTour, GuidedTutorial)):
+        return Plan(
+            item.label,
+            doc=item.doc,
+            columns=TUTORIAL_COLUMNS,
+            build=lambda: tutorial_frame(ctx, item),
         )
     if isinstance(item, Algorithm):
         if item.background and ctx is not None and not ctx.live:

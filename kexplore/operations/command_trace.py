@@ -592,8 +592,8 @@ def command_trace(
     analyses = []
     for number, item in enumerate(interfaces, 1):
         report(
-            f"analysing source evidence {number}/{len(interfaces)}: "
-            f"{item.path or item.function}"
+            f"scanning kernel function {number}/{len(interfaces)}: "
+            f"{item.function or item.path}"
         )
         analyses.append(_field_evidence(prog, item))
     report("building trace results…")

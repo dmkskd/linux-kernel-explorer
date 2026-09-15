@@ -213,6 +213,15 @@ def main() -> int:
     check(len(analyses) >= 3, f"{len(analyses)} analyses register themselves")
     check(len(algorithms()) == len(analyses), "asking twice does not duplicate them")
 
+    from kexplore.operations.tour import tours
+    from kexplore.operations.tutorial import tutorials
+
+    tut_list = tutorials()
+    check(len(tut_list) >= 5, f"{len(tut_list)} guided tutorials defined")
+    check(all(hasattr(t, "check") for t in tut_list), "every guided tutorial answers check()")
+    check(all(frames.plan_for(t, None) is not None for t in tut_list), "every guided tutorial can be turned into a plan")
+    check(tours() == tut_list, "tours() alias matches tutorials()")
+
     # --- links ----------------------------------------------------------
     links = [(tag, link) for tag, group in LINKS.items() for link in group]
     check(

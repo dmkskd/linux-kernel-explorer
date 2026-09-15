@@ -81,11 +81,16 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
     is still there when drgn looks.
     """
     try:
+        # Unbuffered bytes, not text: the lines are split here, from a buffer
+        # this function owns. A TextIOWrapper would hold the decoded tail of
+        # each read in a buffer of its own, which select() cannot see into,
+        # and the loop below would then wait out its whole deadline with
+        # "READY" already sitting in memory.
         process = subprocess.Popen(
             [str(binary), *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            bufsize=0,
             start_new_session=True,
         )
     except OSError as exc:
@@ -93,19 +98,20 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
 
     running = Running(process=process)
     deadline = time.monotonic() + timeout
-    # readline() blocks, so the deadline has to be enforced from outside the
-    # read rather than between reads: a helper that starts, prints nothing and
-    # never exits would otherwise hold this call open forever, and it is called
-    # from a UI worker thread that has already put "running the experiment…" on
+    # read() blocks, so the deadline has to be enforced from outside the read
+    # rather than between reads: a helper that starts, prints nothing and never
+    # exits would otherwise hold this call open forever, and it is called from
+    # a UI worker thread that has already put "running the experiment…" on
     # screen. select() gives the read a bounded wait.
+    pending = b""
     while process.stdout is not None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         if not select.select([process.stdout], [], [], remaining)[0]:
             continue
-        line = process.stdout.readline()
-        if not line:
+        chunk = process.stdout.read(4096)
+        if not chunk:
             # select said readable and the read came back empty, so this is
             # EOF, not a short read. Either way the helper can no longer say it
             # is ready; poll only decides which of the two to report.
@@ -116,9 +122,16 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
             )
             running.stop()
             return running
-        running.lines.append(line.rstrip())
-        if ready in line:
-            return running
+        pending += chunk
+        # One read can carry several lines, or end mid-line. Complete lines are
+        # reported now; whatever follows the last newline waits for the read
+        # that finishes it.
+        while b"\n" in pending:
+            raw, pending = pending.split(b"\n", 1)
+            line = raw.decode("utf-8", "replace").rstrip()
+            running.lines.append(line)
+            if ready in line:
+                return running
     running.error = f"helper did not print {ready!r} within {timeout:.0f}s"
     running.stop()
     return running

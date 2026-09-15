@@ -40,7 +40,22 @@ def main() -> int:
         help="never contact a debuginfod server; use only what is already "
              "cached (also settable with KEXPLORE_OFFLINE=1)",
     )
+    parser.add_argument(
+        "--tutorial",
+        "--tour",
+        dest="tutorial",
+        metavar="TUTORIAL",
+        help="open directly into a live guided tutorial (use '--tutorial list' to show available tutorials)",
+        default=None,
+    )
     args = parser.parse_args()
+
+    if args.tutorial and args.tutorial.strip().lower() == "list":
+        from .operations.tutorial import tutorials
+        print("Available live guided tutorials:")
+        for t in tutorials():
+            print(f"  {t.key:<25} {t.label} ({t.category})")
+        return 0
 
     from .core import debuginfod
     from .core.source import kernel_build_id
@@ -182,6 +197,7 @@ def main() -> int:
         source,
         source_available=source is not None,
         live=not bool(args.core),
+        initial_tutorial=args.tutorial,
     ).run()
     return 0
 
@@ -228,6 +244,7 @@ def _check(prog) -> int:
     on: objects, computed facts and measurements each report themselves.
     """
     from .catalog.registry import subsystems
+    from .operations.tutorial import tutorials
 
     failures = 0
     for subsystem in subsystems():
@@ -237,6 +254,14 @@ def _check(prog) -> int:
             failures += not result.ok
             mark = "ok  " if result.ok else "FAIL"
             print(f"  {mark}  {entry.label}: {result.detail}")
+
+    print("\ntutorials: Live guided tutorials through running kernel structures.")
+    for tutorial in tutorials():
+        result = tutorial.check(prog)
+        failures += not result.ok
+        mark = "ok  " if result.ok else "FAIL"
+        print(f"  {mark}  {tutorial.label}: {result.detail}")
+
     print(f"\n{failures} failing entr{'y' if failures == 1 else 'ies'}")
     return 1 if failures else 0
 

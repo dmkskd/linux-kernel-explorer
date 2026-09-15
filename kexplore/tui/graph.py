@@ -41,6 +41,7 @@ from ..core.graph import (
     lines,
 )
 from ..core.nav import collect, collection_rows
+from .clipboard import copy_to_system_clipboard
 
 # How many members of a collection to count before giving up and saying "many".
 # Counting is the cheap part for most links, but a VMA's resident pages is a
@@ -364,6 +365,8 @@ class GraphScreen(Screen):
         Binding("enter,space", "toggle", "expand/collapse"),
         Binding("z", "isolate", "collapse others"),
         Binding("c", "recentre", "re-centre here"),
+        Binding("y", "copy_node", "copy node"),
+        Binding("m", "toggle_mouse", "mouse"),
         Binding("backspace", "pop", "back"),
         Binding("f", "fields", "details"),
     ]
@@ -389,10 +392,10 @@ class GraphScreen(Screen):
             self.expanded = state["expanded"]
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="graph-path")
+        yield Static("", id="graph-path", markup=False)
         with GraphScroll(id="graph-scroll"):
             yield GraphCanvas(id="graph-canvas")
-        yield Static("", id="graph-info")
+        yield Static("", id="graph-info", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -725,3 +728,24 @@ class GraphScreen(Screen):
     def action_leave(self) -> None:
         self.save_state()
         self.app.pop_screen()
+
+    def action_copy_node(self) -> None:
+        """Copy the selected graph node's address or identifier to clipboard."""
+        if self.graph is None or self.selected is None:
+            return
+        node = self.graph.nodes.get(self.selected)
+        if node is None:
+            return
+        text = node.detail or node.subtitle or node.title
+        if node.obj is not None:
+            try:
+                addr = int(node.obj.value_())
+                text = f"{addr:#x}"
+            except Exception:
+                pass
+        copy_to_system_clipboard(text, self.app)
+        self.app.notify(f"Copied node: {text}", title="Clipboard", timeout=2.5, markup=False)
+
+    def action_toggle_mouse(self) -> None:
+        if hasattr(self.app, "action_toggle_mouse"):
+            self.app.action_toggle_mouse()

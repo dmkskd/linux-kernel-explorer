@@ -10,7 +10,7 @@ Horizontal {
 }
 
 #sidebar {
-    width: 40;
+    width: 44;
     border-right: solid $panel;
 }
 
@@ -40,6 +40,35 @@ Horizontal {
     color: $text;
     padding: 0 1;
 }
+
+#tutorial-banner, #tour-banner {
+    display: none;
+    height: auto;
+    background: $panel;
+    border-bottom: solid $accent;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+#tutorial-landing, #tour-landing {
+    display: none;
+    height: 1fr;
+    background: $surface;
+    padding: 1 2 2 2;
+    overflow-y: scroll;
+    scrollbar-gutter: stable;
+}
+
+#tutorial-landing:focus, #tour-landing:focus {
+    background-tint: $foreground 5%;
+}
+
+#tutorial-landing-content {
+    height: auto;
+    width: 1fr;
+    padding-bottom: 2;
+}
+
 
 #fields {
     height: 1fr;

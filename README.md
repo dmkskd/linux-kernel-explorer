@@ -17,45 +17,105 @@ and opening what it touches.
 
 Click an image to open it at full size.
 
+A recorded session, start to a traced command:
+
+[![asciicast](https://asciinema.org/a/REPLACE_WITH_CAST_ID.svg)](https://asciinema.org/a/REPLACE_WITH_CAST_ID)
+
 ```
 process › 611 auditd › threads › 612 gmain › mm (address space) › VMAs
 ```
 
+## Requirements
+
+kexplore reads a live Linux kernel as root (opening `/proc/kcore` requires
+it), and it needs that kernel's DWARF debug info. Both are what the
+requirements below are about; the Python code itself needs nothing but the
+packages listed here.
+
+Everything is installed by `./setup.sh`, except the two host tools you need
+before it can run: `limactl` on macOS, a container runtime for the docker
+backend.
+
+### macOS
+
+There is no native option: macOS has no Linux kernel to read. Everything runs
+in a Fedora VM, and the kernel you explore is that VM's.
+
+| Need | Detail |
+| --- | --- |
+| lima 2.0.0 or newer | `brew install lima`. `minimumLimaVersion` in `lima/kexplore.yaml` |
+| disk and RAM for the VM | 4 CPUs, 8 GiB memory, 40 GiB disk, plus a ~1 GB Fedora 44 cloud image download |
+| the repo under your home directory | the VM mounts `~` read-only at the same path, and run.sh runs kexplore from the host path it resolved |
+| a few hundred MB of kernel DWARF | fetched into the VM on the first run, from Fedora's debuginfod server |
+| asciinema | only for `./run.sh --record`: `brew install asciinema`. It records on the host, around whichever backend ran |
+
+Everything inside the VM (drgn, elfutils, pahole, binutils, textual, bpftrace)
+is provisioned by `./setup.sh`; nothing but lima is installed on the mac.
+
+### Linux
+
+Three backends. `detect.sh` resolves one on every run, and
+`KEXPLORE_BACKEND=lima|native|docker` pins the choice.
+
+| Distro | Backend | Why |
+| --- | --- | --- |
+| Fedora | native | the only distro whose debuginfod server carries kernel DWARF *and* source, and drgn uses debuginfod for the kernel only there |
+| any, with docker or rootful podman | docker | a container reads the host kernel; the host keeps only the runtime, an image and a cache volume |
+| Ubuntu 24.04+, Debian 12+ | native, second-class | automated by `setup.sh` with a warning |
+| Arch, self-built kernels, anything else | lima | no fetchable kernel debug info, so a Fedora VM supplies both kernel and symbols |
+
+**native (Fedora)**, installed by `setup.sh`:
+
+```sh
+sudo dnf install -y drgn elfutils-debuginfod-client dwarves binutils python3-textual
+sudo dnf install -y bpftrace bcc-tools perf   # optional: the "measure" groups
+sudo sysctl -w kernel.sched_schedstats=1      # several scheduler views need it
+```
+
+drgn must be 0.1.0 or newer; the check is whether
+`drgn.helpers.linux.mm.vma_name` imports, not a version string. Running the
+explorer needs sudo.
+
+**docker**: docker, or podman as root (`sudo podman` counts). Rootless podman
+cannot work at all: `/proc/kcore` needs `CAP_SYS_RAWIO` in the initial user
+namespace, which a rootless container never has. The container shares the host
+kernel, so the host's debug info situation applies unchanged.
+
+**native (Ubuntu/Debian)**: not a supported setup, but `setup.sh` automates it.
+The C tools come from apt, drgn from PyPI (apt's is older than 0.1.0,
+LP#2106030), and the kernel's symbols from a multi-GB `linux-image-*-dbgsym`
+package added through a new apt repo, because neither distro's debuginfod
+serves kernel debug info. Struct documentation is disabled: neither serves
+kernel source either.
+
+**lima on Linux**: same Fedora VM as on macOS. limactl comes from
+<https://github.com/lima-vm/lima/releases>.
+
+### Anywhere
+
+- Root on the machine that attaches to the kernel (the VM, the host, or the
+  container), for `/proc/kcore`.
+- Under Secure Boot lockdown the kernel refuses `/proc/kcore` even to root.
+  Use the VM.
+- `python3` on the host, for `python3 tests/run_all.py`: the tests that need
+  no kernel. Everything else runs where the backend does.
+- The lima VM is named `kernel-lab`. `KEXPLORE_VM` overrides it, and both
+  `run.sh` and `setup.sh` read it.
+
 ## Setup
 
 ```sh
-./setup.sh          # prepare the backend, then verify it end to end
-./run.sh            # start the explorer
-./run.sh --check    # resolve every entry against this kernel, no UI
-./run.sh --help     # every option, and the environment it reads
+./setup.sh                                    # prepare the backend, then verify it end to end
+./run.sh                                      # start the explorer
+./run.sh --tutorial list                      # list curated live guided tutorials
+./run.sh --tutorial memory                    # launch directly into a live guided tutorial
+./run.sh --record demo.cast --tutorial memory # record the tutorial with asciinema
+./run.sh --check                              # resolve every entry against this kernel, no UI
+./run.sh --help                               # every option, and the environment it reads
 ```
 
-kexplore reads a live Linux kernel as root (opening `/proc/kcore` requires
-it) through one of three backends. `detect.sh` picks one on every run, and
-`KEXPLORE_BACKEND=lima|native|docker` pins the choice:
-
-- **native** (Fedora): the packages (drgn, elfutils, pahole, binutils,
-  textual) are installed on the host and the explorer runs locally with
-  sudo. Fedora is the only distro whose debuginfod server carries kernel
-  DWARF and source, and drgn itself uses debuginfod for the kernel only on
-  Fedora. This is the default on Fedora when the packages are present.
-- **lima** (macOS; fallback elsewhere): a Fedora VM with everything
-  provisioned. The repo is mounted from the host at the same path, so edits
-  on the host are live in the VM. The VM is called `kernel-lab`;
-  `KEXPLORE_VM` overrides that, and both scripts read it.
-- **docker** (Linux with docker or rootful podman): a container reads the
-  host kernel through `/proc/kcore`, so the host keeps only the runtime,
-  one image and a cache volume. The container shares the host kernel, so
-  the host's debug info situation applies unchanged. Rootless podman cannot
-  work: `/proc/kcore` needs `CAP_SYS_RAWIO` in the initial user namespace.
-
-Ubuntu and Debian also run natively, as a second-class setup that
-`setup.sh` automates with a warning: the kernel's debug symbols come from a
-multi-GB dbgsym package and drgn from PyPI (apt's is too old), and struct
-documentation is disabled because neither distro serves kernel source.
-Arch ships no kernel debug symbols at all, so it takes the VM. Self-built
-kernels have no fetchable debug info anywhere; use the VM for those too.
-Under Secure Boot lockdown the kernel refuses `/proc/kcore` even to root.
+`setup.sh` installs the machine and stops there: the kernel's debug info is
+`run.sh`'s, start to finish (see [Working offline](#working-offline)).
 
 With nothing usable installed, `setup.sh` asks which backend to set up and
 runs it to completion. `run.sh` never asks; it tells you to run `setup.sh`
@@ -63,8 +123,7 @@ first.
 
 ## Views
 
-Two tabs in the sidebar. **structures** browses the kernel's data structures;
-**operations** traces the code paths that read and modify them.
+Three tabs in the sidebar (switch between them with `v` or by clicking):
 
 - **structures**: the subsystem tree. Open a struct, follow its fields.
   Curated links (`→`) add edges that are not fields, such as a task's threads,
@@ -75,6 +134,12 @@ Two tabs in the sidebar. **structures** browses the kernel's data structures;
   `file:line` and opening the structures it touches. Others are analyses of a
   single moment: which task EEVDF would pick and why, what a thread shares with
   its parent that a fork copies, how many pages a child still shares.
+- **tutorials**: live guided walkthroughs across the running kernel. Each tutorial
+  dynamically discovers active processes, threads, memory mappings, or runqueues,
+  driving an interactive stepper session: a commentary banner provides kernel
+  context and userspace commands, while the main view opens the live kernel data
+  structures with key fields highlighted. Use `n` / `Space` to step forward,
+  `p` to step back, `Enter` to follow into child structures, and `Backspace` to return.
 
 Subsystems also have a **measure** group: run a tracer for a couple of seconds
 and show the result. Nothing runs in the background.

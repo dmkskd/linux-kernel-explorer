@@ -15,6 +15,13 @@ what `t` does with a userspace command: which parts are measured on the machine,
 which part is asserted by a table, and what is known to be wrong with the part
 that is asserted.
 
+[kernel-concepts.md](kernel-concepts.md) relates theoretical Linux kernel concepts
+(memory types, page tables, address spaces, EEVDF scheduling, clone flags, and COW)
+to concrete data structures and traces inside the explorer.
+
+[operations.md](operations.md) is what separates an operation from a tour, which
+of the six current entries meets that line, and what is open on each.
+
 [ideas.md](ideas.md) collects what is not built yet: the three kinds of view
 the current one cannot express, and the subsystems nothing in the catalog
 reaches.
