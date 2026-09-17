@@ -16,6 +16,7 @@ seconds.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -467,6 +468,50 @@ def _tutorial_step_expander(
 _tour_step_expander = _tutorial_step_expander
 
 
+def matches_field(needle: str, row_name: str, display_name: str = "") -> bool:
+    """Check if row_name or display_name matches a tutorial target field."""
+    if not needle:
+        return False
+    n = needle.lower().strip()
+    rn = row_name.lower().strip()
+    dn = display_name.lower().strip()
+
+    # Exact match
+    if n == rn or n == dn:
+        return True
+
+    # Strip tree and status prefixes
+    clean_rn = re.sub(r"^[→▸•\s]+", "", rn).strip()
+    clean_dn = re.sub(r"^[→▸•\s]+", "", dn).strip()
+    if n == clean_rn or n == clean_dn:
+        return True
+
+    # Link format: "mm (address space)" -> first token is "mm"
+    first_token_rn = clean_rn.split()[0] if clean_rn else ""
+    first_token_dn = clean_dn.split()[0] if clean_dn else ""
+    if n == first_token_rn or n == first_token_dn:
+        return True
+
+    # Whole-word / token boundary match (e.g. "vmas" in "vmas", but not "mm" in "comm")
+    pattern = r"(?:\b|_)" + re.escape(n) + r"(?:\b|_)"
+    if re.search(pattern, clean_rn) or re.search(pattern, clean_dn):
+        return True
+
+    # Path components match (e.g. "/usr/lib/systemd/systemd" matches "systemd")
+    if "/" in rn and n in rn:
+        parts = rn.split("/")
+        if any(n == p.strip() for p in parts):
+            return True
+
+    return False
+
+
+# Textual sizes a column to its widest cell, so a single long value pushes the
+# remaining columns off screen. The frontend truncates to this for display; the
+# hint line still shows the row's full text.
+MAX_CELL = 46
+
+
 def tutorial_step_frame(ctx: Context, step: TutorialStep) -> Frame:
     """Build the real live Frame for a tutorial step using core object_frame or collection_rows."""
     if step.action == "kexplore" or step.action.startswith("kexplore ›"):
@@ -482,7 +527,9 @@ def tutorial_step_frame(ctx: Context, step: TutorialStep) -> Frame:
             elif len(items) > 1:
                 return Frame(
                     step.title,
-                    lambda: collection_rows(collect(step.title, lambda: step.structures(ctx.prog))),
+                    lambda: collection_rows(
+                        collect(step.title, lambda: step.structures(ctx.prog))
+                    ),
                     doc=step.commentary,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -669,14 +716,44 @@ def landing_frame(ctx: Context) -> Frame:
 
         rows.append(Row("", None, "", "", False))
         rows.append(Row("── entry points", None, "", "", False, kind="derived"))
-        for label, where in (
-            ("kernel configuration and topology", "system > scheduler, memory"),
-            ("what is running right now", "sched > currently running"),
-            ("task relationships", "process > processes"),
-            ("runqueue latency", "sched > measure > runqueue latency"),
-            ("structure layout and source", "open an entry; enter follows; s opens source"),
+
+        # These rows carry the catalog entry they name, so enter opens it the
+        # same way the sidebar does. That matters most in the tutorials tab,
+        # where the sidebar lists tutorials rather than subsystems: without a
+        # followable row here the opening screen has no way out, and a
+        # walkthrough that starts on it cannot take its own first step.
+        from ..catalog.registry import subsystems
+
+        by_key = {sub.key: sub for sub in subsystems()}
+
+        def entry_named(subsystem: str, label: str):
+            sub = by_key.get(subsystem)
+            if sub is None:
+                return None
+            return next((e for e in sub.entries if e.label == label), None)
+
+        for label, where, target in (
+            ("a process and its address space", "process > init (pid 1)",
+             ("process", "init (pid 1)")),
+            ("what is running right now", "sched > currently running",
+             ("sched", "currently running")),
+            ("task relationships", "process > processes",
+             ("process", "processes")),
+            ("runqueue latency", "sched > measure > runqueue latency",
+             ("sched", "runqueue latency")),
+            # Names two destinations, so there is nothing single to follow.
+            ("kernel configuration and topology", "system > scheduler, memory", None),
+            ("structure layout and source",
+             "open an entry; enter follows; s opens source", None),
         ):
-            rows.append(Row(label, None, "", where, False, kind="derived"))
+            item = entry_named(*target) if target else None
+            if item is None:
+                rows.append(Row(label, None, "", where, False, kind="derived"))
+            else:
+                rows.append(
+                    Row(label, None, "", where, True, kind="link",
+                        doc=getattr(item, "doc", ""), item=item)
+                )
         return rows
 
     return Frame(

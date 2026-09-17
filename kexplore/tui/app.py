@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import code
 import re
+import textwrap
 from dataclasses import dataclass, field, replace
 
 import drgn
@@ -52,14 +53,10 @@ from ..view.frames import (
     Listing,
     Plan,
 )
+from ..view.frames import MAX_CELL, matches_field as _matches_field
 from .clipboard import copy_to_system_clipboard
 from .graph import GraphScreen, graph_key
 from .navigator import CursorNavigator
-
-# Textual sizes a column to its widest cell, so a single long value pushes the
-# remaining columns off screen. Truncate for display; the hint line still shows
-# the row's full text.
-MAX_CELL = 46
 
 # Source frames are exempt. Their wide column is the last one, so a long line
 # pushes nothing off screen: it makes the table scroll sideways instead, which
@@ -223,7 +220,7 @@ class NavTree(Tree):
 class TutorialBanner(Static):
     """Commentary and navigation banner for live guided tutorials."""
 
-    header_variant: int = 2  # 1 = Minimal HUD (2 lines), 2 = Pipeline + Insight (3 lines)
+    header_variant: int = 2  # 1 = title only, 2 = title and the traversal roadmap
 
     def update_step(
         self,
@@ -254,8 +251,11 @@ class TutorialBanner(Static):
             f"[bold yellow]Step {step_num} of {total_steps}:[/] [bold white]{safe_escape(step.title)}[/]   {auto_badge}"
         )
 
-        # 2. Compact, single-line Flow roadmap showing progression through data structures
-        if steps:
+        # 2. Compact, single-line Flow roadmap showing progression through data
+        # structures. Variant 1 drops it, leaving the title alone: the step
+        # narration is no longer part of this banner, so the roadmap is the only
+        # thing left for the variants to differ over.
+        if steps and self.header_variant >= 2:
             flow_nodes = []
             for i, s in enumerate(steps, start=1):
                 name = s.get_flow_label() if hasattr(s, "get_flow_label") else getattr(s, "flow_label", "")
@@ -269,25 +269,94 @@ class TutorialBanner(Static):
                     flow_nodes.append(f"[dim]{safe_escape(name)}[/]")
             lines.append("   [dim]Flow:[/] " + " [bold dim cyan]──▶[/] ".join(flow_nodes))
 
-        # 3. Short context / insight (Variant 2)
-        if self.header_variant >= 2:
-            insight_fn = getattr(step, "get_insight", None)
-            insight_text = (
-                insight_fn()
-                if callable(insight_fn)
-                else (
-                    getattr(step, "insight", "")
-                    or (step.commentary.split(". ")[0].strip() + "." if step.commentary else "")
-                )
-            )
-            if insight_text:
-                lines.append(f"   [dim]Insight:[/] [white]{safe_escape(insight_text)}[/]")
+        # The narration itself is rendered by TutorialCallout, beside the row it
+        # describes. Repeating a shortened form of it here put two accounts of
+        # the same step on screen at once.
 
         self.update("\n".join(lines))
         self.display = True
 
 
 TourBanner = TutorialBanner
+
+
+# Tokens the narration is worth colouring. One alternation, so each character is
+# claimed by exactly one group and nothing is painted twice. The point is to
+# make the flag and permission names stand out from the prose around them: the
+# difference between a private and a shared mapping is carried entirely by those
+# words, and in running text they read like every other word.
+_NARRATION_TOKENS = re.compile(
+    r"(?P<struct>\bstruct\s+[a-z_][a-z0-9_]*)"
+    r"|(?P<const>\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b)"
+    r"|(?P<perm>\br[-w][-x][ps]\b)"
+    r"|(?P<call>\b[a-z_][a-z0-9_]*\(\))"
+    r"|(?P<member>\b[a-z][a-z0-9]*_[a-z0-9_]+\b)"
+    r"|(?P<bare>\b(?:mm|brk|pid|tgid|comm|anon|shmem|NULL)\b)"
+)
+
+_NARRATION_STYLES = {
+    "struct": "bold #7dd3fc",   # struct names, the things being navigated
+    "const": "bold #fbbf24",    # VM_EXEC, CLONE_VM, PF_KTHREAD
+    "perm": "bold #f472b6",     # r-xp, rw-p, as /proc prints them
+    "call": "#86efac",          # brk(), fork()
+    "member": "#7dd3fc",        # struct members
+    "bare": "#7dd3fc",          # members short enough to carry no underscore
+}
+
+
+def paint_narration(text: str) -> str:
+    """Mark up the kernel names in a line of narration."""
+
+    def one(match: re.Match[str]) -> str:
+        kind = match.lastgroup or ""
+        style = _NARRATION_STYLES.get(kind)
+        body = safe_escape(match.group(0))
+        return f"[{style}]{body}[/]" if style else body
+
+    out: list[str] = []
+    last = 0
+    for match in _NARRATION_TOKENS.finditer(text):
+        out.append(safe_escape(text[last:match.start()]))
+        out.append(one(match))
+        last = match.end()
+    out.append(safe_escape(text[last:]))
+    return "".join(out)
+
+
+class TutorialCallout(Static):
+    """The step narration, floated over the table beneath the row it explains.
+
+    It is not a table row. The field column is clipped to ``MAX_CELL`` so that
+    one wide cell cannot push the type and value columns off screen, and prose
+    wrapped to that width is unreadable. This sits on its own layer instead, so
+    it takes the width of the pane and stays next to what it is describing.
+    """
+
+    def prepare(self, text: str, width: int) -> int:
+        """Lay the narration out for ``width`` and report the height it needs.
+
+        The caller decides where to put it, and cannot do that without knowing
+        how tall it is: near the bottom of the pane there is no room below the
+        row and the block has to go above it instead.
+        """
+        body = " ".join(str(text).split())
+        if not body:
+            return 0
+        # The border and padding take six columns, and the block is indented
+        # four from the left edge of the pane.
+        wrap = max(28, min(92, width - 14))
+        lines = textwrap.wrap(body, width=wrap) or [body]
+        self.update("\n".join(paint_narration(line) for line in lines))
+        # Two more rows than lines of text: the border draws one above and one
+        # below.
+        return len(lines) + 2
+
+    def place(self, y: int) -> None:
+        self.styles.offset = (4, y)
+        self.display = True
+
+    def hide(self) -> None:
+        self.display = False
 
 
 class TutorialLanding(VerticalScroll):
@@ -491,42 +560,6 @@ class TutorialSession:
 TourSession = TutorialSession
 
 
-def _matches_field(needle: str, row_name: str, display_name: str = "") -> bool:
-    """Check if row_name or display_name matches a tutorial target field."""
-    if not needle:
-        return False
-    n = needle.lower().strip()
-    rn = row_name.lower().strip()
-    dn = display_name.lower().strip()
-
-    # Exact match
-    if n == rn or n == dn:
-        return True
-
-    # Strip tree and status prefixes
-    clean_rn = re.sub(r"^[→▸•\s]+", "", rn).strip()
-    clean_dn = re.sub(r"^[→▸•\s]+", "", dn).strip()
-    if n == clean_rn or n == clean_dn:
-        return True
-
-    # Link format: "mm (address space)" -> first token is "mm"
-    first_token_rn = clean_rn.split()[0] if clean_rn else ""
-    first_token_dn = clean_dn.split()[0] if clean_dn else ""
-    if n == first_token_rn or n == first_token_dn:
-        return True
-
-    # Whole-word / token boundary match (e.g. "vmas" in "vmas", but not "mm" in "comm")
-    pattern = r"(?:\b|_)" + re.escape(n) + r"(?:\b|_)"
-    if re.search(pattern, clean_rn) or re.search(pattern, clean_dn):
-        return True
-
-    # Path components match (e.g. "/usr/lib/systemd/systemd" matches "systemd")
-    if "/" in rn and n in rn:
-        parts = rn.split("/")
-        if any(n == p.strip() for p in parts):
-            return True
-
-    return False
 
 
 def get_action_cell_text(
@@ -625,6 +658,7 @@ class Explorer(App):
         Binding("c", "copy", "copy"),
         Binding("C", "copy_row", "copy row", show=False),
         Binding("y", "copy", "copy", show=False),
+        Binding("N", "copy_narration", "copy narration", show=False),
         Binding("m", "toggle_mouse", "mouse"),
         Binding("n", "tutorial_next", "next step"),
         Binding("p", "tutorial_prev", "prev step"),
@@ -772,6 +806,14 @@ class Explorer(App):
             except Exception:
                 pass
             return None
+
+        if action == "copy_narration":
+            return (
+                True
+                if self.active_tutorial is not None
+                and self.active_tutorial.current_idx > 0
+                else None
+            )
 
         if action in ("tutorial_prev", "tour_prev"):
             # Previous step is only valid inside an active tutorial session past step 0
@@ -976,6 +1018,7 @@ class Explorer(App):
                 yield TutorialBanner(id="tutorial-banner")
                 yield TutorialLanding(id="tutorial-landing")
                 yield FieldsTable(id="fields", cursor_type="row", zebra_stripes=True)
+                yield TutorialCallout(id="tutorial-callout")
                 yield Static("", id="hint")
         yield Input(placeholder="filter fields…", id="search")
         yield Footer()
@@ -1439,6 +1482,10 @@ class Explorer(App):
         self._tutorial_action_idx = None
         self._tutorial_action_clean_name = ""
         self._tutorial_action_target = ""
+        try:
+            self.query_one("#tutorial-callout", TutorialCallout).hide()
+        except Exception:  # noqa: BLE001
+            pass
         self._tutorial_action_is_final = False
         self.query_one(TutorialBanner).display = False
         self.query_one(TutorialLanding).display = False
@@ -1764,7 +1811,7 @@ class Explorer(App):
                         next_target = ""
                         if not is_final:
                             next_step = self.active_tutorial.steps[step_idx + 1]
-                            next_target = next_step.action.split("›")[-1].strip().split("(")[0].strip()
+                            next_target = next_step.get_flow_label()
                         style_action_row(
                             clean_name,
                             values,
@@ -1782,6 +1829,7 @@ class Explorer(App):
 
             table.add_row(*cells, key=str(index))
         self.update_hint()
+        self._place_callout()
         self.refresh_bindings()
         if source_view:
             target_idx = next(
@@ -1790,6 +1838,58 @@ class Explorer(App):
             )
             if target_idx is not None and table.row_count > target_idx:
                 table.move_cursor(row=target_idx, animate=False)
+
+    def _place_callout(self) -> None:
+        """Put the step narration just under the row it is about.
+
+        The anchor is the action row's position on screen, so the block follows
+        the cursor when the table scrolls. Any failure hides it rather than
+        leaving it stranded over unrelated rows.
+        """
+        try:
+            callout = self.query_one("#tutorial-callout", TutorialCallout)
+        except Exception:
+            return
+        step = None
+        if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+            idx = self.active_tutorial.current_idx - 1
+            if 0 <= idx < len(self.active_tutorial.steps):
+                step = self.active_tutorial.steps[idx]
+        if step is None or not step.commentary:
+            callout.hide()
+            return
+        try:
+            table = self.query_one("#fields", DataTable)
+            detail = self.query_one("#detail")
+            row_idx = self._tutorial_action_idx
+            if row_idx is None:
+                row_idx = table.cursor_row
+            # Table rows start one line below its top once the header is drawn.
+            header = 1 if table.show_header else 0
+            row_y = (
+                table.region.y
+                - detail.region.y
+                + header
+                + (row_idx - table.scroll_offset.y)
+            )
+            height = callout.prepare(step.commentary, detail.region.width)
+            if height == 0:
+                callout.hide()
+                return
+            available = detail.region.height
+            below = row_y + 1
+            if below + height <= available:
+                y = below
+            else:
+                # No room under the row: sit above it instead, which keeps the
+                # block against the row it describes rather than off screen.
+                y = row_y - height
+            if y < 0 or y >= available:
+                callout.hide()
+                return
+            callout.place(y)
+        except Exception:  # noqa: BLE001
+            callout.hide()
 
     def update_hint(self) -> None:
         """Show documentation for the row under the cursor."""
@@ -1827,7 +1927,7 @@ class Explorer(App):
                     next_target = ""
                     if step_idx + 1 < len(self.active_tutorial.steps):
                         next_step = self.active_tutorial.steps[step_idx + 1]
-                        next_target = next_step.action.split("›")[-1].strip().split("(")[0].strip()
+                        next_target = next_step.get_flow_label()
                     if len(hint_text):
                         hint_text.append("  ·  ")
                     if next_target:
@@ -1843,6 +1943,7 @@ class Explorer(App):
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self.update_hint()
+        self._place_callout()
         self.refresh_bindings()
 
     def visible_rows(self) -> list[Row]:
@@ -2313,6 +2414,27 @@ class Explorer(App):
         copy_to_system_clipboard(row_text, self)
         preview = _clip(row_text.replace("\t", "  │  "), 60)
         self.notify(f"Copied row: {preview}", title="Clipboard", timeout=2.5, markup=False)
+
+    def action_copy_narration(self) -> None:
+        """Copy the current step's narration to the system clipboard.
+
+        ``c`` and ``C`` copy the row under the cursor. The narration is drawn by
+        TutorialCallout on its own layer rather than as rows, so neither of them
+        reaches it, and terminal selection is otherwise the only route to it.
+        """
+        step = None
+        if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
+            idx = self.active_tutorial.current_idx - 1
+            if 0 <= idx < len(self.active_tutorial.steps):
+                step = self.active_tutorial.steps[idx]
+        if step is None or not step.commentary:
+            self.notify("no step narration here", severity="warning")
+            return
+        text = " ".join(step.commentary.split())
+        if copy_to_system_clipboard(text, self):
+            self.notify(f"narration copied ({len(text)} chars)")
+        else:
+            self.notify("could not reach the clipboard", severity="warning")
 
     def action_toggle_mouse(self) -> None:
         """Toggle between TUI mouse capture and native terminal text selection."""

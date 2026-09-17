@@ -267,23 +267,24 @@ def _build_process_architecture_steps(prog: Program | None) -> list[TourStep]:
             title="Starting screen: kexplore entry points",
             action="kexplore › task relationships",
             commentary=(
-                "The walkthrough begins at the kexplore starting screen. Inspect system overview facts "
-                "and select 'task relationships' to navigate into the process hierarchy."
+                "kexplore is attached to the running kernel. Every structure in this "
+                "walkthrough is reached by dereferencing a pointer in the one before it."
             ),
             userspace=f"cat /proc/{pid}/status | grep -E '(Pid|Tgid|Threads)'",
             structures=_resolve_home,
             highlight_field="task relationships",
             action_field="task relationships",
             value_fields=("kernel release", "struct docs and source"),
-            insight="Start at kexplore home. Follow 'task relationships' into process catalog.",
+            insight="The opening screen names the kernel and what the tool can resolve against it.",
             flow_label="kexplore",
         ),
         TourStep(
             title="Main menu: process catalog",
             action="subsystems › process catalog",
             commentary=(
-                "From the starting screen, open the process subsystem catalog. "
-                "Select 'processes' to inspect active multi-threaded thread group leaders."
+                "The process catalog lists the thread group leaders present on this system. "
+                "A leader is a task whose tgid equals its pid; the other threads of the group "
+                "are reached from it."
             ),
             userspace=f"cat /proc/{pid}/status | grep -E '(Pid|Tgid|Threads)'",
             structures=_resolve_process_catalog,
@@ -305,7 +306,7 @@ def _build_process_architecture_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="threads",
             action_field="threads",
             value_fields=("comm", "pid", "tgid"),
-            insight=f"Leader '{comm}' (PID {pid}, {nr_threads} threads). Follow 'threads' into thread group.",
+            insight=f"Leader '{comm}' (PID {pid}, {nr_threads} threads): tgid equals pid.",
             flow_label="task_struct",
         ),
         TourStep(
@@ -320,7 +321,7 @@ def _build_process_architecture_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="mm",
             action_field="mm",
             value_fields=("leader", "pid"),
-            insight="Threads share tgid and address space. Follow into 'mm' (address space).",
+            insight="Threads are separate task_struct descriptors sharing one tgid.",
             flow_label="threads",
         ),
         TourStep(
@@ -335,7 +336,7 @@ def _build_process_architecture_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="VMAs",
             action_field="VMAs",
             value_fields=("mm_users", "start_code", "end_code"),
-            insight=f"Shared address space (CLONE_VM, mm_users={mm_users}). Follow 'VMAs' to memory map.",
+            insight=f"One mm_struct shared by the group (CLONE_VM, mm_users={mm_users}).",
             flow_label="mm_struct",
         ),
         TourStep(
@@ -358,14 +359,14 @@ def _build_process_architecture_steps(prog: Program | None) -> list[TourStep]:
             action="VMA › vm_area_struct (r-xp)",
             commentary=(
                 f"The executable text mapping for '{comm}'. Memory protection is enforced via "
-                "vm_flags (VM_READ|VM_EXEC = r-xp). Follow 'vm_file' to inspect the backing binary."
+                "vm_flags (VM_READ|VM_EXEC = r-xp)."
             ),
             userspace=f"grep 'r-xp' /proc/{pid}/maps",
             structures=_resolve_text,
             highlight_field="vm_file",
             action_field="vm_file",
             value_fields=("vm_flags", "vm_start", "vm_end"),
-            insight="Executable code segment mapped with VM_READ|VM_EXEC. Follow 'vm_file' to disk file.",
+            insight="Executable code, mapped VM_READ|VM_EXEC.",
             flow_label="text (r-xp)",
         ),
         TourStep(
@@ -380,7 +381,7 @@ def _build_process_architecture_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="f_inode",
             action_field="f_inode",
             value_fields=("f_path", "f_flags"),
-            insight="Backing file on disk. Follow into filesystem inode.",
+            insight="The struct file the mapping was created from.",
             flow_label="struct file",
         ),
         TourStep(
@@ -456,23 +457,24 @@ def _build_process_lifecycle_steps(prog: Program | None) -> list[TourStep]:
             title="Starting screen: kexplore entry points",
             action="kexplore › task relationships",
             commentary=(
-                "The walkthrough begins at the kexplore starting screen. Inspect system overview facts "
-                "and select 'task relationships' to trace credentials, namespaces, and file descriptors."
+                "kexplore is attached to the running kernel. Every structure in this "
+                "walkthrough is reached by dereferencing a pointer in the one before it."
             ),
             userspace="cat /proc/1/status",
             structures=_resolve_home,
             highlight_field="task relationships",
             action_field="task relationships",
             value_fields=("kernel release", "struct docs and source"),
-            insight="Start at kexplore home. Follow 'task relationships' into process catalog.",
+            insight="The opening screen names the kernel and what the tool can resolve against it.",
             flow_label="kexplore",
         ),
         TourStep(
             title="Main menu: process catalog",
             action="subsystems › process catalog",
             commentary=(
-                "From the starting screen, open the process subsystem catalog. "
-                "Select 'init (pid 1)' to trace the process lifecycle from system boot."
+                "init is the first userspace process the kernel starts and the ancestor of "
+                "every other one. Its task_struct holds the credentials, namespaces and open "
+                "files that fork() either copies or shares."
             ),
             userspace="cat /proc/1/status",
             structures=_resolve_process_catalog,
@@ -494,7 +496,7 @@ def _build_process_lifecycle_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="cred",
             action_field="cred",
             value_fields=("comm", "pid"),
-            insight="Idle task (swapper/0). Ancestor of all processes. Follow 'cred' into credentials.",
+            insight="The statically allocated idle task every other task descends from.",
             flow_label="init_task",
         ),
         TourStep(
@@ -509,7 +511,7 @@ def _build_process_lifecycle_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="nsproxy",
             action_field="nsproxy",
             value_fields=("uid", "gid", "euid"),
-            insight="Security credentials (UID/GID and capabilities). Follow into 'nsproxy'.",
+            insight="Credentials: UID, GID and the capability sets.",
             flow_label="cred",
         ),
         TourStep(
@@ -524,7 +526,7 @@ def _build_process_lifecycle_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="net_ns",
             action_field="net_ns",
             value_fields=("pid_ns_for_children", "net_ns"),
-            insight="Namespaces isolate PID, network, mount boundaries. Follow into 'net_ns'.",
+            insight="nsproxy groups the namespaces a task belongs to.",
             flow_label="nsproxy",
         ),
         TourStep(
@@ -539,7 +541,7 @@ def _build_process_lifecycle_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="dev_base_head",
             action_field="dev_base_head",
             value_fields=("dev_base_head", "loopback_dev"),
-            insight="Network namespace stack: independent devices and routing. Follow into 'files'.",
+            insight="A network namespace holds its own devices, routes and socket tables.",
             flow_label="net_ns",
         ),
         TourStep(
@@ -562,14 +564,14 @@ def _build_process_lifecycle_steps(prog: Program | None) -> list[TourStep]:
             action="fdt->fd[0] › struct file",
             commentary=(
                 "Represents an opened file instance, tracking file position (f_pos), access modes "
-                "(f_flags), and dentry path. Follow 'f_inode' to reach the filesystem inode."
+                "(f_flags), and dentry path."
             ),
             userspace="ls -l /proc/1/fd/0",
             structures=_resolve_init_fd0,
             highlight_field="f_inode",
             action_field="f_inode",
             value_fields=("f_pos", "f_flags"),
-            insight="Open file descriptor instance. Follow 'f_inode' into filesystem inode.",
+            insight="One open file instance, with its position and access mode.",
             flow_label="struct file",
         ),
         TourStep(
@@ -597,6 +599,25 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
     task = _find_live_target_task(prog)
     comm = task.comm.string_().decode() if task else "systemd"
     pid = task.pid.value_() if task else 1
+
+    # The VMA list names its rows by start address, so a step that asks for
+    # "the text VMA" matches nothing and shows no [ENTER] marker. Resolve the
+    # executable mapping's address here and point the step at that row.
+    text_vma_addr = ""
+    text_vma_file = ""
+    if prog is not None and task is not None:
+        try:
+            from drgn.helpers.linux.mm import for_each_vma, vma_name
+
+            if task.mm:
+                for vma in for_each_vma(task.mm):
+                    if vma.vm_flags.value_() & 0x4:  # VM_EXEC
+                        text_vma_addr = f"{vma.vm_start.value_():#x}"
+                        name = vma_name(vma)
+                        text_vma_file = name.decode("utf-8", "replace") if name else ""
+                        break
+        except Exception:  # noqa: BLE001
+            text_vma_addr = ""
 
     def _resolve_mm(p: Program):
         from drgn.helpers.linux.pid import find_task
@@ -633,11 +654,21 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
         if t is None:
             t = _find_live_target_task(p)
         mm = t.mm if t and t.mm else p["init_mm"].address_of_()
+        candidates = []
         for vma in for_each_vma(mm):
             vn = (vma_name(vma) or b"").decode("utf-8", "replace")
-            if "libc" in vn or ".so" in vn:
+            if ".so" in vn:
+                candidates.append((vn, vma))
+        # "libc" is a substring of libcap-ng.so and others, so match the path
+        # component rather than testing for it anywhere in the name.
+        for vn, vma in candidates:
+            if "/libc.so" in vn:
                 yield f"{vma.vm_start.value_():#x} shared lib ({vn})", vma
                 return
+        if candidates:
+            vn, vma = candidates[0]
+            yield f"{vma.vm_start.value_():#x} shared lib ({vn})", vma
+            return
         for task_other in for_each_task(p):
             if not task_other.mm or not task_other.mm.value_():
                 continue
@@ -778,6 +809,8 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
         from drgn.helpers.linux.mm import for_each_vma, vma_name
         from drgn.helpers.linux.pid import find_task
 
+        from ..catalog.links import vma_perms
+
         t = find_task(p, pid) if pid else None
         if t is None:
             t = _find_live_target_task(p)
@@ -785,97 +818,108 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
         for vma in for_each_vma(mm):
             name = vma_name(vma)
             label = name.decode("utf-8", "replace") if name else "anon"
-            yield f"{vma.vm_start.value_():#x} {label}", vma
+            # The permissions are what separate the three mappings one binary
+            # contributes, and the step asks for the executable one by name.
+            yield f"{vma.vm_start.value_():#x}  {vma_perms(vma)}  {label}", vma
 
     return [
         TourStep(
             title="Starting screen: kexplore home & process navigation",
-            action="kexplore › sidebar: process › init (pid 1)",
+            action="kexplore › a process and its address space",
             commentary=(
-                "This is the kexplore opening screen showing kernel release, CPU topology, and capabilities. "
-                "In the sidebar on the left, expand the 'process' subsystem and select 'init (pid 1)' to inspect "
-                f"the process descriptor (struct task_struct for '{comm}', PID {pid}). Press [Enter] to open PID 1."
+                f"The walkthrough begins at the task_struct for '{comm}' and follows its "
+                f"mm pointer."
             ),
-            userspace=f"cat /proc/{pid}/status | grep -E '(Name|Pid|State)'",
+            userspace="uname -r; nproc; uptime",
             structures=_resolve_home,
-            highlight_field="kernel release",
-            action_field="kernel release",
-            value_fields=("architecture", "cores", "uptime"),
-            insight=f"kexplore opening screen. Navigate sidebar to 'process › init (pid {pid})'.",
+            highlight_field="a process and its address space",
+            action_field="a process and its address space",
+            value_fields=("kernel release", "architecture", "total RAM"),
+            insight=(
+                "The opening screen lists entry points. 'a process and its address space' opens "
+                f"init (pid {pid}); every later step is a pointer followed from there."
+            ),
             flow_label="kexplore home",
         ),
         TourStep(
             title=f"Process descriptor: struct task_struct ({comm}, PID {pid})",
             action="process › init (pid 1) › follow mm",
             commentary=(
-                f"Every Linux process is represented by a struct task_struct. In the sidebar, navigate to "
-                f"'process › init (pid 1)'. Notice the 'mm' pointer: for userspace processes, 'mm' points "
-                f"to the virtual memory descriptor (struct mm_struct). Kernel threads have mm == NULL. "
-                f"Follow 'mm' to open the address space."
+                "A process is represented by a struct task_struct. The mm field points to "
+                "its address space."
             ),
             userspace=f"cat /proc/{pid}/status | grep -E '(Pid|Tgid|Threads)'",
             structures=_resolve_task,
             highlight_field="mm",
             action_field="mm",
             value_fields=("pid", "tgid", "comm"),
-            insight="Process descriptor (task_struct). Userspace tasks have a valid 'mm' pointer; kthreads have NULL.",
+            insight="The task_struct for one process; mm points to its memory.",
             flow_label="task_struct",
         ),
         TourStep(
             title=f"Address space boundaries: struct mm_struct ({comm})",
             action="task_struct › mm (address space) › follow VMAs",
             commentary=(
-                f"Inside struct mm_struct (reached by following 'mm' from task_struct): defines the process virtual memory "
-                f"layout. Notice boundary fields start_code..end_code (executable binary), start_brk..brk (heap), "
-                f"and start_stack (stack). Follow 'VMAs' to open the maple tree listing all memory areas."
+                "A struct mm_struct is the process's address space, composed of the "
+                "virtual memory areas (VMAs) it has mapped. "
+                "start_code, brk and start_stack record where the executable, the heap "
+                "and the stack begin; mm_struct indexes the VMAs in a maple tree keyed "
+                "by address."
             ),
             userspace=f"cat /proc/{pid}/maps | head -n 10",
             structures=_resolve_mm,
             highlight_field="VMAs",
             action_field="VMAs",
             value_fields=("start_code", "end_code", "start_brk", "brk", "start_stack"),
-            insight="Virtual boundaries define binary code, heap, and stack. Follow 'VMAs' to open the maple tree.",
+            insight="The boundary fields bound the executable, the heap and the stack.",
             flow_label="mm_struct",
         ),
         TourStep(
             title=f"Process memory map: maple tree VMAs (VMAs of pid {pid})",
             action="mm_struct › VMAs › select executable text VMA",
             commentary=(
-                f"All virtual memory areas (VMAs) are stored in the address space's maple tree. In the sidebar, "
-                f"this corresponds to 'mm › VMAs of pid {pid}'. Each entry is a struct vm_area_struct covering "
-                f"a virtual interval [vm_start, vm_end). Select the executable text VMA to inspect its permissions and file backing."
+                f"Each mapping is a struct vm_area_struct, indexed by address, and is "
+                f"either file-backed or anonymous. "
+                f"{text_vma_file or 'The executable'} appears three times because an ELF "
+                f"binary is loaded as three mappings, one per set of permissions, "
+                f"distinguished only by vm_flags. The next five steps open one mapping each: "
+                f"executable code, shared library, heap, stack, and a 2MB-aligned region."
             ),
             userspace=f"cat /proc/{pid}/maps | head -n 15",
             structures=_resolve_vmas_list,
-            highlight_field="text",
-            action_field="text",
+            highlight_field=text_vma_addr or "text",
+            action_field=text_vma_addr or "text",
             value_fields=(),
-            insight="Maple tree indexes all virtual memory areas [vm_start, vm_end). Follow into the text VMA.",
+            insight=(
+                "The maple tree indexes every VMA by address; each row is one struct vm_area_struct. "
+                "Open the executable mapping."
+            ),
             flow_label="VMAs list",
         ),
         TourStep(
             title="File-backed private memory: executable text segment (r-xp)",
             action="VMA › vm_area_struct (r-xp binary text)",
             commentary=(
-                "Executable code VMA. Notice vm_flags: VM_READ|VM_EXEC (r-xp). "
-                "VM_SHARED is 0 (private mapping). vma->vm_file points to the binary file on disk. "
-                "Pages are brought into physical RAM on demand via page faults. Follow 'vm_file' to dynamic libraries."
+                f"Executable code. vm_file points to the struct file for "
+                f"{text_vma_file or 'the executable'}. vm_flags sets VM_READ and VM_EXEC "
+                f"but not VM_WRITE, so vm_start to vm_end can be read and executed, never "
+                f"written."
             ),
             userspace=f"grep 'r-xp' /proc/{pid}/maps",
             structures=_resolve_text,
             highlight_field="vm_file",
             action_field="vm_file",
             value_fields=("vm_flags", "vm_start", "vm_end"),
-            insight="File-backed private code VMA (r-xp). Follow 'vm_file' to shared libraries.",
+            insight="A private file-backed mapping carrying the executable code.",
             flow_label="text (r-xp)",
         ),
         TourStep(
-            title="File-backed shared libraries: dynamically linked code (libc.so)",
+            title="File-backed shared library: dynamically linked code",
             action="VMA › shared library VMA (read-only code)",
             commentary=(
-                "Mapped shared library VMA (such as libc.so). Dynamic libraries are mapped into every "
-                "process using them. While each process has its own virtual VMA, the kernel shares the exact "
-                "same physical RAM pages across all processes. Follow 'vm_file' to anonymous heap."
+                "Shared library, mapped r-xp like the executable. Other processes map "
+                "the same file at different addresses, and vm_file leads to the single "
+                "inode behind all of them."
             ),
             userspace=f"grep -E 'libc.*\\.so' /proc/{pid}/maps || grep '\\.so' /proc/{pid}/maps | head -n 5",
             structures=_resolve_libc,
@@ -883,15 +927,15 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             action_field="vm_file",
             value_fields=("vm_start", "vm_end", "vm_flags"),
             insight="Shared libraries map identical physical code pages across all running processes.",
-            flow_label="libc.so",
+            flow_label="shared lib",
         ),
         TourStep(
             title="Anonymous memory: dynamic heap ([heap])",
             action="VMA › [heap] (brk anonymous dynamic memory)",
             commentary=(
-                "Anonymous user memory has no backing file on disk (vma->vm_file == NULL). "
-                "The heap grows dynamically via brk(). Notice vma->anon_vma: when pages are first written, "
-                "physical frames are allocated on demand and tracked for reverse mapping."
+                "Heap: vm_file is NULL, which is what anonymous means. brk() extends "
+                "the heap. An anonymous page points at anon_vma rather than at a VMA, "
+                "because forking and splitting can leave several VMAs mapping that page."
             ),
             userspace=f"grep '\\[heap\\]' /proc/{pid}/maps",
             structures=_resolve_heap,
@@ -905,9 +949,9 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             title="Anonymous memory: user execution stack ([stack])",
             action="VMA › [stack] (VM_GROWSDOWN)",
             commentary=(
-                "The thread execution stack is an anonymous region with the VM_GROWSDOWN flag. "
-                "As nested function calls push frames, page faults automatically grow the stack downwards. "
-                "Follow 'vm_flags' to inspect shared memory."
+                "Stack: anonymous, marked VM_GROWSDOWN. A fault "
+                "just below vm_start extends the mapping downwards, as far as the process's "
+                "stack limit allows."
             ),
             userspace=f"grep '\\[stack\\]' /proc/{pid}/maps",
             structures=_resolve_stack,
@@ -918,29 +962,30 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             flow_label="stack (anon)",
         ),
         TourStep(
-            title="Shared memory & huge pages: POSIX shm, memfd & THP",
-            action="VMA › shared memory & 2MB huge pages",
+            title="Transparent huge pages: a 2MB-aligned anonymous region",
+            action="VMA › 2MB-aligned anonymous region",
             commentary=(
-                "Shared memory mappings have the VM_SHARED flag set (POSIX shm, tmpfs, memfd_create). "
-                "Transparent Huge Pages (THP) collapse 512 continuous 4KB pages into a single 2MB PMD mapping, "
-                "reducing TLB miss penalties. Follow 'vm_flags' to inspect resident memory accounting."
+                "2MB-aligned anonymous region: large enough for "
+                "transparent huge pages. Where one is used, a single PMD entry maps the "
+                "whole 2MB, in place of the 512 page table entries a 4KB mapping would "
+                "need."
             ),
-            userspace="ls -l /dev/shm || df -h /dev/shm",
+            userspace=f"grep AnonHugePages /proc/{pid}/smaps_rollup",
             structures=_resolve_thp,
             highlight_field="vm_flags",
             action_field="vm_flags",
             value_fields=("vm_start", "vm_end", "vm_flags"),
-            insight="Shared memory (VM_SHARED) enables cross-process sharing. THP groups 512 pages into 2MB.",
-            flow_label="shared/THP",
+            insight="A 2MB PMD entry can replace the 512 page table entries a 4KB mapping needs.",
+            flow_label="huge pages",
         ),
         TourStep(
-            title="Memory accounting: RSS, PSS & rss_stat",
+            title="Memory accounting: resident page counts (rss_stat)",
             action="mm->rss_stat › per-type resident counters",
             commentary=(
-                "Inside struct mm_struct: rss_stat tracks resident memory broken down into MM_FILEPAGES (page cache), "
-                "MM_ANONPAGES (heap/stack), and MM_SHMEMPAGES (shared memory). Press Space or Enter on rss_stat to expand "
-                "and inspect the resident percpu_counter array elements. In /proc/<pid>/smaps, PSS (Proportional Set Size) "
-                "accurately accounts for shared libraries by dividing shared pages by the number of sharing processes."
+                "rss_stat holds one percpu_counter per counter kind (NR_MM_COUNTERS): "
+                "file, anonymous, swap entries and shmem. VmRSS adds the file, "
+                "anonymous and shmem counters, each taken as its batched count plus "
+                "the pending delta on every CPU."
             ),
             userspace=f"cat /proc/{pid}/status | grep -E '(VmRSS|RssAnon|RssFile|RssShmem)'",
             structures=_resolve_rss,
@@ -1039,23 +1084,24 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
             title="Starting screen: kexplore entry points",
             action="kexplore › kernel configuration and topology",
             commentary=(
-                "The walkthrough begins at the kexplore starting screen. Inspect system configuration "
-                "and select 'kernel configuration and topology' to enter the memory subsystem catalog."
+                "kexplore is attached to the running kernel. Every structure in this "
+                "walkthrough is reached by dereferencing a pointer in the one before it."
             ),
             userspace="cat /proc/meminfo | head -n 15",
             structures=_resolve_home,
             highlight_field="kernel configuration and topology",
             action_field="kernel configuration and topology",
             value_fields=("kernel release", "struct docs and source"),
-            insight="Start at kexplore home. Follow 'kernel configuration and topology' into memory catalog.",
+            insight="The opening screen names the kernel and what the tool can resolve against it.",
             flow_label="kexplore",
         ),
         TourStep(
             title="Main menu: memory subsystem catalog",
             action="subsystems › mm catalog",
             commentary=(
-                "From the starting screen, open the memory subsystem catalog. "
-                "Select 'init_mm' to open the kernel address space and trace hardware page tables."
+                "init_mm is the kernel's own address space, active whenever no userspace "
+                "process is. Its page tables are the ones a CPU uses while running kernel code "
+                "with no user mapping installed."
             ),
             userspace="cat /proc/meminfo | head -n 15",
             structures=_resolve_mm_catalog,
@@ -1085,8 +1131,7 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
             action="task->mm › mm_struct",
             commentary=(
                 "Virtual addresses must fall within bounded ranges defined in mm_struct. "
-                "The MMU translates virtual addresses within start_code..end_code and heap ranges. "
-                "Follow 'VMAs' to inspect memory regions."
+                "The MMU translates virtual addresses within start_code..end_code and heap ranges."
             ),
             userspace="cat /proc/1/maps | head -n 5",
             structures=_resolve_mm,
@@ -1101,7 +1146,7 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
             action="mm->mm_mt › vm_area_struct",
             commentary=(
                 "VMA bounds define valid translation ranges; vm_flags determine hardware PTE protection "
-                "bits (VM_READ, VM_WRITE, VM_EXEC). Follow 'resident pages' to walk hardware tables."
+                "bits (VM_READ, VM_WRITE, VM_EXEC)."
             ),
             userspace="grep 'r-xp' /proc/1/maps",
             structures=_resolve_vma,
@@ -1116,7 +1161,7 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
             action="walk_page_range › resident pages",
             commentary=(
                 "Hardware MMU descends 4 levels: PGD (bits 47:39) -> PUD (bits 38:30) -> PMD (bits 29:21) -> PTE (bits 20:12). "
-                "Huge pages terminate early at PMD (2MB). Follow into the first resident page frame."
+                "Huge pages terminate early at PMD (2MB)."
             ),
             userspace="/proc/1/pagemap (PFN in bits 0-54)",
             structures=_resolve_first_pages,
@@ -1131,7 +1176,7 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
             action="pte_t › pfn_to_page › struct page",
             commentary=(
                 "Leaf PTE contains physical frame number (PFN) and hardware bits. "
-                "pfn_to_page indexes the kernel vmemmap array of struct page. Follow into reverse mapping."
+                "pfn_to_page indexes the kernel vmemmap array of struct page."
             ),
             userspace="/proc/1/pagemap",
             structures=_resolve_single_page,
@@ -1225,23 +1270,24 @@ def _build_eevdf_scheduler_steps(prog: Program | None) -> list[TourStep]:
             title="Starting screen: kexplore entry points",
             action="kexplore › what is running right now",
             commentary=(
-                "The walkthrough begins at the kexplore starting screen. Inspect system configuration "
-                "and select 'what is running right now' to enter the scheduler subsystem catalog."
+                "kexplore is attached to the running kernel. Every structure in this "
+                "walkthrough is reached by dereferencing a pointer in the one before it."
             ),
             userspace="cat /proc/sched_debug | head -n 25",
             structures=_resolve_home,
             highlight_field="what is running right now",
             action_field="what is running right now",
             value_fields=("kernel release", "struct docs and source"),
-            insight="Start at kexplore home. Follow 'what is running right now' into scheduler catalog.",
+            insight="The opening screen names the kernel and what the tool can resolve against it.",
             flow_label="kexplore",
         ),
         TourStep(
             title="Main menu: scheduler subsystem catalog",
             action="subsystems › sched catalog",
             commentary=(
-                "From the starting screen, open the scheduler subsystem catalog. "
-                "Select 'runqueues' to inspect per-CPU scheduling runqueues and EEVDF timelines."
+                "Each CPU owns a struct rq holding the tasks runnable on it. The next task is "
+                "chosen from that structure alone, which is what makes scheduling a per-CPU "
+                "decision rather than a global one."
             ),
             userspace="cat /proc/sched_debug | head -n 25",
             structures=_resolve_sched_catalog,
@@ -1256,14 +1302,14 @@ def _build_eevdf_scheduler_steps(prog: Program | None) -> list[TourStep]:
             action="sched › struct rq (runqueue)",
             commentary=(
                 "Each CPU has a dedicated struct rq holding fair (cfs_rq), realtime (rt_rq), "
-                "and deadline (dl_rq) scheduling queues. Follow 'cfs' into the fair queue."
+                "and deadline (dl_rq) scheduling queues."
             ),
             userspace="uptime; mpstat -P ALL 1",
             structures=_rq_of_cpu0,
             highlight_field="cfs",
             action_field="cfs",
             value_fields=("nr_running", "curr"),
-            insight="Per-CPU runqueue tracking runnable entities. Follow 'cfs' into fair queue.",
+            insight="One struct rq per CPU, holding the fair, realtime and deadline queues.",
             flow_label="struct rq",
         ),
         TourStep(
@@ -1278,7 +1324,7 @@ def _build_eevdf_scheduler_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="curr",
             action_field="curr",
             value_fields=("sum_w_vruntime", "zero_vruntime", "nr_queued"),
-            insight="EEVDF weighted virtual timeline. Follow 'curr' into executing entity.",
+            insight="cfs_rq keeps the weighted virtual timeline EEVDF orders tasks on.",
             flow_label="struct cfs_rq",
         ),
         TourStep(
@@ -1301,7 +1347,7 @@ def _build_eevdf_scheduler_steps(prog: Program | None) -> list[TourStep]:
             action="se › deadline = vruntime + slice / weight",
             commentary=(
                 "Virtual deadline: deadline = vruntime + slice / weight. pick_next_task_fair "
-                "selects the eligible entity with the earliest deadline. Follow 'vruntime' to inspect execution progress."
+                "selects the eligible entity with the earliest deadline."
             ),
             userspace="cat /proc/sys/kernel/sched_base_slice_ns",
             structures=_resolve_se,

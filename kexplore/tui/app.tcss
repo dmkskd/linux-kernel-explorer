@@ -24,6 +24,10 @@ Horizontal {
 
 #detail {
     width: 1fr;
+    /* The tutorial narration floats over the table rather than sitting in it:
+       the field column is clipped to MAX_CELL, and prose wrapped to that width
+       cannot be read. Its own layer lets it take the width of the pane. */
+    layers: base callout;
 }
 
 #doc {
@@ -116,4 +120,24 @@ Horizontal {
     background: $panel;
     color: $text;
     padding: 0 1;
+}
+
+
+/* Step narration, positioned under the row it explains. Width and offset are
+   set from Python, because both depend on where the cursor landed.
+
+   The border and the fill are what separate it from the table: without them it
+   reads as three more rows, and the rows it covers show through at its edges.
+   It sits on its own layer, so the rows underneath keep their positions and
+   the row being aimed at never moves while it is being read. */
+#tutorial-callout {
+    layer: callout;
+    display: none;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    background: $panel;
+    color: $text;
+    border: round $accent;
+    padding: 0 2;
 }

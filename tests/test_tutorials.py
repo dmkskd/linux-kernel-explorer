@@ -217,7 +217,7 @@ async def test_tui_initial_tutorial(prog: drgn.Program) -> None:
         check(app.active_tutorial.tutorial.key == "user_memory_types", f"loaded tutorial: {app.active_tutorial.tutorial.key}")
         check(app.active_tutorial.current_idx == 0, "initial_tutorial landed on step 0 (landing page)")
         check("Tutorial steps" in str(landing.render()), "initial_tutorial landing shows tutorial steps")
-        check(len(app.active_tutorial.steps) == 9, f"initial_tutorial loaded 9 steps: {len(app.active_tutorial.steps)}")
+        check(len(app.active_tutorial.steps) == 10, f"initial_tutorial loaded 10 steps: {len(app.active_tutorial.steps)}")
         check("Types of User Memory" in str(landing.render()), "landing page displays real video title")
         check("https://youtu.be/6dwzZEFEgWE" in str(landing.render()), "landing page displays real YouTube link")
         check("Scroll down" in str(landing.render()), "landing page has scroll down visual cue")
@@ -295,16 +295,19 @@ async def test_tui_auto_and_highlights(prog: drgn.Program) -> None:
         check("AUTO PLAYING" in str(banner.render()), "banner displays AUTO PLAYING badge")
 
         # 3. Dual highlight checks on Step 1 (kexplore home)
-        # Action row 'kernel release' has coach-mark badge and forward pointer
+        # The action row is the entry point that opens a process, not an
+        # informational row: step 1 has to be able to reach step 2 from the
+        # opening screen, and in the tutorials tab the sidebar is unavailable.
+        ENTRY_ROW = "a process and its address space"
         table_rows = [table.get_row(str(i)) for i in range(len(app.stack[-1].rows))]
         action_rows = [r for r in table_rows if "ENTER" in str(r[0])]
         check(len(action_rows) == 1, f"exactly 1 action row highlighted on step 1: {len(action_rows)}")
         action_row = action_rows[0] if action_rows else None
-        check(action_row is not None and "kernel release" in str(action_row[0]), f"action row 'kernel release' has interactive [ENTER] coach mark: {action_row[0] if action_row else None}")
+        check(action_row is not None and ENTRY_ROW in str(action_row[0]), f"action row {ENTRY_ROW!r} has interactive [ENTER] coach mark: {action_row[0] if action_row else None}")
 
-        # Table cursor placed directly on action row 'kernel release'
+        # Table cursor placed directly on that action row
         current_row = app.current_row()
-        check(current_row is not None and "kernel release" in current_row.name, f"cursor positioned on action row 'kernel release': {current_row.name if current_row else None}")
+        check(current_row is not None and ENTRY_ROW in current_row.name, f"cursor positioned on action row {ENTRY_ROW!r}: {current_row.name if current_row else None}")
 
         # 4. Pressing 'a' pauses auto mode
         await pilot.press("a")
@@ -339,16 +342,16 @@ async def test_tui_auto_and_highlights(prog: drgn.Program) -> None:
         check(current_row is not None and "vm_file" in current_row.name, f"step 5 cursor positioned on action row 'vm_file': {current_row.name if current_row else None}")
 
         # 9. Test Header Variant Toggle ('H')
-        check(banner.header_variant == 2, "default header variant is 2 (Pipeline + Insight)")
-        check("Insight:" in str(banner.render()), "variant 2 displays Insight takeaway line")
+        check(banner.header_variant == 2, "default header variant is 2 (title and roadmap)")
+        check("Flow:" in str(banner.render()), "variant 2 displays the traversal roadmap")
         await pilot.press("H")
         await pilot.pause()
         check(banner.header_variant == 1, "toggled to header variant 1 (Minimal HUD)")
-        check("Insight:" not in str(banner.render()), "variant 1 omits Insight line (compact 2 lines)")
+        check("Flow:" not in str(banner.render()), "variant 1 omits the roadmap (title only)")
         await pilot.press("H")
         await pilot.pause()
         check(banner.header_variant == 2, "toggled back to header variant 2")
-        check("Insight:" in str(banner.render()), "variant 2 restored Insight line")
+        check("Flow:" in str(banner.render()), "variant 2 restored the roadmap")
 
         # 10. Advance to Step 10 (memory accounting: rss_stat) and test row expansion
         app._show_tutorial_step(10)

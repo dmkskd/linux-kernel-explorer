@@ -261,6 +261,36 @@ def _vmas(task: Object):
         yield f"{vma.vm_start.value_():#x}  {label}", vma
 
 
+# vm_flags bits that decide what a mapping is allowed to do. The kernel has no
+# "text segment" field: a mapping is the code because VM_EXEC is set on it, and
+# one file usually contributes three VMAs (r-xp, r--p, rw-p) that are otherwise
+# indistinguishable by name.
+#
+# The last character comes from VM_MAYSHARE, not VM_SHARED: show_map_vma prints
+# `flags & VM_MAYSHARE ? 's' : 'p'` (fs/proc/task_mmu.c). The two differ -- on
+# this kernel /sys/fs/selinux/status is mapped VM_MAYSHARE without VM_SHARED --
+# so reading VM_SHARED here prints a string the kernel never would.
+VM_READ, VM_WRITE, VM_EXEC, VM_MAYSHARE = 0x1, 0x2, 0x4, 0x80
+
+
+def vma_perms(vma: Object) -> str:
+    """The rwxp string /proc/<pid>/maps prints, read from vm_flags."""
+    flags = vma.vm_flags.value_()
+    return (
+        ("r" if flags & VM_READ else "-")
+        + ("w" if flags & VM_WRITE else "-")
+        + ("x" if flags & VM_EXEC else "-")
+        + ("s" if flags & VM_MAYSHARE else "p")
+    )
+
+
+def _mm_vmas(mm: Object):
+    for vma in for_each_vma(mm):
+        name = vma_name(vma)
+        label = name.decode("utf-8", "replace") if name else "anon"
+        yield f"{vma.vm_start.value_():#x}  {vma_perms(vma)}  {label}", vma
+
+
 def _sockets(task: Object):
     for fd, file in files_of(task):
         if _is_socket_file(file):
@@ -594,7 +624,7 @@ LINKS: dict[str, list[Link]] = {
     ],
     "mm_struct": [
         Link("VMAs", "vm_area_struct instances in the address space's maple tree.",
-             lambda m: ((f"{v.vm_start.value_():#x}", v) for v in for_each_vma(m)),
+             _mm_vmas,
              origin="walks the VMA tree",
              userspace="cat /proc/<pid>/maps"),
         Link("owner", "The task that owns this mm.", lambda m: m.owner,
