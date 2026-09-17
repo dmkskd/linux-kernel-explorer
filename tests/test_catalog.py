@@ -97,10 +97,20 @@ def main() -> int:
     subs = subsystems()
     keys = [s.key for s in subs]
     check(
-        keys == ["system", "process", "sched", "mm", "page", "vfs", "socket",
-                 "net", "skb", "slab", "device", "measure"],
+        keys == ["system", "process", "sched", "irq", "time", "mm", "page",
+                 "slab", "vfs", "net", "socket", "skb", "device"],
         f"subsystems register in module order: {keys}",
     )
+    # Registration happens at import, so importing a catalog module that
+    # registers from one that does not (links, decoders) silently reorders the
+    # sidebar. This is what that looks like from the outside.
+    check(keys[0] == "system",
+          f"the sidebar still opens on system, not on {keys[0]}")
+    parents = {s.key: s.parent for s in subs if s.parent}
+    check(parents == {"page": "mm", "slab": "mm", "socket": "net", "skb": "net"},
+          f"nested subsystems name their parent: {parents}")
+    check(all(keys.index(p) < keys.index(c) for c, p in parents.items()),
+          "every parent registers before the subsystems under it")
     check(len(keys) == len(set(keys)), "no subsystem registers twice")
 
     # subsystems() is an accessor, not a mutation: asking twice cannot grow it.
@@ -116,11 +126,19 @@ def main() -> int:
     check(all(e.group == "measure" for e in attached),
           "attached measurements land in the 'measure' group")
 
-    measure = next(s for s in subs if s.key == "measure")
+    process = next(s for s in subs if s.key == "process")
+    moved = [e.key for e in process.entries if isinstance(e, Measurement)]
+    check("syscalls" in moved, f"the syscall measurement sits under process: {moved}")
+
+    irq = next(s for s in subs if s.key == "irq")
     check(
-        len(measure.entries) == 2
-        and all(isinstance(e, Measurement) for e in measure.entries),
-        f"the cross-cutting subsystem keeps only its own {len(measure.entries)}",
+        [e.key for e in irq.entries if isinstance(e, Measurement)] == ["interrupts"],
+        "the interrupt measurement sits under irq, and no subsystem is left "
+        "holding measurements alone",
+    )
+    check(
+        all(any(not isinstance(e, Measurement) for e in s.entries) for s in subs),
+        "every subsystem has at least one entry that reads state",
     )
 
     everything = [(s.key, e) for s in subs for e in s.entries]

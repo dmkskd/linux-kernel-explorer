@@ -105,6 +105,7 @@ register(
     Subsystem(
         key="socket",
         label="socket",
+        parent="net",
         doc="Socket state indexed by process descriptors, protocol hash tables, and AF_UNIX tables.",
         entries=[
             Entry(

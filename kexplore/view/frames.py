@@ -24,7 +24,7 @@ from drgn import Object, Program, TypeKind
 
 from ..catalog.decoders import decode_field
 from ..catalog.links import Derived, Link, derived_for, links_for, userspace_for
-from ..catalog.registry import Entry, FactEntry, Measurement, Subsystem
+from ..catalog.registry import Entry, FactEntry, Measurement, Subsystem, children
 from ..catalog.userspace import entry_command, field_command, placeholders
 from ..core import ctypes as ct
 from ..core import debuginfod
@@ -891,7 +891,8 @@ def plan_for(item, ctx: Context, subsystem_key: str = "",
                     lambda: listing_frame(item.label, item.doc, item.items))
     if isinstance(item, Subsystem):
         return Plan(item.label, item.doc, LISTING_COLUMNS,
-                    lambda: listing_frame(item.label, item.doc, item.entries))
+                    lambda: listing_frame(item.label, item.doc,
+                                          [*item.entries, *children(item.key)]))
     if isinstance(item, Measurement):
         if ctx is not None and not ctx.live:
             return None

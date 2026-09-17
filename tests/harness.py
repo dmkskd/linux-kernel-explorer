@@ -22,3 +22,18 @@ async def settle(app, pilot, cycles: int = 2) -> None:
         await pilot.pause()
         await app.workers.wait_for_complete()
     await pilot.pause()
+
+
+def tree_nodes(tree) -> list:
+    """Every node under the sidebar root, depth first.
+
+    Subsystems nest (page under mm, socket under net), so an entry is not always
+    two levels down.
+    """
+    found = []
+    pending = list(reversed(tree.root.children))
+    while pending:
+        node = pending.pop()
+        found.append(node)
+        pending.extend(reversed(node.children))
+    return found

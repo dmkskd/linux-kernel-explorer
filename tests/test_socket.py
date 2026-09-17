@@ -12,6 +12,7 @@ from textual.widgets import DataTable, Tree
 from kexplore.catalog.links import links_for
 from kexplore.catalog.registry import Entry
 from kexplore.core import nav
+from harness import tree_nodes
 from kexplore.tui.app import Explorer
 
 ok = True
@@ -25,9 +26,7 @@ def check(condition: bool, message: str) -> None:
 
 def open_entry(app, tree, key):
     node = next(
-        n
-        for branch in tree.root.children
-        for n in branch.children
+        n for n in tree_nodes(tree)
         if isinstance(n.data, Entry) and n.data.key == key
     )
     app.stack.clear()

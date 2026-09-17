@@ -1223,14 +1223,21 @@ class Explorer(App):
             ]
             if entries:
                 visible_subsystems.append(replace(subsystem, entries=entries))
+        # A subsystem with a parent goes under its parent's branch, after the
+        # parent's own entries. One whose parent is not shown stays at the top.
+        shown = {subsystem.key for subsystem in visible_subsystems}
+        top = [s for s in visible_subsystems if s.parent not in shown]
         tree.root.data = Listing(
             "subsystems",
             "Kernel subsystems with registered structure entry points.",
-            tuple(visible_subsystems),
+            tuple(top),
         )
+        branches: dict[str, object] = {}
         for subsystem in visible_subsystems:
             entries = subsystem.entries
-            branch = tree.root.add(subsystem.label, data=subsystem, expand=True)
+            under = branches.get(subsystem.parent, tree.root)
+            branch = under.add(subsystem.label, data=subsystem, expand=True)
+            branches[subsystem.key] = branch
             groups: dict[str, object] = {}
             for entry in entries:
                 parent = branch

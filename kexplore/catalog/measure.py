@@ -38,19 +38,18 @@ The move: each Measurement and its script constant into that subsystem's
 because that is what makes the collapsible branch in the tree. The loop diagram
 above goes to sched.py with the four measurements it explains; the general rules
 (name the two tracepoints in the map name, record the blind spot) go to
-registry.py next to Measurement, where anyone writing one will see them. Left
-here: interrupts and syscalls, which no subsystem owns.
+registry.py next to Measurement, where anyone writing one will see them.
 
 That leaves this file as the only caller of ``attach``, so attach, _ATTACHED and
 the merge in ``subsystems()`` can go with it unless something else needs to
 register entries from another file. tests/test_catalog.py asserts the current
-arrangement (that sched's five are attached, that measure keeps two) and would
-be rewritten to check membership instead.
+arrangement (that sched's five are attached, that the syscall one sits under
+process) and would be rewritten to check membership instead.
 """
 
 from __future__ import annotations
 
-from .registry import Measurement, Subsystem, attach, register
+from .registry import Measurement, attach
 
 # include/linux/interrupt.h -- softirq vector numbers.
 SOFTIRQ_VECTORS = {
@@ -331,8 +330,20 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
             group="measure",
             duration=10,
         ),
+        Measurement(
+            key="syscalls",
+            label="syscall rate and duration",
+            doc="Syscall counts by number, and time spent inside syscalls.",
+            measures=(
+                "Counts raw_syscalls:sys_enter by syscall number, and measures "
+                "sys_enter to sys_exit per thread. Nanoseconds."
+            ),
+            blind_spot="Counts are by syscall number, not name.",
+            script=SYSCALLS,
+            group="measure",
+        ),
     ],
-    "measure": [
+    "irq": [
         Measurement(
             key="interrupts",
             label="hard vs soft interrupts",
@@ -347,34 +358,14 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
                 "deferred further, e.g. NET_RX handing off to a NAPI poll."
             ),
             script=INTERRUPTS,
+            group="measure",
             key_labels={"softirq_count_by_vec": SOFTIRQ_VECTORS},
-        ),
-        Measurement(
-            key="syscalls",
-            label="syscall rate and duration",
-            doc="Syscall counts by number, and time spent inside syscalls.",
-            measures=(
-                "Counts raw_syscalls:sys_enter by syscall number, and measures "
-                "sys_enter to sys_exit per thread. Nanoseconds."
-            ),
-            blind_spot="Counts are by syscall number, not name.",
-            script=SYSCALLS,
         ),
     ],
 }
 
 
-# A measurement belongs under the subsystem it describes, so all but the
-# cross-cutting ones are attached to a subsystem someone else registered.
+# A measurement belongs under the subsystem it describes, and every one of
+# them now has a subsystem that owns it, registered elsewhere.
 for _key, _measurements in MEASUREMENTS.items():
-    if _key != "measure":
-        attach(_key, *_measurements)
-
-register(
-    Subsystem(
-        key="measure",
-        label="measure",
-        doc="Cross-subsystem event counts and latency distributions.",
-        entries=list(MEASUREMENTS["measure"]),
-    )
-)
+    attach(_key, *_measurements)

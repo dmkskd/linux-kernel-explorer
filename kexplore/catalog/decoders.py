@@ -281,6 +281,57 @@ DECODERS: dict[tuple[str, str], Decoder] = {
 }
 
 
+# ------------------------------------------------------------------- timers
+
+# include/uapi/linux/time.h. The clockid an hrtimer_clock_base carries is the
+# same number userspace passes to clock_gettime, which is what lets a timer's
+# expiry be compared against a clock read here.
+CLOCK_NAMES = {
+    0: "REALTIME",
+    1: "MONOTONIC",
+    7: "BOOTTIME",
+    11: "TAI",
+}
+
+# kernel/time/clockevents.c, enum clock_event_state.
+CLOCK_EVENT_STATES = {
+    0: "detached",
+    1: "shutdown",
+    2: "periodic",
+    3: "oneshot",
+    4: "oneshot stopped",
+}
+
+# kernel/time/tick-common.c, enum tick_device_mode.
+TICK_MODES = {0: "periodic", 1: "oneshot"}
+
+# kernel/time/timer.c gives the wheel base indices: LOCAL takes timers with
+# TIMER_PINNED, GLOBAL the rest (another CPU may take them over), DEF the
+# deferrable ones. A build without CONFIG_NO_HZ_COMMON collapses all three to
+# index 0, so this is keyed on how many bases the kernel actually has.
+WHEEL_BASES = {
+    3: ("local (pinned)", "global (migratable)", "deferrable"),
+    2: ("standard", "deferrable"),
+    1: ("all timers",),
+}
+
+# ---------------------------------------------------------------- workqueues
+
+# include/linux/workqueue.h, enum wq_flags: the bits that say what a queue
+# promises its users, leaving out internal state like __WQ_DRAINING.
+WQ_FLAG_NAMES = (
+    (0x1, "bh"),
+    (0x2, "unbound"),
+    (0x4, "freezable"),
+    (0x8, "mem_reclaim"),
+    (0x10, "highpri"),
+    (0x20, "cpu_intensive"),
+    (0x80, "power_efficient"),
+    (0x100, "percpu"),
+    (0x20000, "ordered"),
+)
+
+
 def decode_field(parent: Object, name: str, value: Object) -> tuple[str, str] | None:
     """Decoded text and its explanation for ``parent.name``, if we know it.
 

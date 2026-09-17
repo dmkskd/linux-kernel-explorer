@@ -15,11 +15,15 @@ side table keyed by its label, so renaming a label cannot silently drop them.
 from __future__ import annotations
 
 import functools
+import time as _time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-from drgn import Object, TypeKind, cast
+from drgn import Object, TypeKind, cast, container_of
+from drgn.helpers.linux.cpumask import for_each_online_cpu
 from drgn.helpers.linux.fs import mount_dst
+from drgn.helpers.linux.idr import idr_for_each
+from drgn.helpers.linux.irq import irq_desc_kstat_cpu, irq_to_desc
 from drgn.helpers.linux.list import hlist_for_each_entry, list_for_each_entry
 from drgn.helpers.linux.mm import (
     compound_head,
@@ -44,6 +48,7 @@ from drgn.helpers.linux.slab import (
 )
 
 from ..core import ctypes as ct
+from .decoders import CLOCK_EVENT_STATES, CLOCK_NAMES, WQ_FLAG_NAMES
 from .format import as_text, task_comm
 from .walk import files_of, path_of
 
@@ -52,6 +57,9 @@ Resolver = Callable[[Object], "Object | Iterator[tuple[str, Object]]"]
 
 # include/linux/page-flags.h: page->mapping is a tagged pointer. Bit 0 says the
 # rest of it is an anon_vma rather than the file's address_space.
+# The clocks whose ids clock_gettime also accepts.
+CLOCK_GETTIME_IDS = frozenset(CLOCK_NAMES)
+
 PAGE_MAPPING_ANON = 0x1
 PAGE_MAPPING_FLAGS = 0x3
 
@@ -180,6 +188,297 @@ def _skb_device(skb: Object) -> str:
 def _is_socket_file(file: Object) -> bool:
     """A struct file is a socket iff its f_op is socket_file_ops."""
     return file.f_op == file.prog_["socket_file_ops"].address_of_()
+
+
+
+# ------------------------------------------------------------------ irq
+
+# include/linux/sched.h. PF_WQ_WORKER marks a kworker thread, which is what
+# makes the walk back from a task to its worker_pool worth attempting.
+PF_WQ_WORKER = 0x00000020
+# kernel/workqueue.c: a BH pool runs its work in softirq context, so it has no
+# worker threads on ``pool->workers`` to walk.
+POOL_BH = 0x1
+
+
+def _irq_actions(desc: Object):
+    """The handlers bound to this line, in the order the kernel calls them.
+
+    A shared line has more than one, chained through ``action->next``; each
+    handler decides whether the interrupt was its device's.
+    """
+    action = desc.action
+    while action:
+        name = ct.safe(lambda: action.name.string_().decode("utf-8", "replace"), "?")
+        handler = ct.safe(lambda: desc.prog_.symbol(action.handler).name, "?")
+        yield f"{name}  {handler}", action
+        action = action.next
+
+
+def _irq_count(desc: Object) -> str:
+    """Times this line has fired, summed over the online CPUs.
+
+    ``desc->tot_count`` only counts lines the kernel marked as non-per-CPU; an
+    IPI reads zero there while its per-CPU counters are in the millions. The
+    per-CPU array is what /proc/interrupts prints, so use that.
+    """
+    prog = desc.prog_
+    total = sum(int(irq_desc_kstat_cpu(desc, cpu)) for cpu in for_each_online_cpu(prog))
+    return f"{total} (summed over online CPUs)"
+
+
+def _irq_hwirq(desc: Object) -> str:
+    """The controller's own number for this line, next to the Linux one."""
+    return f"{int(desc.irq_data.hwirq)} (Linux irq {int(desc.irq_data.irq)})"
+
+
+def _action_desc(action: Object):
+    """Back to the descriptor, found by the irq number the action records."""
+    return irq_to_desc(action.prog_, int(action.irq))
+
+
+def _pool_workers(pool: Object):
+    """The kworker threads of this pool, via ``pool->workers``."""
+    for worker in list_for_each_entry(
+        "struct worker", pool.workers.address_of_(), "node"
+    ):
+        comm = ct.safe(lambda: task_comm(worker.task), "?")
+        busy = ct.safe(lambda: int(worker.current_work), 0)
+        yield f"{comm}  {'running work' if busy else 'idle'}", worker
+
+
+def _pool_worklist(pool: Object):
+    """Work queued on this pool and not yet picked up by a worker."""
+    for work in list_for_each_entry(
+        "struct work_struct", pool.worklist.address_of_(), "entry"
+    ):
+        func = ct.safe(lambda: work.prog_.symbol(work.func).name, "?")
+        yield func, work
+
+
+def _pool_context(pool: Object) -> str:
+    """Where this pool's work actually runs."""
+    if int(pool.flags) & POOL_BH:
+        return "softirq (BH pool: no worker threads, cannot sleep)"
+    cpu = int(pool.cpu)
+    where = f"bound to cpu {cpu}" if cpu >= 0 else "unbound (any CPU)"
+    return f"worker threads, {where}, nice {int(pool.attrs.nice)}"
+
+
+def _wq_pwqs(wq: Object):
+    """The per-CPU (or per-node) halves of this workqueue.
+
+    A workqueue is one name; the queueing actually happens on a
+    ``pool_workqueue`` per CPU, each attached to the worker pool that will run
+    the work.
+    """
+    for pwq in list_for_each_entry(
+        "struct pool_workqueue", wq.pwqs.address_of_(), "pwqs_node"
+    ):
+        pool = pwq.pool
+        cpu = int(pool.cpu)
+        where = f"cpu {cpu}" if cpu >= 0 else "unbound"
+        yield f"pool {int(pool.id)} ({where})  {int(pwq.nr_active)} active", pwq
+
+
+def _pwq_inactive(pwq: Object):
+    """Work held back because the queue is at ``max_active``."""
+    for work in list_for_each_entry(
+        "struct work_struct", pwq.inactive_works.address_of_(), "entry"
+    ):
+        func = ct.safe(lambda: work.prog_.symbol(work.func).name, "?")
+        yield func, work
+
+
+def _wq_flags(wq: Object) -> str:
+    flags = int(wq.flags)
+    spelled = ",".join(text for bit, text in WQ_FLAG_NAMES if flags & bit)
+    return f"{flags:#x} ({spelled or 'none of the public flags'})"
+
+
+def _task_worker(task: Object):
+    """From a kworker task back to the ``struct worker`` the pools know it by.
+
+    There is no pointer for this: ``task_struct`` has no worker field, so the
+    only way is to search the pools. There are a couple of dozen, so this is a
+    short search, not a scan of the whole kernel.
+    """
+    prog = task.prog_
+    for _, address in idr_for_each(prog["worker_pool_idr"].address_of_()):
+        pool = Object(prog, "struct worker_pool *", address)
+        if int(pool.flags) & POOL_BH:
+            continue
+        for worker in list_for_each_entry(
+            "struct worker", pool.workers.address_of_(), "node"
+        ):
+            if worker.task.value_() == task.value_():
+                return worker
+    return None
+
+
+def _work_func(work: Object) -> str:
+    return ct.safe(lambda: work.prog_.symbol(work.func).name, "?")
+
+
+def _worker_current(worker: Object) -> str:
+    """What this worker is running, or what it ran last.
+
+    ``current_func`` is only meaningful while an item is in flight;
+    ``last_func`` keeps the previous one, which is what an idle kworker has.
+    """
+    prog = worker.prog_
+    if ct.safe(lambda: int(worker.current_work), 0):
+        return ct.safe(lambda: f"running {prog.symbol(worker.current_func).name}", "?")
+    last = ct.safe(lambda: prog.symbol(worker.last_func).name, None)
+    return f"idle, last ran {last}" if last else "idle, nothing run yet"
+
+
+def _pci_irq_desc(dev: Object):
+    """The interrupt line this PCI device's driver requested."""
+    return irq_to_desc(dev.prog_, int(dev.irq))
+
+
+# ----------------------------------------------------------------- timers
+
+# The function a timer calls is how the kernel identifies what the timer is
+# for: there is no field saying "this is a sleeping task's timer".
+HRTIMER_WAKEUP = "hrtimer_wakeup"
+DELAYED_WORK = "delayed_work_timer_fn"
+
+
+def _symbol_name(obj: Object, func) -> str:
+    return ct.safe(lambda: obj.prog_.symbol(func).name, "?")
+
+
+def _timer_func(fn):
+    """Predicate: this timer's callback is ``fn``."""
+
+    def check(timer: Object) -> bool:
+        return _symbol_name(timer, timer.function) == fn
+
+    return check
+
+
+def _hrtimer_clock(timer: Object) -> int:
+    return int(timer.base.clockid)
+
+
+def _hrtimer_expires_in(timer: Object) -> str:
+    """How far off this timer is, against the clock it is queued on.
+
+    The clockid an hrtimer base carries is the number userspace passes to
+    ``clock_gettime``, so the two are directly comparable -- but only when the
+    kernel being inspected is this machine's. Against a core dump the answer
+    would be measured from the wrong clock, so it is labelled rather than
+    presented as the kernel's own view.
+    """
+    clockid = _hrtimer_clock(timer)
+    if clockid not in CLOCK_GETTIME_IDS:
+        return f"{int(timer.node.expires)} ns (clockid {clockid}, not readable here)"
+    now = _time.clock_gettime(clockid)
+    delta_ms = (int(timer.node.expires) / 1e9 - now) * 1000
+    when = f"{delta_ms:.1f} ms" if delta_ms >= 0 else f"{-delta_ms:.1f} ms ago (due)"
+    return f"{when}, measured against this machine's CLOCK_{CLOCK_NAMES[clockid]}"
+
+
+def _hrtimer_mode(timer: Object) -> str:
+    """Which context this one fires in, and whether it was set relative."""
+    where = "softirq (TIMER)" if int(timer.is_soft) else "hardirq"
+    return f"{where}, {'relative' if int(timer.is_rel) else 'absolute'} when set"
+
+
+def _hrtimer_sleeper_task(timer: Object):
+    """The task an ``hrtimer_wakeup`` timer will wake.
+
+    ``hrtimer_sleeper`` embeds the timer and adds the task, so the task is one
+    container_of away -- but only for timers whose callback is that function.
+    """
+    return container_of(timer, "struct hrtimer_sleeper", "timer").task
+
+
+def _clock_base_timers(base: Object):
+    for node in rbtree_inorder_for_each_entry(
+        "struct timerqueue_node", base.active.rb_root.rb_root.address_of_(), "node"
+    ):
+        timer = container_of(node, "struct hrtimer", "node")
+        yield _symbol_name(timer, timer.function), timer
+
+
+def _cpu_base_clock_bases(cpu_base: Object):
+    for index in range(len(cpu_base.clock_base)):
+        base = cpu_base.clock_base[index]
+        clock = CLOCK_NAMES.get(int(base.clockid), str(int(base.clockid)))
+        half = "soft" if int(base.index) >= 4 else "hard"
+        yield f"{clock} ({half})", base.address_of_()
+
+
+def _wheel_base_timers(base: Object):
+    for vector in range(len(base.vectors)):
+        for timer in hlist_for_each_entry(
+            "struct timer_list", base.vectors[vector].address_of_(), "entry"
+        ):
+            yield _symbol_name(timer, timer.function), timer
+
+
+def _jiffy_ns(prog) -> int:
+    """Nanoseconds in a jiffy, read from the jiffies clocksource.
+
+    ``HZ`` is a compile-time constant and not a symbol, so it cannot be read
+    from the kernel directly. The jiffies clocksource carries the same number
+    as a mult/shift pair, which is where this comes from rather than a guess.
+    """
+    for source in list_for_each_entry(
+        "struct clocksource", prog["clocksource_list"].address_of_(), "list"
+    ):
+        if source.name.string_() == b"jiffies":
+            return int(source.mult) >> int(source.shift)
+    return 0
+
+
+def _timer_expires_in(timer: Object) -> str:
+    prog = timer.prog_
+    delta = int(timer.expires) - int(prog["jiffies"])
+    per_jiffy = _jiffy_ns(prog)
+    if not per_jiffy:
+        return f"{delta} jiffies"
+    hz = 1_000_000_000 // per_jiffy
+    ms = delta * per_jiffy / 1e6
+    when = f"{ms:.1f} ms" if delta >= 0 else f"{-ms:.1f} ms ago (due)"
+    return f"{delta} jiffies = {when} (HZ={hz})"
+
+
+def _delayed_work(timer: Object):
+    return container_of(timer, "struct delayed_work", "timer").work.address_of_()
+
+
+def _delayed_work_queue(timer: Object):
+    return container_of(timer, "struct delayed_work", "timer").wq
+
+
+def _clocksource_resolution(source: Object) -> str:
+    """Nanoseconds per counter tick, from the mult/shift the kernel uses."""
+    mult, shift = int(source.mult), int(source.shift)
+    if not mult:
+        return "no conversion set"
+    ns = mult / (1 << shift)
+    return f"{ns:.3f} ns per cycle (mult {mult} >> shift {shift})"
+
+
+def _clock_event_state(device: Object) -> str:
+    return CLOCK_EVENT_STATES.get(
+        int(device.state_use_accessors), str(int(device.state_use_accessors))
+    )
+
+
+def _clock_event_handler(device: Object) -> str:
+    """The function this device's interrupt calls, once something claims it.
+
+    A detached device has none: nothing is armed on it, so there is no handler
+    to name rather than an unresolvable one.
+    """
+    if not ct.safe(lambda: device.event_handler.value_(), 0):
+        return "none (device not in use)"
+    return _symbol_name(device, device.event_handler)
 
 
 @dataclass(frozen=True)
@@ -509,6 +808,10 @@ LINKS: dict[str, list[Link]] = {
              userspace="ls /proc/<pid>/task, or ps -L -p <pid>"),
         Link("mm (address space)", "Userspace address space in task->mm.",
              lambda t: t.mm,
+             # Deliberately still offered for a kernel thread, whose task->mm
+             # is NULL: the empty row says a kthread has no address space of
+             # its own, which is worth seeing. The links that walk *through*
+             # mm are the ones that have to be hidden.
              origin="task->mm",
              userspace="grep VmRSS /proc/<pid>/status"),
         Link(
@@ -520,6 +823,8 @@ LINKS: dict[str, list[Link]] = {
             origin="task->active_mm",
         ),
         Link("VMAs", "Mapped regions of this task's address space.", _vmas,
+             # A kthread has no mm, and walking mm->mm_mt through NULL faults.
+             applies=lambda t: t.mm.value_() != 0,
              origin="walks task->mm->mm_mt (maple tree)",
              userspace="cat /proc/<pid>/maps"),
         Link("open files", "fd table: struct file per descriptor.", _open_files,
@@ -534,6 +839,14 @@ LINKS: dict[str, list[Link]] = {
         Link("parent", "The real parent task.", lambda t: t.real_parent,
              origin="task->real_parent",
              userspace="ps -o ppid= -p <pid>"),
+        Link(
+            "worker (kworker)",
+            "The struct worker this kthread runs as, and through it the pool "
+            "it takes work from.",
+            _task_worker,
+            applies=lambda t: int(t.flags) & PF_WQ_WORKER,
+            origin="searches the worker pools for a worker whose task is this one",
+        ),
         Link("runqueue", "The struct rq this task is queued on.", task_rq,
              origin="task_rq() = cpu_rq(task_cpu(task))",
              userspace="ps -o psr= -p <pid>  # the CPU, not the rq"),
@@ -828,6 +1141,151 @@ LINKS: dict[str, list[Link]] = {
              origin="fs_type->owner",
              userspace="lsmod"),
     ],
+    "irq_desc": [
+        Link("actions", "The handlers registered on this line.", _irq_actions,
+             applies=lambda d: d.action.value_() != 0,
+             origin="walks desc->action, chained by action->next",
+             userspace="cat /proc/interrupts  # the name column"),
+        Link("irq_chip", "The controller that masks, acks and routes this line.",
+             lambda d: d.irq_data.chip,
+             origin="desc->irq_data.chip",
+             userspace="cat /proc/interrupts  # the chip column"),
+        Link("irq_data", "Per-line controller state: hwirq, domain, chip_data.",
+             lambda d: d.irq_data.address_of_(),
+             origin="&desc->irq_data"),
+    ],
+    "irqaction": [
+        Link("irq_desc", "The line this handler is bound to.", _action_desc,
+             origin="irq_to_desc(action->irq)",
+             userspace="cat /proc/interrupts"),
+        Link(
+            "handler thread",
+            "The kthread that runs the threaded half of this handler.",
+            lambda a: a.thread,
+            applies=lambda a: a.thread.value_() != 0,
+            origin="action->thread",
+            userspace="ps -e | grep irq/",
+        ),
+        Link("next action", "The next handler on this shared line.",
+             lambda a: a.next,
+             applies=lambda a: a.next.value_() != 0,
+             origin="action->next"),
+    ],
+    "worker_pool": [
+        Link("workers", "The kworker threads attached to this pool.", _pool_workers,
+             applies=lambda p: not int(p.flags) & POOL_BH,
+             origin="walks pool->workers (worker->node)",
+             userspace="ps -e | grep kworker"),
+        Link("queued work", "Work items waiting for a worker in this pool.",
+             _pool_worklist,
+             origin="walks pool->worklist (work_struct->entry)"),
+    ],
+    "worker": [
+        Link("task", "The kthread this worker runs as.", lambda w: w.task,
+             origin="worker->task",
+             userspace="ps -o comm= -p <pid>"),
+        Link("pool", "The pool this worker belongs to.", lambda w: w.pool,
+             origin="worker->pool"),
+        Link("current work", "The work item this worker is running.",
+             lambda w: w.current_work,
+             applies=lambda w: w.current_work.value_() != 0,
+             origin="worker->current_work"),
+        Link("current workqueue", "The workqueue the running item came from.",
+             lambda w: w.current_pwq.wq,
+             applies=lambda w: w.current_pwq.value_() != 0,
+             origin="worker->current_pwq->wq"),
+    ],
+    "workqueue_struct": [
+        Link("pool_workqueues", "The per-CPU halves of this queue and their pools.",
+             _wq_pwqs,
+             origin="walks wq->pwqs (pwqs_node)"),
+        Link(
+            "rescuer",
+            "The thread that runs this queue's work when no worker can be "
+            "created, which is why a WQ_MEM_RECLAIM queue can make progress "
+            "under memory pressure.",
+            lambda w: w.rescuer.task,
+            applies=lambda w: w.rescuer.value_() != 0,
+            origin="wq->rescuer->task",
+            userspace="ps -e | grep -- '-rescuer'",
+        ),
+    ],
+    "pool_workqueue": [
+        Link("pool", "The worker pool that runs this half's work.", lambda p: p.pool,
+             origin="pwq->pool"),
+        Link("workqueue", "The workqueue this half belongs to.", lambda p: p.wq,
+             origin="pwq->wq"),
+        Link("inactive work", "Work held back by max_active.", _pwq_inactive,
+             origin="walks pwq->inactive_works (work_struct->entry)"),
+    ],
+    "hrtimer": [
+        Link("clock base", "The per-CPU queue this timer is on.",
+             lambda t: t.base,
+             origin="hrtimer->base"),
+        Link(
+            "sleeping task",
+            "The task this timer will wake. Only set for a timer armed by a "
+            "sleep or a timeout, whose callback is hrtimer_wakeup.",
+            _hrtimer_sleeper_task,
+            applies=_timer_func(HRTIMER_WAKEUP),
+            origin="container_of(timer, struct hrtimer_sleeper, timer)->task",
+            userspace="ps -o wchan= -p <pid>",
+        ),
+    ],
+    "hrtimer_clock_base": [
+        Link("queued timers", "The timers on this base, in expiry order.",
+             _clock_base_timers,
+             origin="walks base->active (timerqueue red-black tree)"),
+        Link("cpu base", "The CPU-wide hrtimer state this base belongs to.",
+             lambda b: b.cpu_base,
+             origin="base->cpu_base"),
+    ],
+    "hrtimer_cpu_base": [
+        Link("clock bases", "The per-clock queues on this CPU.",
+             _cpu_base_clock_bases,
+             origin="cpu_base->clock_base[]"),
+        Link("next timer", "The timer this CPU is programmed to fire next.",
+             lambda b: b.next_timer,
+             applies=lambda b: b.next_timer.value_() != 0,
+             origin="cpu_base->next_timer"),
+    ],
+    "timer_list": [
+        Link(
+            "delayed work",
+            "The work item this timer will queue. Only set for a timer armed "
+            "by schedule_delayed_work, whose callback is delayed_work_timer_fn.",
+            _delayed_work,
+            applies=_timer_func(DELAYED_WORK),
+            origin="container_of(timer, struct delayed_work, timer)->work",
+        ),
+        Link("workqueue", "The queue that delayed work will be put on.",
+             _delayed_work_queue,
+             applies=_timer_func(DELAYED_WORK),
+             origin="container_of(timer, struct delayed_work, timer)->wq"),
+    ],
+    "timer_base": [
+        Link("pending timers", "Timers in this base's wheel buckets.",
+             _wheel_base_timers,
+             origin="walks base->vectors[] (hlist per bucket)"),
+        Link("running timer", "The timer whose callback is running now.",
+             lambda b: b.running_timer,
+             applies=lambda b: b.running_timer.value_() != 0,
+             origin="base->running_timer"),
+    ],
+    "tick_device": [
+        Link("clock event device", "The device this CPU takes its tick from.",
+             lambda d: d.evtdev,
+             applies=lambda d: d.evtdev.value_() != 0,
+             origin="tick_device->evtdev",
+             userspace="cat /sys/devices/system/clockevents/clockevent0/current_device"),
+    ],
+    "pci_dev": [
+        Link("irq line", "The interrupt descriptor for this device's irq.",
+             _pci_irq_desc,
+             applies=lambda d: int(d.irq) != 0,
+             origin="irq_to_desc(dev->irq)",
+             userspace="cat /proc/interrupts"),
+    ],
     "net_device": [
         Link("namespace", "The net namespace owning this device.", lambda d: d.nd_net.net,
              origin="dev->nd_net.net",
@@ -839,6 +1297,56 @@ LINKS: dict[str, list[Link]] = {
 
 
 DERIVED: dict[str, list[Derived]] = {
+    "hrtimer": [
+        Derived("= expires in", "Time until this timer fires.", _hrtimer_expires_in),
+        Derived("= function", "The callback this timer will run.",
+                lambda t: _symbol_name(t, t.function)),
+        Derived("= runs in", "Which context the callback runs in.", _hrtimer_mode),
+    ],
+    "timer_list": [
+        Derived("= expires in", "Jiffies until this timer fires, and in ms.",
+                _timer_expires_in),
+        Derived("= function", "The callback this timer will run.",
+                lambda t: _symbol_name(t, t.function)),
+    ],
+    "clocksource": [
+        Derived("= resolution", "Nanoseconds per counter cycle.",
+                _clocksource_resolution),
+    ],
+    "clock_event_device": [
+        Derived("= state", "Whether this device is armed, and how.",
+                _clock_event_state),
+        Derived("= event handler", "The function the device's interrupt calls.",
+                _clock_event_handler),
+    ],
+    "irq_desc": [
+        Derived("= count", "Times this line has fired.", _irq_count),
+        Derived("= hwirq", "The controller's number for this line.", _irq_hwirq),
+    ],
+    "irqaction": [
+        Derived("= handler",
+                "The function called in interrupt context for this action.",
+                lambda a: ct.safe(lambda: a.prog_.symbol(a.handler).name, "?")),
+    ],
+    "worker_pool": [
+        Derived("= runs work in", "Which context this pool's work runs in.",
+                _pool_context),
+    ],
+    "worker": [
+        Derived("= doing", "What this worker is running, or last ran.",
+                _worker_current),
+    ],
+    "workqueue_struct": [
+        Derived("= flags", "The public wq_flags bits set on this queue.", _wq_flags),
+    ],
+    "work_struct": [
+        Derived("= func", "The function that will run for this work item.",
+                _work_func),
+    ],
+    "softirq_action": [
+        Derived("= handler", "The function this softirq vector runs.",
+                lambda a: ct.safe(lambda: a.prog_.symbol(a.action).name, "(none)")),
+    ],
     "task_struct": [
         Derived(
             "= role (pid vs tgid)",

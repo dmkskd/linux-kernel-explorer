@@ -15,6 +15,7 @@ import sys
 import drgn
 from textual.widgets import DataTable, Static, Tree
 
+from harness import tree_nodes
 from kexplore.catalog.registry import Entry
 from kexplore.tui.app import Explorer
 
@@ -34,7 +35,7 @@ async def main() -> int:
         table = app.query_one("#fields", DataTable)
         path = app.query_one("#path", Static)
 
-        entries = [n for n in tree.root.children for n in n.children]
+        entries = tree_nodes(tree)
         ok &= check(len(entries) >= 15, f"tree exposes {len(entries)} entries")
 
         # Open sched > runqueues.

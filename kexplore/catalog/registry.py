@@ -159,6 +159,10 @@ class Subsystem:
     label: str
     doc: str
     entries: list[Entry] = field(default_factory=list)
+    # The key of the subsystem this one is listed under in the sidebar, or ""
+    # for a top-level one. Only the sidebar reads it: ``subsystems()`` stays
+    # flat, so --check, the crawl and userspace commands keep their keys.
+    parent: str = ""
 
 
 _SUBSYSTEMS: list[Subsystem] = []
@@ -190,13 +194,24 @@ def subsystems() -> list[Subsystem]:
     """
     # I001 is off for this block on purpose: this is the order the subsystems
     # appear in the sidebar, and sorting it alphabetically would open the tool
-    # on "device" instead of "system".
+    # on "device" instead of "system". A parent is imported before the
+    # subsystems listed under it, or the sidebar has no branch to put them in.
+    #
+    # The order reads as: what exists and when it runs (system, process,
+    # sched), the two things that take the CPU away from it (irq, timers),
+    # then the memory it runs in and the I/O paths out of it, ending at the
+    # hardware they all reach.
     from . import (  # noqa: F401,I001
-        system, process, sched, mm, page, vfs, socket, net, skb, slab, device,
-        measure,
+        system, process, sched, irq, timers, mm, page, slab, vfs, net, socket,
+        skb, device, measure,
     )
 
     return [
         replace(subsystem, entries=[*subsystem.entries, *_ATTACHED.get(subsystem.key, ())])
         for subsystem in _SUBSYSTEMS
     ]
+
+
+def children(subsystem_key: str) -> list[Subsystem]:
+    """The subsystems listed under ``subsystem_key``, in registration order."""
+    return [sub for sub in subsystems() if sub.parent == subsystem_key]

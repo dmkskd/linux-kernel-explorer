@@ -60,6 +60,17 @@ async def main() -> int:
         subsystem_names = [str(n.label) for n in tree.root.children]
         check("sched" in subsystem_names and "mm" in subsystem_names,
               f"structure view lists {len(subsystem_names)} subsystems")
+        check("irq" in subsystem_names and "measure" not in subsystem_names,
+              f"interrupts have a branch and nothing is left under measure: {subsystem_names}")
+        check("page" not in subsystem_names and "skb" not in subsystem_names,
+              f"nested subsystems are not top-level branches: {subsystem_names}")
+        under = {
+            str(b.label): [str(n.label) for n in b.children]
+            for b in tree.root.children if str(b.label) in ("mm", "net")
+        }
+        check({"page", "slab"} <= set(under.get("mm", []))
+              and {"socket", "skb"} <= set(under.get("net", [])),
+              f"page and slab sit under mm, socket and skb under net: {under}")
         node = next(
             n for b in tree.root.children for n in b.children
             if isinstance(n.data, Entry) and n.data.key == "runqueues"
@@ -251,8 +262,8 @@ async def main() -> int:
         index = app.stack[-1].rows
         check(app.stack[-1].label == "subsystems",
               f"the root heading opens a listing: {app.stack[-1].label}")
-        check(len(index) == 12 and all(r.item is not None for r in index),
-              f"{len(index)} subsystems listed, each openable")
+        check(len(index) == 9 and all(r.item is not None for r in index),
+              f"{len(index)} top-level subsystems listed, each openable")
         check(all(r.doc for r in index), "every subsystem row says what it is")
 
         table.move_cursor(row=[r.name for r in index].index("sched"))

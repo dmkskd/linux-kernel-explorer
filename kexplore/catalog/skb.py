@@ -140,6 +140,7 @@ register(
     Subsystem(
         key="skb",
         label="skb",
+        parent="net",
         doc="Queued struct sk_buff instances; packets outside queues require tracing.",
         entries=[
             Entry(

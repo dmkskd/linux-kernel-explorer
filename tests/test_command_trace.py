@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import drgn
-from harness import settle
+from harness import settle, tree_nodes
 from textual.widgets import DataTable, Tree
 
 from kexplore.catalog.registry import Entry
@@ -33,9 +33,7 @@ def check(condition: bool, message: str) -> None:
 
 def open_entry(app, tree, key):
     node = next(
-        n
-        for branch in tree.root.children
-        for n in branch.children
+        n for n in tree_nodes(tree)
         if isinstance(n.data, Entry) and n.data.key == key
     )
     app.stack.clear()

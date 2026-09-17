@@ -18,6 +18,7 @@ register(
     Subsystem(
         key="slab",
         label="slab",
+        parent="mm",
         doc="SLUB kmem_cache metadata, geometry, and per-CPU state.",
         entries=[
             Entry(

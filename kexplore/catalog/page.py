@@ -60,6 +60,7 @@ register(
     Subsystem(
         key="page",
         label="page",
+        parent="mm",
         doc="Physical page frames and virtual-to-struct-page translation.",
         entries=[
             Entry(
