@@ -21,7 +21,7 @@ microseconds.
 
 from __future__ import annotations
 
-from drgn import Object, Program
+from drgn import Object, Program, TypeKind
 from drgn.helpers.linux.block import (
     blk_rq_bytes,
     blk_rq_pos,
@@ -34,8 +34,10 @@ from drgn.helpers.linux.block import (
 from drgn.helpers.linux.cpumask import for_each_online_cpu
 from drgn.helpers.linux.list import list_for_each_entry
 from drgn.helpers.linux.percpu import per_cpu_ptr
+from drgn.helpers.linux.xarray import xa_for_each
 
 from ..core import ctypes as ct
+from .compat import hardware_queue_support, type_has_member
 from .decoders import request_op_name
 from .format import as_text
 from .registry import Entry, Subsystem, register
@@ -73,8 +75,13 @@ def _elevator_name(queue: Object) -> str:
 
 def _hw_queues(queue: Object):
     """The hardware queues of one request_queue, in queue_num order."""
-    for index in range(int(queue.nr_hw_queues)):
-        yield index, queue.queue_hw_ctx[index]
+    type_ = queue.type_.type if queue.type_.kind == TypeKind.POINTER else queue.type_
+    if type_has_member(type_, "queue_hw_ctx"):
+        for index in range(int(queue.nr_hw_queues)):
+            yield index, queue.queue_hw_ctx[index]
+    else:
+        for index, entry in xa_for_each(queue.hctx_table.address_of_()):
+            yield index, Object(queue.prog_, "struct blk_mq_hw_ctx *", entry)
 
 
 def disks(prog: Program):
@@ -240,6 +247,7 @@ register(
                 "hardware queues",
                 "struct blk_mq_hw_ctx, what the driver dispatches from.",
                 hw_queues,
+                capability=hardware_queue_support,
             ),
             Entry(
                 "ctx",

@@ -57,8 +57,8 @@ def skb_list(head: Object):
 def qdisc_skb_list(head: Object):
     """Walk a struct qdisc_skb_head.
 
-    Not the same shape as sk_buff_head: a qdisc keeps an explicit head/tail
-    NULL-terminated chain rather than a circular list.
+    A qdisc keeps an explicit head/tail NULL-terminated chain, where
+    sk_buff_head is a circular list, so the two are walked differently.
     """
     node = head.head
     seen = 0

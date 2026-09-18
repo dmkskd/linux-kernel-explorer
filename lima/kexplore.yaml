@@ -37,7 +37,15 @@ provision:
       elfutils-debuginfod-client \
       dwarves \
       binutils \
-      python3-textual
+      uv
+
+    # Textual is pinned rather than taken from the distribution, which
+    # packages a different major version per release: 4.0.0 on Fedora 44,
+    # 2.1.2 on Ubuntu 26.04, and they differ in behaviour kexplore depends on.
+    # The venv carries system site packages so the distribution's drgn stays
+    # visible. Fedora packages uv; Ubuntu does not, and installs it from PyPI.
+    python3 -m venv --system-site-packages /opt/kexplore
+    uv pip install --python /opt/kexplore/bin/python3 "textual==${KEXPLORE_TEXTUAL_PIN:-4.0.0}"
 
     # Optional: the "measure" groups need these. Remove if not wanted.
     dnf install -y bpftrace bcc-tools perf || true
@@ -64,8 +72,8 @@ probes:
         exit 1
       fi
     done
-    if ! timeout 300s bash -c "until python3 -c 'import textual' >/dev/null 2>&1; do sleep 3; done"; then
-      echo "python3-textual not installed" >&2
+    if ! timeout 300s bash -c "until /opt/kexplore/bin/python3 -c 'import textual' >/dev/null 2>&1; do sleep 3; done"; then
+      echo "textual not installed in /opt/kexplore" >&2
       exit 1
     fi
   hint: |

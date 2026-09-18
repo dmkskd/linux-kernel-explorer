@@ -140,9 +140,10 @@ case "$BACKEND" in
       exit 1
     fi
     kexplore_check_lima_distro "$VM" || exit 1
-    if [ "$(kexplore_lima_distro)" != fedora ]; then
-      TARGET[0]=/opt/kexplore/bin/python3
-    fi
+    # Which interpreter runs it is decided inside the VM, by
+    # scripts/launch-in-lab.sh: every lab now has a /opt/kexplore venv holding
+    # the pinned Textual, but a VM provisioned before that does not, and only
+    # the guest can tell.
     # The repo is virtiofs-mounted into the VM read-only at the same path, so
     # there is nothing to sync. PYTHONDONTWRITEBYTECODE is required because
     # that mount is read-only.
@@ -155,7 +156,7 @@ case "$BACKEND" in
       KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
       TERM="${TERM:-xterm-256color}"
       COLORTERM="${COLORTERM:-truecolor}"
-      bash "$REPO/scripts/launch-deb-lab.sh" "${TARGET[@]}")
+      bash "$REPO/scripts/launch-in-lab.sh" "${TARGET[@]}")
     ;;
   native)
     if ! kexplore_native_ready; then
@@ -165,6 +166,9 @@ case "$BACKEND" in
     fi
     # No PYTHONDONTWRITEBYTECODE here: the repo is a normal writable
     # directory, and no TERM forwarding: there is no SSH layer in between.
+    # The pinned venv when setup.sh built one, the distribution's python3 on a
+    # machine set up before that.
+    TARGET[0]="$(kexplore_native_python)"
     LAUNCH=(sudo env
       PYTHONPATH="$REPO"
       DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend native)}"

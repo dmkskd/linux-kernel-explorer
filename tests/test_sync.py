@@ -9,6 +9,7 @@ that process's private hash, and follows it back to the task.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import sys
 import threading
 
@@ -16,6 +17,7 @@ import drgn
 from harness import settle, tree_nodes
 from textual.widgets import DataTable, Tree
 
+from kexplore.catalog.compat import has_member
 from kexplore.catalog.registry import Entry, FactEntry
 from kexplore.tui.app import Explorer
 
@@ -70,7 +72,13 @@ async def main() -> int:
     # a futex_q in this process's private hash under a recognisable name.
     held = threading.Lock()
     held.acquire()
-    threading.Thread(target=held.acquire, daemon=True, name=WAITER).start()
+    def wait_on_lock():
+        # Python versions differ in whether Thread.name sets the Linux name.
+        libc = ctypes.CDLL(None)
+        libc.prctl(15, ctypes.c_char_p(WAITER.encode()), 0, 0, 0)
+        held.acquire()
+
+    threading.Thread(target=wait_on_lock, daemon=True, name=WAITER).start()
 
     app = Explorer(prog)
 
@@ -86,9 +94,11 @@ async def main() -> int:
         check(len(rows) > 1, f"{len(rows)} futex waiters")
         mine = next((r for r in rows if WAITER in r.name), None)
         check(mine is not None, f"this test's blocked thread is listed: {WAITER}")
+        private_hash = has_member(prog, "struct mm_struct", "futex_phash")
         check(mine is not None and mine.cells is not None
-              and any(c.startswith("private, pid") for c in mine.cells),
-              f"and is found in its process's private hash: "
+              and any(c.startswith("private, pid") if private_hash else
+                      c.startswith("global") for c in mine.cells),
+              f"and is found in the kernel's supported futex hash: "
               f"{mine.cells if mine else '(missing)'}")
         columns = tuple(str(c.label) for c in table.columns.values())
         check("futex word (user address)" in columns and "hash" in columns,
@@ -136,6 +146,9 @@ async def main() -> int:
             kinds = {r.kind for r in rows}
             check("error" not in kinds,
                   f"{label}: {len(rows)} row(s), no walk error")
+            if key == "mutex_blocked" and not has_member(prog, "struct task_struct", "blocked_on"):
+                check(any(r.name == "Unavailable on this kernel" and "does not record" in r.value
+                          for r in rows), "missing mutex tracking is explained, not reported as empty")
 
     print("\nPASS" if ok else "\nFAIL")
     return 0 if ok else 1

@@ -384,8 +384,8 @@ class GraphScreen(Screen):
         # Keys whose links have been walked. Only the root starts open, so the
         # first picture is one level and everything after that is asked for.
         self.expanded: frozenset[str] = frozenset()
-        # Reopening after a trip to the table restores the shape that was on
-        # screen: expansions are work the user did, not a cache.
+        # Reopening after a trip to the table restores the boxes that were
+        # open: expansions are work the user did, not a cache.
         self.restoring = state["selected"] if state else None
         if state is not None:
             self.history = list(state["history"])
@@ -625,8 +625,8 @@ class GraphScreen(Screen):
         """Shut a box and everything under it.
 
         The whole subtree, not just one level: leaving orphaned expansions
-        behind would make reopening the box restore a shape you had already
-        dismissed.
+        behind would make reopening the box bring back branches that were
+        already dismissed.
         """
         self.expanded = frozenset(
             k for k in self.expanded if not self._under(k, key)

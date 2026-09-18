@@ -88,8 +88,8 @@ def run_bpftrace(script: str, duration: int) -> ProbeResult:
 def parse_bpftrace(text: str) -> list[Section]:
     """Turn bpftrace's map output into sections of labelled rows.
 
-    Handles both shapes it emits: a histogram (a ``@name:`` header followed by
-    bucket lines) and keyed counts (``@name[key]: value``).
+    Handles both formats it emits: a histogram (a ``@name:`` header followed
+    by bucket lines) and keyed counts (``@name[key]: value``).
     """
     sections: list[Section] = []
     current: Section | None = None

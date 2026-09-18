@@ -28,7 +28,7 @@ BINARY = Path("/tmp/kexplore_clone_matrix")
 
 FIELDS = ("mm", "files", "fs", "sighand", "signal", "nsproxy")
 
-# Which member counts the sharers, per structure. The shapes are not uniform:
+# Which member counts the sharers, per structure. The declarations differ:
 # atomic_t exposes .counter, refcount_t nests it under .refs, and fs_struct
 # uses a plain int.
 REFCOUNTS = {
@@ -52,7 +52,7 @@ TRACES = (
 
 
 def _sharers(obj, field: str) -> str:
-    """Read a refcount, whatever shape it takes on this structure."""
+    """Read a refcount, however this structure declares it."""
     from ..core import ctypes as ct
 
     name = REFCOUNTS.get(field)
@@ -72,7 +72,7 @@ def _sharers(obj, field: str) -> str:
             # A wrong path raises AttributeError, which ct.safe does not catch
             # because it is a programming error everywhere else.
             value = path(counter).value_()
-        except Exception:  # noqa: BLE001, S112 - trying shapes until one fits
+        except Exception:  # noqa: BLE001, S112 - trying paths until one fits
             continue
         if isinstance(value, int):
             return f" ({value})"

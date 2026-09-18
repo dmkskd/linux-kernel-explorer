@@ -47,7 +47,7 @@ def install_stubs() -> None:
     names = [
         "drgn", "drgn.helpers", "drgn.helpers.common", "drgn.helpers.common.format",
         "drgn.helpers.linux", "rich", "rich.markup", "rich.syntax", "rich.text",
-        "textual",
+        "textual", "textual.css", "textual.css.query",
         "textual.app", "textual.binding", "textual.color", "textual.containers",
         "textual.coordinate", "textual.screen", "textual.widgets",
     ] + [

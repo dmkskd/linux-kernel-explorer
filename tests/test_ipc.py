@@ -24,6 +24,7 @@ from textual.widgets import DataTable, Tree
 from kexplore.catalog.ipc import message_queues
 from kexplore.catalog.registry import Entry, FactEntry
 from kexplore.tui.app import Explorer
+from kexplore.tui.graph import GraphScreen
 
 ok = True
 
@@ -219,6 +220,35 @@ async def main() -> int:
             await settle(app, pilot)
             check(row(app, "inode") is not None,
                   "landing on the tmpfs struct file, which reaches its inode")
+
+            # --- g on a namespace, with a worker reporting underneath ----
+            # The struct documentation for a type is read in a worker that
+            # runs pahole over the whole vmlinux, and it reports when it is
+            # done. Pressing g first puts the graph screen on top, and on
+            # Textual 2 an app-level widget query then resolves against that
+            # screen alone and finds nothing. This is what crashed on the
+            # Debian lab: the main screen is addressed explicitly now.
+            open_entry(app, tree, "namespaces")
+            await settle(app, pilot)
+            app.action_follow()
+            await settle(app, pilot)
+            app.action_graph()
+            await settle(app, pilot)
+            check(isinstance(app.screen, GraphScreen),
+                  f"g opened the graph ({type(app.screen).__name__})")
+            try:
+                app.set_activity("reading kernel source for struct ipc_namespace…")
+                app.update_doc()
+                app.update_hint()
+                app.set_activity("")
+                check(True, "a worker can report while the graph screen is up")
+            except Exception as exc:  # noqa: BLE001 - this is the regression
+                check(False, f"a worker reporting under the graph raised: "
+                             f"{type(exc).__name__}: {exc}")
+            check(app.panel("#activity") is not None,
+                  "and the main screen's status line is still addressable")
+            app.screen.action_leave()
+            await settle(app, pilot)
 
             # --- the limits, and the default that means no limit ---------
             open_entry(app, tree, "limits")

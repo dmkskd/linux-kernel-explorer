@@ -22,7 +22,7 @@ from textual.widgets import DataTable, Static, Tabs, Tree
 from kexplore.core.nav import Row
 from kexplore.core.source import KernelSource
 from kexplore.operations.tutorial import GuidedTutorial, TutorialStep, tutorials
-from kexplore.tui.app import Explorer, TutorialBanner, TutorialLanding
+from kexplore.tui.app import Explorer, RouteModal, TutorialBanner, TutorialLanding
 from kexplore.view.frames import TUTORIAL_COLUMNS, Context, plan_for, tutorial_step_frame
 
 ok = True
@@ -71,6 +71,7 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         check("[Enter]" in landing_rendered, "landing preview displays [Enter] shortcut prompt")
         check("[a]" in landing_rendered, "landing preview displays [a] shortcut prompt")
         check("[c]" in landing_rendered, "landing preview displays [c] shortcut prompt")
+        check("[?]" in landing_rendered, "landing preview displays [?] shortcut prompt")
         check("highlights" not in landing_rendered, "landing preview omits the short route table")
         check("[ENTER]" in landing_rendered, "landing preview keeps the per-step [ENTER] prompt")
 
@@ -140,6 +141,18 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         for withheld in ("search", "sort", "userspace", "graph", "trace_command", "cycle_view"):
             check(app.check_action(withheld, ()) is None, f"step 1: {withheld} withheld from a step")
         check(app.check_action("refresh", ()) is False, "step 1: refresh withheld from a step")
+
+        # Verify keyboard shortcuts modal overlay
+        check(app.check_action("keys", ()) is True, "step 1: keys/shortcuts action enabled")
+        app.action_keys()
+        await pilot.pause()
+        shortcuts_modal = app.query_one("#route-modal", RouteModal)
+        check(shortcuts_modal.display is True, "step 1: shortcuts modal displayed on action_keys")
+        check(shortcuts_modal.kind == "keys", "step 1: shortcuts modal kind is keys")
+        check("Keyboard Shortcuts" in str(shortcuts_modal.render()), "shortcuts modal header is Keyboard Shortcuts")
+        app.action_keys()
+        await pilot.pause()
+        check(shortcuts_modal.display is False, "step 1: shortcuts modal dismissed on second action_keys")
 
         # Step 1 is the starting screen (kexplore home) frame
         step1_frame = app.stack[-1]

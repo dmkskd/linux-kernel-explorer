@@ -269,12 +269,14 @@ def _check(prog) -> int:
     from .operations.tutorial import tutorials
 
     failures = 0
+    unsupported = 0
     for subsystem in subsystems():
         print(f"\n{subsystem.label}: {subsystem.doc}")
         for entry in subsystem.entries:
             result = entry.check(prog)
-            failures += not result.ok
-            mark = "ok  " if result.ok else "FAIL"
+            failures += result.supported and not result.ok
+            unsupported += not result.supported
+            mark = "SKIP" if not result.supported else "ok  " if result.ok else "FAIL"
             print(f"  {mark}  {entry.label}: {result.detail}")
 
     print("\ntutorials: Live guided tutorials through running kernel structures.")
@@ -285,6 +287,7 @@ def _check(prog) -> int:
         print(f"  {mark}  {tutorial.label}: {result.detail}")
 
     print(f"\n{failures} failing entr{'y' if failures == 1 else 'ies'}")
+    print(f"{unsupported} unavailable on this kernel")
     return 1 if failures else 0
 
 

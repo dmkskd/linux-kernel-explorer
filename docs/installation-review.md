@@ -38,10 +38,11 @@ kernel/symbol version mismatch, source download opt-out, interrupted source
 extraction, and invalid debug caches. ShellCheck and the targeted Python lint
 checks pass.
 
-The Fedora and Ubuntu catalog checks pass. Debian's 6.12 catalog has missing
-layout support for mutex waiters, private futex hashes, and block hardware
-queues. Source browsing and basic live structure navigation work on Debian;
-this does not establish compatibility for every catalog entry or measurement.
+The Fedora and Ubuntu catalog checks pass. Following the compatibility work,
+Debian's older futex and block queue layouts are supported; the missing mutex
+wait tracking is reported as an unavailable capability. See
+[kernel compatibility](kernel-compatibility.md). This does not establish
+compatibility for every kernel variant or measurement.
 
 ## Remaining limitations
 

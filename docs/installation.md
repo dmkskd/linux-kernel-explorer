@@ -76,11 +76,11 @@ package versions match, installs the pair, and restarts the VM automatically.
 It verifies the booted release and live kernel type resolution before reporting
 Ready. This uses current APT candidates, not a frozen, reproducible lab release.
 Native installation still requires artifacts for the exact running kernel.
-The Debian 13 lab's 6.12 kernel currently has catalog compatibility gaps in
-mutex waiters (`task_struct.blocked_on`), futex private hash tables
-(`mm_struct.futex_phash`), and block hardware queues
-(`request_queue.queue_hw_ctx`). Installation and source browsing work, but
-these views need kernel layout compatibility before the whole catalog works.
+The Debian 13 lab's 6.12 kernel uses the older supported global futex hash
+and hardware queue xarray layouts. Its mutex-wait view is explicitly
+unavailable because task_struct.blocked_on is absent. The catalog check
+distinguishes unavailable capabilities from implementation failures. See
+[kernel compatibility](kernel-compatibility.md).
 Cloud flavours, older kernels and custom builds need matching
 artifacts, not just a source tree with the same upstream version.
 

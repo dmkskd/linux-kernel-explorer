@@ -25,8 +25,18 @@ fi
 if ! /opt/kexplore/bin/python3 -c 'from drgn.helpers.linux.mm import vma_name' 2>/dev/null; then
   /opt/kexplore/bin/python3 -m pip install 'drgn>=0.1.0,<0.3'
 fi
-if ! /opt/kexplore/bin/python3 -c 'from importlib.metadata import version; assert int(version("textual").split(".")[0]) >= 1' 2>/dev/null; then
-  /opt/kexplore/bin/python3 -m pip install 'textual>=1,<9'
+# Textual is pinned rather than taken from apt: the distributions package
+# different majors, and they differ in behaviour kexplore depends on. uv does
+# the install; it is not packaged for Ubuntu 26.04, so it comes from PyPI into
+# this venv, which is also where it installs.
+pin="${KEXPLORE_TEXTUAL_PIN:-4.0.0}"
+if ! /opt/kexplore/bin/python3 -c "from importlib.metadata import version
+import sys
+sys.exit(0 if version('textual') == '$pin' else 1)" 2>/dev/null; then
+  if [ ! -x /opt/kexplore/bin/uv ]; then
+    /opt/kexplore/bin/python3 -m pip install uv
+  fi
+  /opt/kexplore/bin/uv pip install --python /opt/kexplore/bin/python3 "textual==$pin"
 fi
 release="$(uname -r)"
 if [ "$ID" = ubuntu ]; then

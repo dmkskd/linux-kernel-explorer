@@ -93,9 +93,16 @@ for tool in drgn debuginfod-find pahole addr2line nm readelf; do
     printf "  MISSING  %s\n" "$tool"; fail=1
   fi
 done
-python3 -c 'import textual' 2>/dev/null \
-  && echo "  ok       python3-textual" \
-  || { echo "  MISSING  python3-textual"; fail=1; }
+# The version matters, not only the presence: the distributions package
+# different majors and kexplore is tested against one of them.
+textual_version="$(python3 -c 'import textual; print(textual.__version__)' 2>/dev/null || true)"
+if [ -z "$textual_version" ]; then
+  echo "  MISSING  textual"; fail=1
+elif [ "$textual_version" = "$KEXPLORE_TEXTUAL_PIN" ]; then
+  echo "  ok       textual $textual_version"
+else
+  echo "  ok       textual $textual_version (kexplore is tested against $KEXPLORE_TEXTUAL_PIN)"
+fi
 command -v bpftrace >/dev/null \
   && echo "  ok       bpftrace (measurements enabled)" \
   || echo "  absent   bpftrace (measurements will be unavailable)"
@@ -183,6 +190,7 @@ setup_lima() {
     lima_wait "lab packages and matching kernel DWARF installation" \
       limactl shell "$VM" sudo env KEXPLORE_LAB_PROVISION=1 \
         KEXPLORE_DOWNLOAD_SOURCE="${KEXPLORE_DOWNLOAD_SOURCE:-1}" \
+        KEXPLORE_TEXTUAL_PIN="$KEXPLORE_TEXTUAL_PIN" \
         bash "$REPO/scripts/provision-deb-lab.sh" || provision_status=$?
     case "$provision_status" in
       0) ;;
@@ -205,7 +213,7 @@ setup_lima() {
     if [ "${KEXPLORE_DOWNLOAD_SOURCE:-1}" = 1 ]; then
       step "Verifying installed kernel sources"
       limactl shell "$VM" sudo env PYTHONPATH="$REPO" \
-        bash "$REPO/scripts/launch-deb-lab.sh" /opt/kexplore/bin/python3 -c \
+        bash "$REPO/scripts/launch-in-lab.sh" /opt/kexplore/bin/python3 -c \
         'from kexplore.core.source import KernelSource; s = KernelSource(); assert s.available, "Installed kernel source is unavailable"; print("  ok       kernel sources: " + str(s.local_root))'
     fi
   fi
@@ -272,7 +280,8 @@ install_native_deb() {
   echo
   echo "  # runtime tools and dependencies for building drgn from source"
   echo "  sudo apt-get install -y ${packages[*]}"
-  echo "  sudo pip3 install --break-system-packages 'drgn>=0.1.0,<0.3' 'textual>=1,<9'"
+  echo "  sudo pip3 install --break-system-packages 'drgn>=0.1.0,<0.3'"
+  echo "  # and textual==$KEXPLORE_TEXTUAL_PIN with uv, into $KEXPLORE_VENV"
   if [ "$id" = ubuntu ]; then
     echo "  # new apt repo ddebs.ubuntu.com, for the kernel debug symbols"
   else
@@ -308,11 +317,35 @@ deb http://deb.debian.org/debian-debug $codename-debug main
 deb http://deb.debian.org/debian-debug $codename-proposed-updates-debug main
 EOF
   fi
-  sudo pip3 install --break-system-packages 'drgn>=0.1.0,<0.3' 'textual>=1,<9'
+  sudo pip3 install --break-system-packages 'drgn>=0.1.0,<0.3'
+  install_pinned_textual
   sudo apt-get update
   sudo apt-get install -y "$dbgsym"
   sudo apt-get install -y bpftrace || true
   set_schedstats
+}
+
+# Textual is pinned and installed into a venv, matching what the lab VMs do.
+# The venv carries system site packages so the distribution's drgn (or, on
+# Debian, the one pip put in the system python) stays visible.
+install_pinned_textual() {
+  local python="$KEXPLORE_VENV/bin/python3"
+  if [ ! -x "$python" ]; then
+    sudo python3 -m venv --system-site-packages "$KEXPLORE_VENV"
+  fi
+  if "$python" -c "from importlib.metadata import version
+import sys
+sys.exit(0 if version('textual') == '$KEXPLORE_TEXTUAL_PIN' else 1)" 2>/dev/null; then
+    return
+  fi
+  if command -v uv >/dev/null; then
+    sudo uv pip install --python "$python" "textual==$KEXPLORE_TEXTUAL_PIN"
+  else
+    # Ubuntu 26.04 has no uv package; bring it into the venv from PyPI.
+    sudo "$python" -m pip install uv
+    sudo "$KEXPLORE_VENV/bin/uv" pip install --python "$python" \
+      "textual==$KEXPLORE_TEXTUAL_PIN"
+  fi
 }
 
 install_native() {
@@ -351,6 +384,7 @@ install_native() {
   sudo $PKGCMD
   # shellcheck disable=SC2086
   sudo $OPTCMD || true
+  install_pinned_textual
   set_schedstats
 }
 
@@ -403,7 +437,7 @@ elif ! BACKEND="$(kexplore_backend 2>/dev/null)"; then
   echo
   if PKGCMD="$(kexplore_package_command)"; then
     # Fedora: a clean native install is available.
-    echo "kexplore needs drgn, elfutils, pahole, binutils and python3-textual."
+    echo "kexplore needs drgn, elfutils, pahole, binutils and textual."
     echo
     echo "  1) install them on this machine:"
     echo "       sudo $PKGCMD"

@@ -10,6 +10,35 @@
 # invocation: lima on macOS, native on Linux when the tools are already
 # installed, docker when a container runtime is, and an error otherwise.
 
+# The Textual version every lab installs, with uv. Left to the distribution,
+# this drifts: Fedora 44 packages 4.0.0 and Ubuntu 26.04 packages 2.1.2, and
+# the two resolve an app-level widget query differently, so code that works on
+# one raises NoMatches on the other. One version, installed the same way
+# everywhere, removes that difference. drgn and the C tools (pahole,
+# addr2line, nm, bpftrace) stay with the distribution: drgn has to match the
+# debug format of the kernel in that VM, and the others have no PyPI
+# equivalent.
+#
+# Raising this is a deliberate, tested change: Textual breaks API between
+# major versions, and the suite is what says whether a new one works.
+KEXPLORE_TEXTUAL_PIN="${KEXPLORE_TEXTUAL_PIN:-4.0.0}"
+
+# Where a lab keeps the Python that runs kexplore. A venv with
+# --system-site-packages, so the distribution's drgn stays visible while the
+# pinned Textual takes precedence over the distribution's.
+KEXPLORE_VENV="${KEXPLORE_VENV:-/opt/kexplore}"
+
+# The interpreter the native backend runs kexplore with: the pinned venv when
+# setup.sh has built one, and the distribution's python3 on a machine set up
+# before that existed.
+kexplore_native_python() {
+  if [ -x "$KEXPLORE_VENV/bin/python3" ]; then
+    echo "$KEXPLORE_VENV/bin/python3"
+  else
+    echo python3
+  fi
+}
+
 # True when the native backend can run: the tools kexplore shells out to,
 # plus the two Python modules. drgn is checked by importing vma_name, the
 # 0.1.0 floor: an importable-but-older drgn (what apt ships) does not count.
@@ -132,7 +161,9 @@ kexplore_package_command() {
   fi
   case "$id" in
     fedora)
-      echo "dnf install -y drgn elfutils-debuginfod-client dwarves binutils python3-textual"
+      # uv rather than python3-textual: Textual is pinned and installed into
+      # the venv, the same way the lab VMs do it.
+      echo "dnf install -y drgn elfutils-debuginfod-client dwarves binutils uv"
       ;;
     *)
       return 1

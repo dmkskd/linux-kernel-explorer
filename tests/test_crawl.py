@@ -1,10 +1,9 @@
 """Breadth-first crash hunt across every subsystem.
 
-The bugs that actually reached the user were all the same shape: some type
-reached by navigation violated an assumption held elsewhere (a struct has no
-truth value; a pointer has no tag; an array has no tag). None were caught by
-targeted tests, because the targeted tests only visited types we'd thought
-about.
+The bugs that reached the user all had one cause: some type reached by
+navigation violated an assumption held elsewhere (a struct has no truth value;
+a pointer has no tag; an array has no tag). None were caught by targeted
+tests, because the targeted tests only visited types we'd thought about.
 
 So this visits everything reachable in two hops from every map entry and
 reports anything that raises. It's a net, not an assertion.
@@ -99,6 +98,9 @@ def main() -> int:
             # themselves and have nothing to navigate into.
             result = entry.check(prog)
             where = f"{subsystem.label}/{entry.label}"
+            if not result.supported:
+                print(f"  unavailable {where}: {result.detail}")
+                continue
             if not result.ok:
                 failures.append((where, result.detail))
                 continue

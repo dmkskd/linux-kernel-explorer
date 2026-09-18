@@ -13,3 +13,7 @@ an analysis has something to see. Nothing here asserts anything, and
 - `clone_demo.py`: one fork and one thread, printed side by side.
 - `stuck_socket.py`: leaves data unread in a socket receive queue, so
   *skb > non-empty socket queues* has a queue to show.
+- `sysv_ipc.py`: creates a System V message queue holding an unreceived
+  message, a semaphore array with a task blocked in semop(2), and an attached
+  shared memory segment, so the *ipc* entries have objects to list. Removes
+  them on exit; after a SIGKILL, `ipcrm` does.

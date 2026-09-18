@@ -38,7 +38,7 @@ Candidates, roughly in order of how often they would be used:
 | pages of a mapping | `/proc/<pid>/pagemap` |
 | scheduler totals | `/proc/schedstat`, `/proc/stat` |
 
-Notes on shape:
+How it fits:
 
 - It is enrichment, so it belongs next to `origin` in `catalog/links.py`, as a
   `userspace:` field on `Link` and on `Entry`.

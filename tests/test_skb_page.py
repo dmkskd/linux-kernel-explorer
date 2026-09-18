@@ -100,7 +100,8 @@ async def main() -> int:
         names = [r.name for r in app.stack[-1].rows]
         check("nr_frags" in names, "reached skb_shared_info (has nr_frags)")
 
-        # qdisc queues use a different list shape; must not raise.
+        # qdisc queues are a NULL-terminated chain, not a circular list;
+        # walking one must not raise.
         open_entry(app, tree, "qdisc")
         await pilot.pause()
         err = [r for r in app.stack[-1].rows if r.note == "error"]
@@ -169,8 +170,8 @@ async def main() -> int:
         await settle(app, pilot)
         mappers = app.stack[-1].rows
         # A page mapped by one VMA opens that VMA, not a list of one. Both
-        # shapes are correct; which one appears depends on whether the page is
-        # shared, which is not something this test gets to choose.
+        # results are correct; which one appears depends on whether the page
+        # is shared, which is not something this test gets to choose.
         if row(app, "= range") is not None:
             check(row(app, "mm") is not None,
                   "one VMA maps this page, and it opened directly")

@@ -15,6 +15,8 @@ import drgn
 from harness import settle, tree_nodes
 from textual.widgets import DataTable, Tree
 
+from kexplore.catalog.irq import workqueues
+from kexplore.catalog.links import _task_worker
 from kexplore.catalog.registry import Entry
 from kexplore.tui.app import Explorer
 from kexplore.tui.graph import GraphScreen
@@ -52,6 +54,12 @@ def follow_named(app, table, name) -> bool:
 
 async def main() -> int:
     prog = drgn.program_from_kernel()
+    rescuers = [wq.rescuer for _, wq in workqueues(prog) if wq.rescuer.value_()]
+    check(bool(rescuers), "workqueues expose rescuer workers for regression coverage")
+    for rescuer in rescuers:
+        resolved = _task_worker(rescuer.task)
+        check(isinstance(resolved, drgn.Object) and resolved.value_() == rescuer.value_(),
+              f"rescuer pid {int(rescuer.task.pid)} resolves back to its worker")
     app = Explorer(prog)
 
     async with app.run_test(size=(140, 45)) as pilot:

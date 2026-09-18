@@ -28,9 +28,10 @@ def safe_escape(text: str) -> str:
         return ""
     escaped = escape(str(text))
     return re.sub(r"(?<!\\)\[", r"\\[", escaped)
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tab, Tabs, Tree
 
@@ -954,7 +955,20 @@ class Explorer(App):
                 args = ("#tutorial-landing", *args[1:])
             elif selector == "view-tours":
                 args = ("view-tutorials", *args[1:])
-        return super().query_one(*args, **kwargs)
+        try:
+            return super().query_one(*args, **kwargs)
+        except NoMatches:
+            # Textual 2 resolves an app-level query against the active screen
+            # alone, Textual 4 against every mounted screen, and the lab VMs
+            # install whichever their distro packages. Every app-level query
+            # here means the main screen, so when the graph or the source view
+            # is on top the screen underneath is searched as well. Without
+            # this, a worker finishing while one of those screens is up raises
+            # instead of writing its result.
+            stack = self.screen_stack
+            if len(stack) > 1:
+                return stack[0].query_one(*args, **kwargs)
+            raise
 
     @property
     def source(self) -> KernelSource:
@@ -1158,13 +1172,22 @@ class Explorer(App):
 
         def work() -> None:
             def step(text: str) -> None:
-                self.call_from_thread(self.set_activity, text)
+                # Progress reporting only. A failure here says something about
+                # the UI, and recording it as the struct's error would cache a
+                # widget lookup as this type's documentation.
+                try:
+                    self.call_from_thread(self.set_activity, text)
+                except Exception:  # noqa: BLE001 - the app may be closing
+                    pass
 
             try:
                 doc = self.source.document(tag, members, progress=step)
             except Exception as exc:  # noqa: BLE001 - a bad tag shouldn't kill the UI
                 doc = StructDoc(tag, error=f"{type(exc).__name__}: {exc}")
-            self.call_from_thread(self._struct_doc_done, tag, doc)
+            try:
+                self.call_from_thread(self._struct_doc_done, tag, doc)
+            except Exception:  # noqa: BLE001 - the app closed while reading
+                pass
 
         self.run_worker(work, thread=True, group=f"doc:{tag}")
 
@@ -1177,6 +1200,10 @@ class Explorer(App):
         # A failed lookup still gets recorded, so it is attempted once per tag
         # rather than on every repaint.
         self._docs[tag] = doc if doc is not None else StructDoc(tag, error="unavailable")
+        if not self.is_running:
+            # The app closed while the worker was still reading, so there is
+            # nothing left to refresh and no screen to open source on.
+            return
         self.set_activity("")
         self.update_doc()
         self.update_hint()
@@ -1195,16 +1222,24 @@ class Explorer(App):
             self.open_source(doc.decl_file, line, title)
 
     def update_doc(self) -> None:
-        """Prefer the kernel's own words for this struct over the map's blurb."""
+        """Prefer the kernel's own words for this struct over the map's blurb.
+
+        Reached from a worker as well as from navigation, so the line is
+        addressed through ``panel``: the graph or the source view may be on
+        top by the time a struct's documentation arrives.
+        """
         if not self.stack:
+            return
+        widget = self.panel("#doc")
+        if widget is None:
             return
         frame = self.stack[-1]
         doc = self.struct_doc(frame.obj)
         if doc and (doc.summary or doc.location):
             where = f"[{doc.location}]" if doc.location else ""
-            self.query_one("#doc", Static).update(f"{doc.summary} {where}".strip())
+            widget.update(f"{doc.summary} {where}".strip())
         else:
-            self.query_one("#doc", Static).update(frame.doc)
+            widget.update(frame.doc)
 
     # ---------------------------------------------------------------- layout
 
@@ -1267,13 +1302,36 @@ class Explorer(App):
 
     # ------------------------------------------------------------- background
 
+    def panel(self, selector: str) -> Static | None:
+        """A Static on the main screen, wherever the user currently is.
+
+        Workers write to the doc, hint and activity lines when they finish, and
+        by then the user may have opened the graph or the source view. Textual
+        2 resolves ``App.query_one`` against the active screen alone, so those
+        writes raise NoMatches there while working on Textual 4, which searches
+        every mounted screen. Addressing the main screen directly behaves the
+        same on both.
+
+        None means there is no main screen to write to: the app has closed
+        while a worker was still reading, or has not finished mounting.
+        """
+        stack = self.screen_stack
+        if not stack:
+            return None
+        try:
+            return stack[0].query_one(selector, Static)
+        except (NoMatches, ScreenStackError):
+            return None
+
     def set_activity(self, text: str) -> None:
         """One line saying what is happening off the UI thread, if anything.
 
         Everything that goes through debuginfod can block for as long as a
         download, so silence here reads as a hang.
         """
-        widget = self.query_one("#activity", Static)
+        widget = self.panel("#activity")
+        if widget is None:
+            return
         widget.update(text)
         widget.display = bool(text)
 
@@ -2122,9 +2180,12 @@ class Explorer(App):
 
     def update_hint(self) -> None:
         """Show documentation for the row under the cursor."""
+        hint = self.panel("#hint")
+        if hint is None:
+            return
         row = self.current_row()
         if row is None:
-            self.query_one("#hint", Static).update("")
+            hint.update("")
             return
         doc = self.struct_doc(self.stack[-1].obj if self.stack else None)
         source = doc.members.get(row.name, "") if doc else ""
@@ -2177,7 +2238,7 @@ class Explorer(App):
                         hint_text.append("  ·  ")
                     hint_text.append("💡 Key data payoff value for this step", style="bold bright_cyan")
 
-        self.query_one("#hint", Static).update(hint_text)
+        hint.update(hint_text)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self.update_hint()
@@ -2694,27 +2755,74 @@ class Explorer(App):
         lines = [
             "  [bold cyan]Keyboard Shortcuts[/]  [dim](? or esc closes this)[/]",
             "",
-            "  [dim]" + "key".ljust(width) + "  what it does[/]",
-            "  [dim]" + "─" * width + "  " + "─" * 58 + "[/]",
         ]
-        for action in order:
-            description = KEY_HELP.get(
-                action,
-                next(
-                    (
-                        b.description
-                        for b in self.BINDINGS
-                        if getattr(b, "action", "") == action
+
+        SECTIONS: list[tuple[str, list[str]]] = [
+            ("Navigation", ["select_cursor", "expand", "back", "cycle_view"]),
+            ("Inspection", ["refresh", "source", "userspace", "trace_command", "graph", "repl"]),
+            ("Table", ["search", "sort", "sort_reverse", "copy", "copy_row", "toggle_mouse"]),
+            (
+                "Walkthrough",
+                [
+                    "tutorial_next",
+                    "tutorial_prev",
+                    "toggle_auto",
+                    "review",
+                    "itinerary",
+                    "copy_narration",
+                    "toggle_header_variant",
+                    "toggle_highlight_style",
+                ],
+            ),
+            ("General", ["keys", "escape", "quit"]),
+        ]
+        accounted = set()
+        for title, actions in SECTIONS:
+            sec_actions = [a for a in actions if a in here]
+            if not sec_actions:
+                continue
+            accounted.update(sec_actions)
+            lines.append(f"  [bold cyan]{title}[/]")
+            for action in sec_actions:
+                description = KEY_HELP.get(
+                    action,
+                    next(
+                        (
+                            b.description
+                            for b in self.BINDINGS
+                            if getattr(b, "action", "") == action
+                        ),
+                        "",
                     ),
-                    "",
-                ),
-            )
-            lines.append(
-                f"  [bold yellow]{safe_escape(labels[action]).ljust(width)}[/]  "
-                f"[white]{safe_escape(description)}[/]"
-            )
-        if elsewhere:
+                )
+                lines.append(
+                    f"    [bold yellow]{safe_escape(labels[action]).ljust(width)}[/]  "
+                    f"[white]{safe_escape(description)}[/]"
+                )
             lines.append("")
+
+        remaining = [a for a in order if a not in accounted]
+        if remaining:
+            lines.append("  [bold cyan]Other[/]")
+            for action in remaining:
+                description = KEY_HELP.get(
+                    action,
+                    next(
+                        (
+                            b.description
+                            for b in self.BINDINGS
+                            if getattr(b, "action", "") == action
+                        ),
+                        "",
+                    ),
+                )
+                lines.append(
+                    f"    [bold yellow]{safe_escape(labels[action]).ljust(width)}[/]  "
+                    f"[white]{safe_escape(description)}[/]"
+                )
+            lines.append("")
+
+        if elsewhere:
             lines.append(
                 "  [dim]not on this screen: "
                 + safe_escape(" ".join(dict.fromkeys(elsewhere)))

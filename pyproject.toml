@@ -1,8 +1,14 @@
 # Configuration only. kexplore is not pip-installable and has no [project]
-# table on purpose: drgn, textual and the C tools (pahole, addr2line, nm,
-# bpftrace) come from the distribution packages that setup.sh installs inside
-# the VM or container. DWARF must match the kernel being explored; drgn
-# must support its debug format and the helpers used by the catalog.
+# table on purpose: drgn and the C tools (pahole, addr2line, nm, bpftrace) come
+# from the distribution packages that setup.sh installs inside the VM or
+# container. DWARF must match the kernel being explored; drgn must support its
+# debug format and the helpers used by the catalog.
+#
+# Textual is the exception, since it reads no kernel memory and the
+# distributions package different majors that behave differently. It is pinned
+# in detect.sh (KEXPLORE_TEXTUAL_PIN) and installed with uv into each lab's
+# /opt/kexplore venv.
+#
 # setup.sh is the dependency contract; this file configures the linter.
 
 [tool.ruff]

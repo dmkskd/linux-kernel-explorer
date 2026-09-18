@@ -353,7 +353,16 @@ def _task_worker(task: Object):
         ):
             if worker.task.value_() == task.value_():
                 return worker
-    return None
+    # Rescuers carry PF_WQ_WORKER but belong to a workqueue, not pool->workers.
+    for workqueue in list_for_each_entry(
+        "struct workqueue_struct", prog["workqueues"].address_of_(), "list"
+    ):
+        rescuer = workqueue.rescuer
+        if rescuer.value_() and rescuer.task.value_() == task.value_():
+            return rescuer
+    # A task can disappear during the walk. The resolver contract accepts an
+    # iterable for no targets, not None.
+    return iter(())
 
 
 def _work_func(work: Object) -> str:
@@ -754,17 +763,35 @@ def _mapping_vmas(page: Object) -> Iterator[Object]:
     mapping = page.mapping.value_()
     if not mapping:
         return
-    if mapping & PAGE_MAPPING_ANON:
+    # The low two bits say what the pointer is. 01 is an anon_vma; 10 is a
+    # movable_operations and 11 a KSM stable_node, and neither of those leads
+    # to a list of VMAs, so they end the walk rather than being followed as
+    # one of the other two.
+    tag = mapping & PAGE_MAPPING_FLAGS
+    if tag == PAGE_MAPPING_ANON:
         anon_vma = Object(page.prog_, "struct anon_vma *", mapping & ~PAGE_MAPPING_FLAGS)
         for avc in rbtree_inorder_for_each_entry(
             "struct anon_vma_chain", anon_vma.rb_root.rb_root.address_of_(), "rb"
         ):
             yield avc.vma
         return
+    if tag:
+        return
     space = cast("struct address_space *", page.mapping)
     yield from rbtree_inorder_for_each_entry(
         "struct vm_area_struct", space.i_mmap.rb_root.address_of_(), "shared.rb"
     )
+
+
+def _page_in_use(page: Object) -> bool:
+    """Whether this frame is allocated.
+
+    A free frame keeps whatever its last user left behind. On this kernel pfn
+    458753 reads mapping 0xffffffff and PG_writeback while its refcount is 0,
+    and following that mapping walks into unmapped memory. The refcount is
+    what separates a frame that means something from one that does not.
+    """
+    return ct.safe(lambda: int(page._refcount.counter) > 0, False)
 
 
 def _page_mappers(page: Object, limit: int = 64, scan: int = 4096):
@@ -940,8 +967,9 @@ def _disk_partitions(disk: Object):
 
 def _queue_hw_queues(queue: Object):
     """The hardware queues of a request_queue, in queue_num order."""
-    for index in range(int(queue.nr_hw_queues)):
-        hctx = queue.queue_hw_ctx[index]
+    from .block import _hw_queues
+
+    for index, hctx in _hw_queues(queue):
         yield f"hctx {index}  {int(hctx.nr_ctx)} cpu queue(s)", hctx
 
 
@@ -1074,6 +1102,20 @@ def _ipc_task(pid: Object):
     if task is None or not ct.safe(lambda: task.value_(), 0):
         return None
     return task
+
+
+def _ipc_task_item(pid: Object):
+    """The task behind an IPC pid, as zero or one labelled item.
+
+    A resolver that returns None has nothing for the frame to render, and the
+    process can exit between the moment the link is offered and the moment it
+    is followed. Yielding nothing covers that race; a single item is opened
+    directly, the same as returning the object would be.
+    """
+    task = _ipc_task(pid)
+    if task is None:
+        return
+    yield f"{ct.safe(lambda: int(task.pid), -1)}  {ct.safe(lambda: task_comm(task), '?')}", task
 
 
 def _ipc_pid_label(pid: Object) -> str:
@@ -1461,7 +1503,7 @@ LINKS: dict[str, list[Link]] = {
             "The VMAs whose page tables reach this page: reverse mapping, so "
             "the answer can span several processes.",
             _page_mappers,
-            applies=lambda p: p.mapping.value_() != 0,
+            applies=lambda p: _page_in_use(p) and p.mapping.value_() != 0,
             origin="page->mapping: anon_vma tree or i_mmap, then a page table "
                    "walk to confirm each candidate",
             userspace="no equivalent; /proc/<pid>/pagemap goes the other way",
@@ -1770,12 +1812,12 @@ LINKS: dict[str, list[Link]] = {
              applies=lambda q: _list_nonempty(q.q_receivers),
              origin="walks queue->q_receivers (msg_receiver->r_list)"),
         Link("last sender", "The process that last put a message on this queue.",
-             lambda q: _ipc_task(q.q_lspid),
+             lambda q: _ipc_task_item(q.q_lspid),
              applies=lambda q: _ipc_task(q.q_lspid) is not None,
              origin="pid_task(queue->q_lspid)",
              userspace="ipcs -q -i <msqid>  # lspid"),
         Link("last receiver", "The process that last took a message off it.",
-             lambda q: _ipc_task(q.q_lrpid),
+             lambda q: _ipc_task_item(q.q_lrpid),
              applies=lambda q: _ipc_task(q.q_lrpid) is not None,
              origin="pid_task(queue->q_lrpid)",
              userspace="ipcs -q -i <msqid>  # lrpid"),
@@ -1813,7 +1855,7 @@ LINKS: dict[str, list[Link]] = {
              applies=lambda s: _list_nonempty(s.pending_const),
              origin="walks sem->pending_const (sem_queue->list)"),
         Link("last operation by", "The process whose semop(2) last changed this value.",
-             lambda s: _ipc_task(s.sempid),
+             lambda s: _ipc_task_item(s.sempid),
              applies=lambda s: _ipc_task(s.sempid) is not None,
              origin="pid_task(sem->sempid)",
              userspace="ipcs -s -i <semid>  # the pid column"),
@@ -1852,13 +1894,13 @@ LINKS: dict[str, list[Link]] = {
              origin="segment->ns",
              userspace="readlink /proc/<pid>/ns/ipc"),
         Link("creator", "The process that called shmget(2), if it is still running.",
-             lambda s: _ipc_task(s.shm_cprid),
+             lambda s: _ipc_task_item(s.shm_cprid),
              applies=lambda s: _ipc_task(s.shm_cprid) is not None,
              origin="pid_task(segment->shm_cprid)",
              userspace="ipcs -m -i <shmid>  # cpid"),
         Link("last attached or detached by",
              "The process that last called shmat(2) or shmdt(2).",
-             lambda s: _ipc_task(s.shm_lprid),
+             lambda s: _ipc_task_item(s.shm_lprid),
              applies=lambda s: _ipc_task(s.shm_lprid) is not None,
              origin="pid_task(segment->shm_lprid)",
              userspace="ipcs -m -i <shmid>  # lpid"),

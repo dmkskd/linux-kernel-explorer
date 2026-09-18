@@ -158,6 +158,7 @@ class Collection:
     items: list[tuple[str, Object]] = field(default_factory=list)
     truncated: bool = False
     error: str | None = None
+    unavailable: str | None = None
 
 
 def collect(label: str, produce: Produce, limit: int = MAX_ROWS) -> Collection:
@@ -253,6 +254,9 @@ def collection_rows(collection: Collection) -> list[Row]:
     table, because "this really is empty" and "the walk failed" look identical
     otherwise.
     """
+    if collection.unavailable:
+        return [Row("Unavailable on this kernel", None, "", collection.unavailable,
+                    False, kind="derived", doc=collection.unavailable)]
     if collection.error:
         return [Row(collection.error, None, "", "", False, kind="error")]
 

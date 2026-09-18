@@ -41,6 +41,7 @@ class CheckResult:
     ok: bool
     detail: str
     collection: Collection | None = None
+    supported: bool = True
 
 
 @dataclass(frozen=True)
@@ -55,12 +56,25 @@ class Entry:
     # by an entry whose rows have nothing to say beyond their type and address,
     # which then get the field/type/value columns.
     columns: tuple[str, ...] = ()
+    # None means no special requirement. A callback returns None when the
+    # kernel supports this view, or a human-readable reason when it cannot.
+    # Unexpected exceptions remain errors; they are not capability absence.
+    capability: Callable[[Program], str | None] | None = None
 
     def resolve(self, prog: Program) -> Collection:
+        if self.capability is not None:
+            try:
+                reason = self.capability(prog)
+            except Exception as exc:  # noqa: BLE001 - probing bugs are failures
+                return Collection(self.label, error=f"{type(exc).__name__}: {exc}")
+            if reason:
+                return Collection(self.label, unavailable=reason)
         return collect(self.label, lambda: self.provider(prog))
 
     def check(self, prog: Program) -> CheckResult:
         collection = self.resolve(prog)
+        if collection.unavailable:
+            return CheckResult(False, collection.unavailable, collection, supported=False)
         if collection.error:
             return CheckResult(False, collection.error, collection)
         count = len(collection.items)

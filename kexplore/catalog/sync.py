@@ -27,7 +27,7 @@ task holds cannot be listed, only the one it is blocked on.
 
 from __future__ import annotations
 
-from drgn import Object, Program
+from drgn import Object, Program, TypeKind
 from drgn.helpers.linux.cpumask import for_each_online_cpu
 from drgn.helpers.linux.locking import mutex_owner
 from drgn.helpers.linux.percpu import per_cpu
@@ -35,6 +35,7 @@ from drgn.helpers.linux.pid import for_each_task
 from drgn.helpers.linux.plist import plist_for_each_entry
 
 from ..core import ctypes as ct
+from .compat import futex_support, has_member, mutex_wait_support, type_has_member
 from .format import task_comm
 from .registry import Entry, Fact, FactEntry, Subsystem, register
 
@@ -86,16 +87,18 @@ def _hash_waiters(buckets: Object, count: int, table: str):
 
 
 def futex_waiters(prog: Program):
-    """Every task parked on a futex, private hashes first.
+    """Every task parked on a futex, using the detected hash layout.
 
     A process-private futex is hashed in that process's own table
     (``mm->futex_phash``); a futex shared between processes goes in the global
     table, which is indexed by NUMA node first and then by hash
     (kernel/futex/core.c). Both are walked here, so a waiter is listed once
-    wherever it is queued.
+    wherever it is queued. Kernels without private hashes use one global table
+    for private and shared futexes, with its size recorded in hashsize.
     """
     seen: set[int] = set()
-    for task in for_each_task(prog):
+    tasks = for_each_task(prog) if has_member(prog, "struct mm_struct", "futex_phash") else ()
+    for task in tasks:
         mm = ct.safe(lambda: task.mm, None)
         if mm is None or not ct.safe(lambda: mm.value_(), 0):
             continue
@@ -109,7 +112,13 @@ def futex_waiters(prog: Program):
         yield from _hash_waiters(private.queues, count, f"private, pid {int(task.tgid)}")
 
     data = prog["__futex_data"]
+    if type_has_member(data.type_, "hashsize"):
+        yield from _hash_waiters(data.queues, int(data.hashsize), "global (private and shared)")
+        return
     mask = int(data.hashmask)
+    if data.queues.type_.kind != TypeKind.ARRAY:
+        yield from _hash_waiters(data.queues, mask + 1, "global (private and shared)")
+        return
     for node in range(int(prog["nr_node_ids"])):
         table = data.queues[node]
         if not table.value_():
@@ -285,13 +294,15 @@ register(
                 "tasks blocked on a mutex",
                 "task->blocked_on, with the mutex's recorded owner.",
                 mutex_blocked,
+                capability=mutex_wait_support,
                 columns=(*WAITER_COLUMNS, "mutex", "held by", *OBJECT_COLUMNS),
             ),
             Entry(
                 "futex_waiters",
                 "futex waiters",
-                "struct futex_q in each process's private hash and the global table.",
+                "struct futex_q in the available global and optional process-private hash tables.",
                 futex_waiters,
+                capability=futex_support,
                 columns=(*WAITER_COLUMNS, "futex word (user address)", "hash",
                          *OBJECT_COLUMNS),
             ),
