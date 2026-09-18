@@ -27,7 +27,7 @@ Horizontal {
     /* The tutorial narration floats over the table rather than sitting in it:
        the field column is clipped to MAX_CELL, and prose wrapped to that width
        cannot be read. Its own layer lets it take the width of the pane. */
-    layers: base callout;
+    layers: base callout modal;
 }
 
 #doc {
@@ -140,4 +140,18 @@ Horizontal {
     color: $text;
     border: round $accent;
     padding: 0 2;
+}
+
+
+/* The route, summoned over a step with "i". A layer above the narration so it
+   covers both the table and the callout; width and position are set from
+   Python, since both depend on how many steps the walkthrough has. */
+#route-modal {
+    layer: modal;
+    display: none;
+    height: auto;
+    background: $panel;
+    color: $text;
+    border: round $accent;
+    padding: 0 1;
 }

@@ -12,7 +12,7 @@ import sys
 import drgn
 from harness import settle
 from rich.text import Text
-from textual.widgets import DataTable, Input, Tabs, Tree
+from textual.widgets import DataTable, Input, Static, Tabs, Tree
 
 from kexplore.catalog.registry import Entry, Measurement
 from kexplore.core.nav import Row
@@ -114,6 +114,17 @@ async def main() -> int:
         check(origins["VMAs"].startswith("walks"), f"origin: {origins['VMAs']}")
         check(commands["VMAs"] == "cat /proc/1/maps", f"userspace: {commands['VMAs']}")
         check("/proc/1/" in commands["open files"], "pid substituted into the command")
+
+        # The type column is narrow and a command is often longer than it. The
+        # hint line under the table has to carry it whole: a command that
+        # cannot be read cannot be run.
+        names = [r.name for r in app.stack[-1].rows]
+        table.move_cursor(row=names.index("open files"))
+        app.update_hint()
+        await pilot.pause()
+        hint_text = str(app.query_one("#hint", Static).renderable)
+        check(commands["open files"] in hint_text,
+              f"the hint carries the whole command: {hint_text[:90]}")
         app.action_userspace()
         await pilot.pause()
         back = {r.name: r.type_name for r in app.stack[-1].rows if r.kind == "link"}
@@ -262,7 +273,7 @@ async def main() -> int:
         index = app.stack[-1].rows
         check(app.stack[-1].label == "subsystems",
               f"the root heading opens a listing: {app.stack[-1].label}")
-        check(len(index) == 9 and all(r.item is not None for r in index),
+        check(len(index) == 10 and all(r.item is not None for r in index),
               f"{len(index)} top-level subsystems listed, each openable")
         check(all(r.doc for r in index), "every subsystem row says what it is")
 

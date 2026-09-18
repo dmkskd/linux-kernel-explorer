@@ -202,8 +202,8 @@ def subsystems() -> list[Subsystem]:
     # then the memory it runs in and the I/O paths out of it, ending at the
     # hardware they all reach.
     from . import (  # noqa: F401,I001
-        system, process, sched, irq, timers, mm, page, slab, vfs, net, socket,
-        skb, device, measure,
+        system, process, sched, sync, irq, timers, mm, page, slab, vfs, net,
+        socket, skb, device, measure,
     )
 
     return [

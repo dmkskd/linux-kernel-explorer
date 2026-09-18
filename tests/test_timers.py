@@ -89,6 +89,9 @@ async def main() -> int:
         await settle(app, pilot)
         rows = app.stack[-1].rows
         check(len(rows) > 1, f"{len(rows)} hrtimers queued")
+        if len(rows) <= 1:
+            print(f"         frame={app.stack[-1].label!r} "
+                  f"rows={[(r.name, r.kind, r.note) for r in rows]}")
         # Follow this test's own sleeping thread, not whichever sleeper is
         # first: a short sleep elsewhere on the machine expires and is freed
         # between the listing and the follow, and reading it then faults.

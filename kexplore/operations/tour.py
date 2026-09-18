@@ -835,10 +835,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="a process and its address space",
             action_field="a process and its address space",
             value_fields=("kernel release", "architecture", "total RAM"),
-            insight=(
-                "The opening screen lists entry points. 'a process and its address space' opens "
-                f"init (pid {pid}); every later step is a pointer followed from there."
-            ),
+            insight="Starts at the task_struct for this process.",
             flow_label="kexplore home",
         ),
         TourStep(
@@ -853,7 +850,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="mm",
             action_field="mm",
             value_fields=("pid", "tgid", "comm"),
-            insight="The task_struct for one process; mm points to its memory.",
+            insight="mm points to the process's address space.",
             flow_label="task_struct",
         ),
         TourStep(
@@ -871,7 +868,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="VMAs",
             action_field="VMAs",
             value_fields=("start_code", "end_code", "start_brk", "brk", "start_stack"),
-            insight="The boundary fields bound the executable, the heap and the stack.",
+            insight="mm_struct is the address space; VMAs are its mappings.",
             flow_label="mm_struct",
         ),
         TourStep(
@@ -890,10 +887,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field=text_vma_addr or "text",
             action_field=text_vma_addr or "text",
             value_fields=(),
-            insight=(
-                "The maple tree indexes every VMA by address; each row is one struct vm_area_struct. "
-                "Open the executable mapping."
-            ),
+            insight="One vm_area_struct per mapping, indexed by address.",
             flow_label="VMAs list",
         ),
         TourStep(
@@ -910,7 +904,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="vm_file",
             action_field="vm_file",
             value_fields=("vm_flags", "vm_start", "vm_end"),
-            insight="A private file-backed mapping carrying the executable code.",
+            insight="Executable code: VM_READ and VM_EXEC, no VM_WRITE.",
             flow_label="text (r-xp)",
         ),
         TourStep(
@@ -926,7 +920,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="vm_file",
             action_field="vm_file",
             value_fields=("vm_start", "vm_end", "vm_flags"),
-            insight="Shared libraries map identical physical code pages across all running processes.",
+            insight="Shared library: many VMAs, one inode.",
             flow_label="shared lib",
         ),
         TourStep(
@@ -942,7 +936,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="anon_vma",
             action_field="anon_vma",
             value_fields=("vm_start", "vm_end", "anon_vma"),
-            insight="Dynamic heap has no file on disk (vm_file == NULL). Backed by RAM via anon_vma.",
+            insight="Heap: vm_file is NULL; anon_vma heads the related VMAs.",
             flow_label="heap (anon)",
         ),
         TourStep(
@@ -958,7 +952,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="vm_flags",
             action_field="vm_flags",
             value_fields=("vm_start", "vm_end", "vm_flags"),
-            insight="Stack grows downward (VM_GROWSDOWN) on demand as execution depth increases.",
+            insight="Stack: anonymous, marked VM_GROWSDOWN.",
             flow_label="stack (anon)",
         ),
         TourStep(
@@ -975,7 +969,7 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="vm_flags",
             action_field="vm_flags",
             value_fields=("vm_start", "vm_end", "vm_flags"),
-            insight="A 2MB PMD entry can replace the 512 page table entries a 4KB mapping needs.",
+            insight="A 2MB-aligned region eligible for a huge page.",
             flow_label="huge pages",
         ),
         TourStep(
@@ -992,229 +986,277 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
             highlight_field="rss_stat",
             action_field="",
             value_fields=("hiwater_rss", "hiwater_vm", "total_vm"),
-            insight="Resident memory broken down into File, Anon, and Shmem. Traversal complete.",
+            insight="rss_stat: one percpu_counter per counter kind.",
             flow_label="rss_stat",
         ),
     ]
 
 
 def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
-    def _resolve_pgd(p: Program):
+    task = _find_live_target_task(prog)
+    comm = task.comm.string_().decode() if task else "systemd"
+    pid = task.pid.value_() if task else 1
+
+    # The register holding the user page table root is architecture specific,
+    # and naming both of them on a machine that has one is noise.
+    ttbr = "CR3"
+    if prog is not None:
+        try:
+            ttbr = "TTBR0_EL1" if "AARCH64" in str(prog.platform.arch) else "CR3"
+        except Exception:  # noqa: BLE001
+            ttbr = "CR3"
+
+    # The VMA list names its rows by start address, so a step asking for "the
+    # text VMA" matches nothing. Resolve the executable mapping here.
+    text_addr = ""
+    text_file = ""
+    if prog is not None and task is not None:
+        try:
+            from drgn.helpers.linux.mm import for_each_vma, vma_name
+
+            if task.mm:
+                for vma in for_each_vma(task.mm):
+                    if vma.vm_flags.value_() & 0x4:  # VM_EXEC
+                        text_addr = f"{vma.vm_start.value_():#x}"
+                        name = vma_name(vma)
+                        text_file = name.decode("utf-8", "replace") if name else ""
+                        break
+        except Exception:  # noqa: BLE001
+            text_addr = ""
+
+    def _task_of(p: Program):
         from drgn.helpers.linux.pid import find_task
 
-        t = find_task(p, 1)
-        mm = t.mm or p["init_mm"].address_of_()
-        yield "pgd (page global directory)", mm.pgd
+        t = find_task(p, pid) if pid else None
+        return t if t is not None else _find_live_target_task(p)
 
-    def _resolve_mm(p: Program):
-        from drgn.helpers.linux.pid import find_task
+    def _mm_of(p: Program):
+        t = _task_of(p)
+        return t.mm if t and t.mm else p["init_mm"].address_of_()
 
-        t = find_task(p, 1)
-        mm = t.mm or p["init_mm"].address_of_()
-        yield "init (pid 1) mm", mm
-
-    def _resolve_vma(p: Program):
-        from drgn.helpers.linux.pid import find_task
-        from drgn.helpers.linux.mm import for_each_vma, vma_name
-
-        t = find_task(p, 1)
-        mm = t.mm or p["init_mm"].address_of_()
-        for vma in for_each_vma(mm):
-            if (vma.vm_flags.value_() & 0x4):
-                vn = vma_name(vma)
-                lbl = vn.decode("utf-8", "replace") if vn else "text"
-                yield f"{vma.vm_start.value_():#x} {lbl}", vma
-                return
-
-    def _resolve_first_pages(p: Program):
-        from drgn.helpers.linux.pid import find_task
-        from drgn.helpers.linux.mm import for_each_vma, follow_page, page_to_pfn
-
-        t = find_task(p, 1)
-        mm = t.mm or p["init_mm"].address_of_()
-        count = 0
-        for vma in for_each_vma(mm):
-            for addr in range(vma.vm_start.value_(), min(vma.vm_end.value_(), vma.vm_start.value_() + 32 * 4096), 4096):
-                page = ct.safe(lambda a=addr: follow_page(mm, a), None)
-                if page is not None and page.value_():
-                    pfn = page_to_pfn(page).value_()
-                    yield f"Page at {addr:#x} (PFN {pfn:#x})", page
-                    count += 1
-                    if count >= 8:
-                        return
-
-    def _resolve_single_page(p: Program):
-        from drgn.helpers.linux.pid import find_task
-        from drgn.helpers.linux.mm import for_each_vma, follow_page, page_to_pfn
-
-        t = find_task(p, 1)
-        mm = t.mm or p["init_mm"].address_of_()
-        for vma in for_each_vma(mm):
-            for addr in range(vma.vm_start.value_(), min(vma.vm_end.value_(), vma.vm_start.value_() + 32 * 4096), 4096):
-                page = ct.safe(lambda a=addr: follow_page(mm, a), None)
-                if page is not None and page.value_():
-                    pfn = page_to_pfn(page).value_()
-                    yield f"Physical page (PFN {pfn:#x})", page
-                    return
-
-    def _resolve_anon_vma(p: Program):
-        from drgn.helpers.linux.pid import find_task
+    def _text_vma(p: Program):
         from drgn.helpers.linux.mm import for_each_vma
 
-        t = find_task(p, 1)
-        mm = t.mm or p["init_mm"].address_of_()
-        for vma in for_each_vma(mm):
-            if vma.anon_vma:
-                yield "anon_vma (reverse mapping)", vma.anon_vma
+        for vma in for_each_vma(_mm_of(p)):
+            if vma.vm_flags.value_() & 0x4:
+                return vma
+        return None
+
+    def _resolve_task(p: Program):
+        yield f"{comm} (PID {pid}) task_struct", _task_of(p)
+
+    def _resolve_mm(p: Program):
+        yield f"{comm} mm_struct", _mm_of(p)
+
+    def _resolve_vmas(p: Program):
+        from drgn.helpers.linux.mm import for_each_vma, vma_name
+
+        from ..catalog.links import vma_perms
+
+        for vma in for_each_vma(_mm_of(p)):
+            name = vma_name(vma)
+            label = name.decode("utf-8", "replace") if name else "anon"
+            yield f"{vma.vm_start.value_():#x}  {vma_perms(vma)}  {label}", vma
+
+    def _resolve_text(p: Program):
+        vma = _text_vma(p)
+        if vma is not None:
+            yield f"{vma.vm_start.value_():#x} {text_file or 'executable'}", vma
+
+    def _resolve_pages(p: Program):
+        from drgn.helpers.linux.mm import follow_page, page_to_pfn
+
+        mm = _mm_of(p)
+        vma = _text_vma(p)
+        if vma is None:
+            return
+        start, end = vma.vm_start.value_(), vma.vm_end.value_()
+        shown = 0
+        for addr in range(start, min(end, start + 64 * 4096), 4096):
+            page = ct.safe(lambda a=addr: follow_page(mm, a), None)
+            if page is not None and page.value_():
+                yield f"{addr:#x}  pfn {page_to_pfn(page).value_():#x}", page
+                shown += 1
+                if shown >= 16:
+                    return
+
+    def _resolve_one_page(p: Program):
+        from drgn.helpers.linux.mm import follow_page, page_to_pfn
+
+        mm = _mm_of(p)
+        vma = _text_vma(p)
+        if vma is None:
+            return
+        start, end = vma.vm_start.value_(), vma.vm_end.value_()
+        for addr in range(start, min(end, start + 64 * 4096), 4096):
+            page = ct.safe(lambda a=addr: follow_page(mm, a), None)
+            if page is not None and page.value_():
+                yield f"struct page for pfn {page_to_pfn(page).value_():#x}", page
                 return
-        yield "init_mm", mm
 
-    def _resolve_zones(p: Program):
-        from drgn.helpers.linux.mmzone import for_each_online_pgdat
+    def _resolve_zone(p: Program):
+        from drgn.helpers.linux.mm import follow_page
 
-        for pgdat in for_each_online_pgdat(p):
-            node = pgdat.node_id.value_()
-            for index in range(pgdat.nr_zones.value_()):
-                zone = pgdat.node_zones[index]
-                name = zone.name.string_().decode("utf-8", "replace")
-                yield f"node{node} {name}", zone
+        from ..catalog.links import _page_zone
+
+        mm = _mm_of(p)
+        vma = _text_vma(p)
+        if vma is None:
+            return
+        start, end = vma.vm_start.value_(), vma.vm_end.value_()
+        for addr in range(start, min(end, start + 64 * 4096), 4096):
+            page = ct.safe(lambda a=addr: follow_page(mm, a), None)
+            if page is not None and page.value_():
+                # Same resolver the catalog's "zone" link uses, so following
+                # that link by hand lands on exactly this object.
+                zone = ct.safe(lambda pg=page: _page_zone(pg), None)
+                if zone is not None:
+                    name = ct.safe(lambda z=zone: z.name.string_().decode(), "zone")
+                    yield name, zone
+                    return
 
     return [
         TourStep(
             title="Starting screen: kexplore entry points",
-            action="kexplore › kernel configuration and topology",
+            action="kexplore › a process and its address space",
             commentary=(
-                "kexplore is attached to the running kernel. Every structure in this "
-                "walkthrough is reached by dereferencing a pointer in the one before it."
+                f"Address translation turns a virtual address into a physical frame. "
+                f"The walkthrough begins at the task_struct for '{comm}' and follows its "
+                f"mm pointer."
             ),
-            userspace="cat /proc/meminfo | head -n 15",
+            userspace="uname -m; getconf PAGESIZE",
             structures=_resolve_home,
-            highlight_field="kernel configuration and topology",
-            action_field="kernel configuration and topology",
-            value_fields=("kernel release", "struct docs and source"),
-            insight="The opening screen names the kernel and what the tool can resolve against it.",
-            flow_label="kexplore",
+            highlight_field="a process and its address space",
+            action_field="a process and its address space",
+            value_fields=("kernel release", "page size"),
+            insight="Every structure below is reached by dereferencing a pointer.",
+            flow_label="kexplore home",
         ),
         TourStep(
-            title="Main menu: memory subsystem catalog",
-            action="subsystems › mm catalog",
+            title=f"Process descriptor: struct task_struct ({comm}, PID {pid})",
+            action="task_struct › mm",
             commentary=(
-                "init_mm is the kernel's own address space, active whenever no userspace "
-                "process is. Its page tables are the ones a CPU uses while running kernel code "
-                "with no user mapping installed."
+                "A process is represented by a struct task_struct. The mm field points to "
+                "its address space."
             ),
-            userspace="cat /proc/meminfo | head -n 15",
-            structures=_resolve_mm_catalog,
-            highlight_field="init_mm",
-            action_field="init_mm",
-            value_fields=("vma_types", "maple_tree"),
-            insight="In memory catalog, follow 'init_mm' to open translation root.",
-            flow_label="mm catalog",
+            userspace=f"cat /proc/{pid}/status | grep -E '(Pid|Tgid)'",
+            structures=_resolve_task,
+            highlight_field="mm",
+            action_field="mm",
+            value_fields=("pid", "comm"),
+            insight="task_struct.mm is the entry point to a process's memory.",
+            flow_label="task_struct",
         ),
         TourStep(
-            title="Translation root (PGD register: CR3 / TTBR0)",
+            title="Translation root (struct mm_struct)",
             action="mm_struct › pgd",
             commentary=(
-                "Page Global Directory base address loaded into CPU hardware translation register "
-                "(CR3 on x86_64, TTBR0_EL1 on ARM64) during context switch."
+                f"pgd, the page global directory, is the top-level page table for this "
+                f"process. The value here is its virtual address; {ttbr} takes "
+                f"virt_to_phys of it at each context switch."
             ),
-            userspace="/proc/kcore; /proc/1/pagemap",
-            structures=_resolve_pgd,
+            userspace=f"cat /proc/{pid}/status | grep VmPTE",
+            structures=_resolve_mm,
             highlight_field="pgd",
             action_field="pgd",
-            value_fields=("pgd",),
-            insight="Page Global Directory translation root loaded into CPU MMU register.",
-            flow_label="PGD",
+            value_fields=("task_size",),
+            insight=f"pgd roots the page tables; {ttbr} holds its physical address.",
+            flow_label="pgd",
         ),
         TourStep(
-            title="Virtual address space limits (struct mm_struct)",
-            action="task->mm › mm_struct",
+            title="Mapped ranges (struct mm_struct)",
+            action="mm_struct › VMAs",
             commentary=(
-                "Virtual addresses must fall within bounded ranges defined in mm_struct. "
-                "The MMU translates virtual addresses within start_code..end_code and heap ranges."
+                "Only an address inside one of these VMAs has a translation, so the walk "
+                "needs one of them first."
             ),
-            userspace="cat /proc/1/maps | head -n 5",
+            userspace=f"cat /proc/{pid}/maps | head -n 5",
             structures=_resolve_mm,
             highlight_field="VMAs",
             action_field="VMAs",
-            value_fields=("start_code", "end_code", "pgd"),
-            insight="Virtual range translated across intermediate page directories (PUD/PMD).",
+            value_fields=("start_code", "start_stack"),
+            insight="The VMA list is where a translatable address comes from.",
             flow_label="mm_struct",
         ),
         TourStep(
-            title="Virtual mapping & permission bits (struct vm_area_struct)",
-            action="mm->mm_mt › vm_area_struct",
+            title=f"Mapped ranges: the VMAs of pid {pid}",
+            action="mm_struct › VMAs › executable mapping",
             commentary=(
-                "VMA bounds define valid translation ranges; vm_flags determine hardware PTE protection "
-                "bits (VM_READ, VM_WRITE, VM_EXEC)."
+                "Each row is one mapped range of virtual addresses. An address outside "
+                "every row has no translation and faults."
             ),
-            userspace="grep 'r-xp' /proc/1/maps",
-            structures=_resolve_vma,
-            highlight_field="resident pages",
-            action_field="resident pages",
-            value_fields=("vm_start", "vm_end", "vm_flags"),
-            insight="VMA boundaries define valid translation ranges and PTE hardware permissions.",
+            userspace=f"cat /proc/{pid}/maps | head -n 15",
+            structures=_resolve_vmas,
+            highlight_field=text_addr or "text",
+            action_field=text_addr or "text",
+            value_fields=(),
+            insight="Only addresses inside a VMA can translate.",
             flow_label="VMAs",
         ),
         TourStep(
-            title="Multi-level page table descent (PGD ➔ PUD ➔ PMD ➔ PTE)",
-            action="walk_page_range › resident pages",
+            title="One mapped range (struct vm_area_struct)",
+            action="vm_area_struct › resident pages",
             commentary=(
-                "Hardware MMU descends 4 levels: PGD (bits 47:39) -> PUD (bits 38:30) -> PMD (bits 29:21) -> PTE (bits 20:12). "
-                "Huge pages terminate early at PMD (2MB)."
+                "vm_start to vm_end is the range this VMA covers. resident pages walks the "
+                "page tables across that range and returns a struct page for every entry "
+                "the hardware would find present."
             ),
-            userspace="/proc/1/pagemap (PFN in bits 0-54)",
-            structures=_resolve_first_pages,
-            highlight_field="flags",
-            action_field="flags",
-            value_fields=("pfn", "flags"),
-            insight="MMU walks 4 levels down to leaf PTE. Huge pages terminate early at PMD.",
-            flow_label="PUD ➔ PTE",
+            userspace=f"grep 'r-xp' /proc/{pid}/maps",
+            structures=_resolve_text,
+            highlight_field="resident pages",
+            action_field="resident pages",
+            value_fields=("vm_start", "vm_end", "vm_flags"),
+            insight="The walk starts from the VMA's own address range.",
+            flow_label="VMA",
         ),
         TourStep(
-            title="Leaf PTE & physical RAM frame (struct page)",
-            action="pte_t › pfn_to_page › struct page",
+            title="Present pages found by walking the tables",
+            action="resident pages › one page",
             commentary=(
-                "Leaf PTE contains physical frame number (PFN) and hardware bits. "
-                "pfn_to_page indexes the kernel vmemmap array of struct page."
+                "One row per present page, each 4096 bytes. Reaching one costs four "
+                "table lookups: nine bits of the address index each level, and the low "
+                "twelve are the offset inside the frame."
             ),
-            userspace="/proc/1/pagemap",
-            structures=_resolve_single_page,
-            highlight_field="mapping",
-            action_field="mapping",
-            value_fields=("pfn", "flags"),
-            insight="Leaf PTE resolves into physical memory page frame (struct page).",
+            userspace=f"grep Rss /proc/{pid}/smaps | head -n 3",
+            structures=_resolve_pages,
+            # Every row carries "pfn", so the needle has to be the address of
+            # the one row the step means.
+            highlight_field=text_addr or "pfn",
+            action_field=text_addr or "pfn",
+            value_fields=(),
+            insight="Nine bits per level, four levels, twelve bits of offset.",
+            flow_label="pages",
+        ),
+        TourStep(
+            title="Physical frame record (struct page)",
+            action="struct page › zone",
+            commentary=(
+                "struct page is the kernel's record for one physical frame. Its index in "
+                "the vmemmap array is the PFN, and mapped by lists the VMAs whose page "
+                "tables point at this frame."
+            ),
+            userspace="grep -E 'MemTotal|MemFree' /proc/meminfo",
+            structures=_resolve_one_page,
+            highlight_field="zone",
+            action_field="zone",
+            value_fields=("flags", "_refcount", "_mapcount"),
+            insight="One struct page per physical frame, indexed by PFN.",
             flow_label="struct page",
         ),
         TourStep(
-            title="Reverse mapping (RMAP: page ➔ VMAs)",
-            action="struct page › anon_vma / mapping",
+            title="Physical memory zone (struct zone)",
+            action="struct page › zone",
             commentary=(
-                "Reverse mapping (RMAP) allows kernel to find all page tables referencing this physical page "
-                "when unmapping, reclaiming (kswapd), or write-protecting for Copy-on-Write."
+                "Every frame belongs to one zone, and the zone owns the free lists the "
+                "buddy allocator draws from. managed_pages counts the frames it controls."
             ),
-            userspace="cat /proc/meminfo | grep -E '(AnonPages|Mapped)'",
-            structures=_resolve_anon_vma,
-            highlight_field="root",
-            action_field="root",
-            value_fields=("root", "degree"),
-            insight="Reverse mapping allows kernel to find all page tables referencing this physical page.",
-            flow_label="anon_vma (RMAP)",
-        ),
-        TourStep(
-            title="Physical memory zones & buddy allocator (struct zone)",
-            action="mm › zones (pglist_data)",
-            commentary=(
-                "Physical memory frames are grouped into NUMA nodes and zones (ZONE_DMA, ZONE_NORMAL). "
-                "Each zone maintains free lists for the buddy allocator and watermarks (min, low, high)."
-            ),
-            userspace="/proc/zoneinfo; /proc/buddyinfo",
-            structures=_resolve_zones,
-            highlight_field="",
-            action_field="",
-            value_fields=("name", "node_zones", "managed_pages"),
-            insight="Physical frames partitioned into NUMA nodes and hardware addressing zones.",
-            flow_label="NUMA zones",
+            userspace="cat /proc/zoneinfo | head -n 20",
+            structures=_resolve_zone,
+            highlight_field="managed_pages",
+            action_field="managed_pages",
+            value_fields=("name", "spanned_pages", "present_pages"),
+            insight="Frames are grouped into zones, each with its own free lists.",
+            flow_label="zone",
         ),
     ]
 

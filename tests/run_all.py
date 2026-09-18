@@ -34,6 +34,8 @@ KERNEL = [
     "test_skb_page.py",
     "test_irq.py",
     "test_timers.py",
+    "test_sync.py",
+    "test_enums.py",
     "test_trace_attribution.py",
     "test_command_trace.py",
     "test_measure.py",

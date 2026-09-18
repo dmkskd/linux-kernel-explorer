@@ -305,6 +305,12 @@ CLOCK_EVENT_STATES = {
 # kernel/time/tick-common.c, enum tick_device_mode.
 TICK_MODES = {0: "periodic", 1: "oneshot"}
 
+# The callback a timer runs is how the kernel identifies what the timer is
+# for: no field says "this is a sleeping task's timer". These two are the ones
+# whose enclosing struct can be recovered from the timer.
+HRTIMER_WAKEUP = "hrtimer_wakeup"
+DELAYED_WORK_TIMER = "delayed_work_timer_fn"
+
 # kernel/time/timer.c gives the wheel base indices: LOCAL takes timers with
 # TIMER_PINNED, GLOBAL the rest (another CPU may take them over), DEF the
 # deferrable ones. A build without CONFIG_NO_HZ_COMMON collapses all three to

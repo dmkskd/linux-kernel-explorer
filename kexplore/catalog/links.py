@@ -25,6 +25,12 @@ from drgn.helpers.linux.fs import mount_dst
 from drgn.helpers.linux.idr import idr_for_each
 from drgn.helpers.linux.irq import irq_desc_kstat_cpu, irq_to_desc
 from drgn.helpers.linux.list import hlist_for_each_entry, list_for_each_entry
+from drgn.helpers.linux.locking import (
+    RwsemLocked,
+    mutex_owner,
+    rwsem_locked,
+    rwsem_owner,
+)
 from drgn.helpers.linux.mm import (
     compound_head,
     decode_page_flags,
@@ -48,7 +54,13 @@ from drgn.helpers.linux.slab import (
 )
 
 from ..core import ctypes as ct
-from .decoders import CLOCK_EVENT_STATES, CLOCK_NAMES, WQ_FLAG_NAMES
+from .decoders import (
+    CLOCK_EVENT_STATES,
+    CLOCK_NAMES,
+    DELAYED_WORK_TIMER,
+    HRTIMER_WAKEUP,
+    WQ_FLAG_NAMES,
+)
 from .format import as_text, task_comm
 from .walk import files_of, path_of
 
@@ -196,8 +208,11 @@ def _is_socket_file(file: Object) -> bool:
 # include/linux/sched.h. PF_WQ_WORKER marks a kworker thread, which is what
 # makes the walk back from a task to its worker_pool worth attempting.
 PF_WQ_WORKER = 0x00000020
-# kernel/workqueue.c: a BH pool runs its work in softirq context, so it has no
-# worker threads on ``pool->workers`` to walk.
+# enum worker_pool_flags. A BH pool's work runs in softirq context, not in a
+# kthread: kernel/softirq.c calls workqueue_softirq_action(), which runs
+# bh_worker() on the first worker of the per-CPU bh_worker_pools. That worker
+# exists on ``pool->workers`` like any other, but its ``task`` is NULL, which
+# is what separates it from a pool backed by kworker threads.
 POOL_BH = 0x1
 
 
@@ -238,13 +253,23 @@ def _action_desc(action: Object):
 
 
 def _pool_workers(pool: Object):
-    """The kworker threads of this pool, via ``pool->workers``."""
+    """The workers of this pool, via ``pool->workers``.
+
+    A worker normally runs as a kthread, and the row names it. A BH pool's
+    single worker has no task at all: its work runs in softirq context, on
+    whatever the CPU interrupted. Reading a name from that NULL task is what
+    this used to do, and it faulted.
+    """
     for worker in list_for_each_entry(
         "struct worker", pool.workers.address_of_(), "node"
     ):
-        comm = ct.safe(lambda: task_comm(worker.task), "?")
+        task = ct.safe(lambda: worker.task, None)
         busy = ct.safe(lambda: int(worker.current_work), 0)
-        yield f"{comm}  {'running work' if busy else 'idle'}", worker
+        state = "running work" if busy else "idle"
+        if task is None or not ct.safe(lambda: task.value_(), 0):
+            yield f"no task (runs in softirq)  {state}", worker
+            continue
+        yield f"{ct.safe(lambda: task_comm(task), '?')}  {state}", worker
 
 
 def _pool_worklist(pool: Object):
@@ -259,7 +284,7 @@ def _pool_worklist(pool: Object):
 def _pool_context(pool: Object) -> str:
     """Where this pool's work actually runs."""
     if int(pool.flags) & POOL_BH:
-        return "softirq (BH pool: no worker threads, cannot sleep)"
+        return "softirq (BH pool: its worker has no task, so it cannot sleep)"
     cpu = int(pool.cpu)
     where = f"bound to cpu {cpu}" if cpu >= 0 else "unbound (any CPU)"
     return f"worker threads, {where}, nice {int(pool.attrs.nice)}"
@@ -306,6 +331,8 @@ def _task_worker(task: Object):
     prog = task.prog_
     for _, address in idr_for_each(prog["worker_pool_idr"].address_of_()):
         pool = Object(prog, "struct worker_pool *", address)
+        # A BH pool's worker has no task, so it can never be the one searched
+        # for, and skipping it saves reading the list at all.
         if int(pool.flags) & POOL_BH:
             continue
         for worker in list_for_each_entry(
@@ -339,12 +366,6 @@ def _pci_irq_desc(dev: Object):
 
 
 # ----------------------------------------------------------------- timers
-
-# The function a timer calls is how the kernel identifies what the timer is
-# for: there is no field saying "this is a sleeping task's timer".
-HRTIMER_WAKEUP = "hrtimer_wakeup"
-DELAYED_WORK = "delayed_work_timer_fn"
-
 
 def _symbol_name(obj: Object, func) -> str:
     return ct.safe(lambda: obj.prog_.symbol(func).name, "?")
@@ -479,6 +500,79 @@ def _clock_event_handler(device: Object) -> str:
     if not ct.safe(lambda: device.event_handler.value_(), 0):
         return "none (device not in use)"
     return _symbol_name(device, device.event_handler)
+
+
+
+# --------------------------------------------------------- locks and waiting
+
+
+def _mutex_state(lock: Object) -> str:
+    """Whether this mutex is held, and by whom.
+
+    ``mutex->owner`` packs flags into the low bits of the task pointer, so it
+    is read through drgn's helper rather than cast directly.
+    """
+    owner = ct.safe(lambda: mutex_owner(lock), None)
+    if owner is None or not ct.safe(lambda: owner.value_(), 0):
+        return "unlocked"
+    return f"held by {int(owner.pid)} {task_comm(owner)}"
+
+
+def _rwsem_locked(sem: Object) -> bool:
+    return ct.safe(lambda: rwsem_locked(sem) != RwsemLocked.UNLOCKED, False)
+
+
+def _rwsem_state(sem: Object) -> str:
+    """Unlocked, read-locked or write-locked, and who holds it if anyone.
+
+    A read-locked rwsem has no single owner to report: the count says how many
+    readers hold it, not which tasks they are.
+
+    An unlocked one can still name a task. A writer clears ``sem->owner`` when
+    it releases, but reader ownership is only cleared in a build with
+    CONFIG_DEBUG_RWSEMS or CONFIG_DETECT_HUNG_TASK_BLOCKER
+    (kernel/locking/rwsem.c), so the field is usually the last reader rather
+    than a current holder. Reporting that as an owner would be wrong.
+    """
+    state = ct.safe(lambda: str(rwsem_locked(sem)).rsplit(".", 1)[-1].lower(), "?")
+    owner = ct.safe(lambda: rwsem_owner(sem), None)
+    named = owner is not None and ct.safe(lambda: owner.value_(), 0)
+    if not named:
+        return state
+    who = f"{int(owner.pid)} {task_comm(owner)}"
+    if _rwsem_locked(sem):
+        return f"{state}, owner {who}"
+    return f"{state} (owner field still names {who}, the last reader)"
+
+
+def _mutex_waiters(lock: Object):
+    """The tasks queued on this mutex, first to be handed it first.
+
+    This kernel keeps the queue as ``mutex->first_waiter`` and a list running
+    through each waiter, so the walk starts at the first waiter rather than at
+    a list head in the mutex.
+    """
+    first = lock.first_waiter
+    if not first.value_():
+        return
+    yield f"{int(first.task.pid)} {task_comm(first.task)} (first)", first
+    for waiter in list_for_each_entry(
+        "struct mutex_waiter", first.list.address_of_(), "list"
+    ):
+        if waiter.value_() == first.value_():
+            break
+        yield f"{int(waiter.task.pid)} {task_comm(waiter.task)}", waiter
+
+
+def _futex_key(waiter: Object) -> str:
+    """The address the futex is keyed on, as userspace sees it."""
+    address = ct.safe(lambda: int(waiter.key.private.address), None)
+    return f"{address:#x} (userspace address)" if address is not None else "?"
+
+
+def _rcu_callbacks(data: Object) -> str:
+    count = ct.safe(lambda: int(data.cblist.len.counter), None)
+    return "?" if count is None else f"{count} waiting for a grace period"
 
 
 @dataclass(frozen=True)
@@ -847,6 +941,14 @@ LINKS: dict[str, list[Link]] = {
             applies=lambda t: int(t.flags) & PF_WQ_WORKER,
             origin="searches the worker pools for a worker whose task is this one",
         ),
+        Link(
+            "blocked on (mutex)",
+            "The mutex this task is sleeping on, which records its holder.",
+            lambda t: t.blocked_on,
+            applies=lambda t: ct.safe(lambda: t.blocked_on.value_(), 0) != 0,
+            origin="task->blocked_on",
+            userspace="cat /proc/<pid>/stack",
+        ),
         Link("runqueue", "The struct rq this task is queued on.", task_rq,
              origin="task_rq() = cpu_rq(task_cpu(task))",
              userspace="ps -o psr= -p <pid>  # the CPU, not the rq"),
@@ -1172,8 +1274,7 @@ LINKS: dict[str, list[Link]] = {
              origin="action->next"),
     ],
     "worker_pool": [
-        Link("workers", "The kworker threads attached to this pool.", _pool_workers,
-             applies=lambda p: not int(p.flags) & POOL_BH,
+        Link("workers", "The workers attached to this pool.", _pool_workers,
              origin="walks pool->workers (worker->node)",
              userspace="ps -e | grep kworker"),
         Link("queued work", "Work items waiting for a worker in this pool.",
@@ -1182,6 +1283,8 @@ LINKS: dict[str, list[Link]] = {
     ],
     "worker": [
         Link("task", "The kthread this worker runs as.", lambda w: w.task,
+             # A BH pool's worker has none: its work runs in softirq context.
+             applies=lambda w: ct.safe(lambda: w.task.value_(), 0) != 0,
              origin="worker->task",
              userspace="ps -o comm= -p <pid>"),
         Link("pool", "The pool this worker belongs to.", lambda w: w.pool,
@@ -1217,6 +1320,47 @@ LINKS: dict[str, list[Link]] = {
              origin="pwq->wq"),
         Link("inactive work", "Work held back by max_active.", _pwq_inactive,
              origin="walks pwq->inactive_works (work_struct->entry)"),
+    ],
+    "mutex": [
+        Link("owner", "The task holding this mutex.", mutex_owner,
+             applies=lambda m: ct.safe(lambda: mutex_owner(m).value_(), 0) != 0,
+             origin="mutex_owner(): mutex->owner with its flag bits masked off",
+             userspace="no userspace equivalent"),
+        Link("waiters", "Tasks queued for this mutex.", _mutex_waiters,
+             applies=lambda m: m.first_waiter.value_() != 0,
+             origin="walks mutex->first_waiter and the waiter list"),
+    ],
+    "mutex_waiter": [
+        Link("task", "The task waiting here.", lambda w: w.task,
+             origin="waiter->task"),
+    ],
+    "rw_semaphore": [
+        Link("owner", "The task holding this rwsem for writing.", rwsem_owner,
+             # Hidden when the rwsem is unlocked: the field survives a reader's
+             # release outside debug builds, and a stale reader is not an owner.
+             applies=lambda s: _rwsem_locked(s)
+             and ct.safe(lambda: rwsem_owner(s).value_(), 0) != 0,
+             origin="rwsem_owner(): sem->owner with its flag bits masked off"),
+    ],
+    "futex_q": [
+        Link("task", "The task parked on this futex.", lambda q: q.task,
+             origin="futex_q->task",
+             userspace="cat /proc/<pid>/stack, or gdb -p <pid>"),
+        Link("pi_state", "Priority-inheritance state, for a PI futex.",
+             lambda q: q.pi_state,
+             applies=lambda q: q.pi_state.value_() != 0,
+             origin="futex_q->pi_state"),
+    ],
+    "rcu_data": [
+        Link("rcu_node", "The node this CPU reports quiescent states to.",
+             lambda d: d.mynode,
+             origin="rcu_data->mynode"),
+    ],
+    "rcu_node": [
+        Link("parent", "The node above this one in the tree.",
+             lambda n: n.parent,
+             applies=lambda n: n.parent.value_() != 0,
+             origin="rcu_node->parent"),
     ],
     "hrtimer": [
         Link("clock base", "The per-CPU queue this timer is on.",
@@ -1255,12 +1399,12 @@ LINKS: dict[str, list[Link]] = {
             "The work item this timer will queue. Only set for a timer armed "
             "by schedule_delayed_work, whose callback is delayed_work_timer_fn.",
             _delayed_work,
-            applies=_timer_func(DELAYED_WORK),
+            applies=_timer_func(DELAYED_WORK_TIMER),
             origin="container_of(timer, struct delayed_work, timer)->work",
         ),
         Link("workqueue", "The queue that delayed work will be put on.",
              _delayed_work_queue,
-             applies=_timer_func(DELAYED_WORK),
+             applies=_timer_func(DELAYED_WORK_TIMER),
              origin="container_of(timer, struct delayed_work, timer)->wq"),
     ],
     "timer_base": [
@@ -1297,6 +1441,18 @@ LINKS: dict[str, list[Link]] = {
 
 
 DERIVED: dict[str, list[Derived]] = {
+    "mutex": [
+        Derived("= state", "Whether this mutex is held, and by whom.", _mutex_state),
+    ],
+    "rw_semaphore": [
+        Derived("= state", "Unlocked, read-locked or write-locked.", _rwsem_state),
+    ],
+    "futex_q": [
+        Derived("= futex key", "The address this futex is keyed on.", _futex_key),
+    ],
+    "rcu_data": [
+        Derived("= callbacks", "Callbacks queued on this CPU.", _rcu_callbacks),
+    ],
     "hrtimer": [
         Derived("= expires in", "Time until this timer fires.", _hrtimer_expires_in),
         Derived("= function", "The callback this timer will run.",

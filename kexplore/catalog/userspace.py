@@ -107,6 +107,43 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
     ("task_struct", "loginuid"): "cat /proc/<pid>/loginuid",
     ("task_struct", "sessionid"): "cat /proc/<pid>/sessionid",
     ("task_struct", "exit_code"): "no userspace equivalent: only the parent sees it, from wait()",
+    # sched_info: /proc/<pid>/schedstat is three numbers, in this order:
+    # sum_exec_runtime (which lives on the sched_entity, not here), run_delay,
+    # pcount. The rest of the struct is kernel-only: checked against
+    # /proc/<pid>/sched on this kernel, which publishes none of them.
+    ("sched_info", "run_delay"): "awk '{print $2}' /proc/<pid>/schedstat  # ns runnable but waiting for a CPU",
+    ("sched_info", "pcount"): "awk '{print $3}' /proc/<pid>/schedstat  # times put on a CPU",
+    # The max and min are not in schedstat, but taskstats reports them:
+    # delayacct_add_tsk() copies them into cpu_delay_max / cpu_delay_min
+    # (kernel/delayacct.c), and it does so before the tsk->delays check, so
+    # they are reported even with kernel.task_delayacct off.
+    ("sched_info", "max_run_delay"): "getdelays -d -p <pid>  # CPU delay max, from taskstats",
+    ("sched_info", "min_run_delay"): "getdelays -d -p <pid>  # CPU delay min, from taskstats",
+    ("sched_info", "max_run_delay_ts"): "getdelays -d -p <pid>  # when the max was recorded",
+    ("sched_info", "last_arrival"): "no userspace equivalent: the last time this task took a CPU is kept only here",
+    ("sched_info", "last_queued"): "no userspace equivalent: zero unless the task is queued and waiting right now",
+    # task_delay_info: delay accounting is published over taskstats (netlink),
+    # not as a file. getdelays is the sample client in the kernel tree
+    # (Documentation/accounting/delay-accounting.rst). Block I/O delay alone
+    # also reaches /proc/<pid>/stat, as field 42 in clock ticks.
+    #
+    # The accounting is off unless kernel.task_delayacct is set. It is 0 on
+    # this VM, and then task->delays is NULL for every task, so these rows are
+    # not reachable at all rather than reading zero.
+    ("task_delay_info", "blkio_delay"): "getdelays -d -p <pid>  # or field 42 of /proc/<pid>/stat, in ticks",
+    ("task_delay_info", "blkio_count"): "getdelays -d -p <pid>",
+    ("task_delay_info", "swapin_delay"): "getdelays -d -p <pid>",
+    ("task_delay_info", "swapin_count"): "getdelays -d -p <pid>",
+    ("task_delay_info", "freepages_delay"): "getdelays -d -p <pid>",
+    ("task_delay_info", "freepages_count"): "getdelays -d -p <pid>",
+    ("task_delay_info", "thrashing_delay"): "getdelays -d -p <pid>",
+    ("task_delay_info", "thrashing_count"): "getdelays -d -p <pid>",
+    ("task_delay_info", "compact_delay"): "getdelays -d -p <pid>",
+    ("task_delay_info", "compact_count"): "getdelays -d -p <pid>",
+    ("task_delay_info", "wpcopy_delay"): "getdelays -d -p <pid>",
+    ("task_delay_info", "wpcopy_count"): "getdelays -d -p <pid>",
+    ("task_delay_info", "irq_delay"): "getdelays -d -p <pid>",
+    ("task_delay_info", "irq_count"): "getdelays -d -p <pid>",
     # mm_struct: /proc/<pid>/status publishes one Vm line per counter.
     ("mm_struct", "total_vm"): "grep VmSize /proc/<pid>/status",
     ("mm_struct", "hiwater_vm"): "grep VmPeak /proc/<pid>/status",
@@ -210,12 +247,42 @@ def _holder_of(obj):
     return None, None
 
 
+def _delays_owner(obj):
+    """The task whose delay accounting this is.
+
+    ``task->delays`` is a pointer to a separately allocated struct with no way
+    back, so the only way to the pid is to search the tasks. There are a few
+    hundred, which is cheaper than the fd search this file already does for a
+    struct file.
+    """
+    from drgn.helpers.linux.pid import for_each_task
+
+    address = obj.value_()
+    for task in for_each_task(obj.prog_):
+        try:
+            if task.delays.value_() == address:
+                return task.pid.value_()
+        except Exception:  # noqa: BLE001, S112 - a task exiting mid-walk is normal
+            continue
+    return None
+
+
 def placeholders(obj, tag: str) -> dict[str, str]:
     """What this struct can fill into a command shown against it."""
     found: dict[str, str] = {}
     try:
         if tag == "task_struct":
             found["<pid>"] = str(obj.pid.value_())
+        elif tag == "sched_info":
+            # Embedded in the task, so the task is one container_of back. The
+            # schedstat commands are useless without the pid.
+            from drgn import container_of
+
+            found["<pid>"] = str(container_of(obj, "struct task_struct", "sched_info").pid.value_())
+        elif tag == "task_delay_info":
+            pid = _delays_owner(obj)
+            if pid is not None:
+                found["<pid>"] = str(pid)
         elif tag == "mm_struct":
             if obj.owner:
                 found["<pid>"] = str(obj.owner.pid.value_())
@@ -285,9 +352,71 @@ def runnable(command: str) -> str:
     return command.split(", or ")[0].split("  #")[0].strip()
 
 
+# A per-namespace sysctl is a field of a netns struct, and the file under
+# /proc/sys is the same field by another name. Writing out all 133 of them
+# would be a table that drifts; the name is derived instead, with the
+# exceptions listed. Both halves were checked against /proc/sys on a running
+# kernel: of 133 sysctl_ fields in these structs, 117 match after dropping the
+# prefix, 15 are named below, and one (netns_core.sysctl_txq_reselection) has
+# no file at all.
+SYSCTL_SPACES = {
+    "netns_ipv4": "net.ipv4",
+    "netns_core": "net.core",
+    "netns_unix": "net.unix",
+    "netns_xfrm": "net.core",
+}
+
+# Where the field name and the sysctl name diverge, keyed by the field name
+# with its sysctl_ prefix already dropped.
+SYSCTL_NAMES = {
+    ("netns_ipv4", "ip_fwd_use_pmtu"): "ip_forward_use_pmtu",
+    ("netns_ipv4", "ip_fwd_update_priority"): "ip_forward_update_priority",
+    ("netns_ipv4", "tcp_nometrics_save"): "tcp_no_metrics_save",
+    ("netns_ipv4", "max_syn_backlog"): "tcp_max_syn_backlog",
+    ("netns_ipv4", "tcp_fastopen_blackhole_timeout"): "tcp_fastopen_blackhole_timeout_sec",
+    ("netns_ipv4", "igmp_llm_reports"): "igmp_link_local_mcast_reports",
+    ("netns_ipv4", "local_reserved_ports"): "ip_local_reserved_ports",
+    ("netns_ipv4", "ip_prot_sock"): "ip_unprivileged_port_start",
+    ("netns_xfrm", "aevent_etime"): "xfrm_aevent_etime",
+    ("netns_xfrm", "aevent_rseqth"): "xfrm_aevent_rseqth",
+    ("netns_xfrm", "larval_drop"): "xfrm_larval_drop",
+    ("netns_xfrm", "acq_expires"): "xfrm_acq_expires",
+}
+
+# Fields that carry the sysctl_ prefix without being a tunable: the registered
+# table header, and the two counters the table is built from.
+NOT_SYSCTLS = {
+    ("netns_core", "hdr"),
+    ("netns_ipv4", "hdr"),
+    ("netns_xfrm", "hdr"),
+    ("netns_core", "txq_reselection"),
+}
+
+
+def sysctl_command(tag: str, field: str) -> str:
+    """The sysctl this field is, for a field of a network namespace struct.
+
+    These structs hold one member per tunable, and the value the field holds
+    is the value /proc/sys publishes: they are the same storage, not a copy.
+    The command says so by reading the same setting through its own name.
+    """
+    space = SYSCTL_SPACES.get(tag)
+    if space is None or not field.startswith("sysctl_"):
+        return ""
+    name = field[len("sysctl_"):]
+    if (tag, name) in NOT_SYSCTLS:
+        return ""
+    name = SYSCTL_NAMES.get((tag, name), name)
+    path = f"/proc/sys/{space.replace('.', '/')}/{name}"
+    return f"sysctl {space}.{name}, or cat {path}"
+
+
 def field_command(tag: str, field: str, found: dict[str, str] | None = None) -> str:
     """The userspace equivalent for one struct field, if there is one."""
-    return fill(FIELD_COMMANDS.get((tag, field), ""), found or {})
+    command = FIELD_COMMANDS.get((tag, field))
+    if command is None:
+        command = sysctl_command(tag, field)
+    return fill(command, found or {})
 
 
 def entry_command(subsystem_key: str, entry_key: str) -> str:

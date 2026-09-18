@@ -169,6 +169,79 @@ def _type_of(row: Row) -> str:
     return row.original_type or row.type_name
 
 
+# Which screen each action belongs to. The footer shows a key only where its
+# action is listed here, so adding a binding means deciding where it belongs
+# rather than letting it appear everywhere. Actions absent from the table are
+# offered on every screen (following, going back, copying, quitting).
+#
+#   browse   the structure tables, outside a walkthrough
+#   step     a walkthrough step, where the screen is chosen for the reader
+#   landing  a walkthrough's itinerary page, which has no struct on it
+ACTION_SCREENS: dict[str, frozenset[str]] = {
+    "search": frozenset({"browse"}),
+    "sort": frozenset({"browse"}),
+    "sort_reverse": frozenset({"browse"}),
+    "refresh": frozenset({"browse"}),
+    "userspace": frozenset({"browse"}),
+    "graph": frozenset({"browse"}),
+    "cycle_view": frozenset({"browse"}),
+    # Tracing leaves the walkthrough for a measurement, so it is a browsing
+    # action even though the command is on screen during a step.
+    "trace_command": frozenset({"browse"}),
+    "expand": frozenset({"browse", "step"}),
+    "source": frozenset({"browse", "step"}),
+    "itinerary": frozenset({"step"}),
+    "copy_narration": frozenset({"step"}),
+}
+
+
+# What each key is for, in a sentence rather than the footer's one or two
+# words. The footer has room for a label; the key list has room for a reason,
+# and several of these keys are not guessable from their label.
+KEY_HELP: dict[str, str] = {
+    "select_cursor": "follow the row into whatever it points at",
+    "expand": "open the row in place, keeping its neighbours on screen",
+    "back": "return to the structure you came from",
+    "search": "filter these rows by text",
+    "sort": "sort by the column under the cursor",
+    "sort_reverse": "reverse that order",
+    "refresh": "read the structure again from the live kernel",
+    "userspace": "swap the kernel origins for commands that get the same from userspace",
+    "cycle_view": "switch the sidebar between structures, operations and walkthroughs",
+    "source": "open the kernel source this structure is declared in",
+    "trace_command": "run the userspace command and record which kernel functions it reaches",
+    "graph": "draw this structure and its neighbours",
+    "repl": "suspend the UI and open a drgn REPL with this object bound to obj",
+    "copy": "copy the value under the cursor",
+    "copy_row": "copy the whole row",
+    "copy_narration": "copy the narration of this step",
+    "toggle_mouse": "hand the mouse back to the terminal so you can select text",
+    "tutorial_next": "go to the next step",
+    "tutorial_prev": "go back a step",
+    "toggle_auto": "advance the walkthrough on a timer",
+    "itinerary": "lay the whole route over this step",
+    "keys": "this list",
+    "escape": "close the filter, or go back",
+    "quit": "leave kexplore",
+    "toggle_header_variant": "show or hide the roadmap line in the banner",
+    "toggle_highlight_style": "switch how the action row is marked",
+}
+
+
+class ContextFooter(Footer):
+    """Only the keys this screen can act on.
+
+    Textual's Footer lists every binding and greys out the ones check_action
+    withholds, which leaves the reader the same number of keys to read past.
+    This drops them instead, so the footer says what is possible here.
+    """
+
+    def compose(self) -> ComposeResult:
+        keys = [key for key in super().compose() if not getattr(key, "disabled", False)]
+        self.styles.grid_size_columns = max(1, len(keys))
+        yield from keys
+
+
 class FieldsTable(DataTable):
     """The detail pane, with enter named.
 
@@ -359,6 +432,96 @@ class TutorialCallout(Static):
         self.display = False
 
 
+
+def step_table(steps: list, current: int = 0) -> list[str]:
+    """The walkthrough as one row per step: screen, highlighted row, takeaway.
+
+    Everything here is already on the step: ``flow_label`` names the structure
+    the step stands on, ``action_field`` the row it asks for, and ``insight``
+    what that row is there to show. Read together they are the route, which no
+    single step can give.
+    """
+    rows = []
+    for idx, step in enumerate(steps, start=1):
+        rows.append(
+            (
+                str(idx),
+                step.get_flow_label() or "",
+                step.get_action_field() or "-",
+                step.get_insight() or "",
+            )
+        )
+    if not rows:
+        return []
+    w_n = max(len("step"), max(len(r[0]) for r in rows))
+    w_s = min(22, max(len(r[1]) for r in rows))
+    w_f = min(26, max(len(r[2]) for r in rows))
+
+    def clip(text: str, width: int) -> str:
+        return text if len(text) <= width else text[: width - 1] + "…"
+
+    out = [
+        "  [dim]"
+        + "step".rjust(w_n)
+        + "  "
+        + "stage".ljust(w_s)
+        + "  "
+        + "highlights".ljust(w_f)
+        + "  says[/]",
+        "  [dim]"
+        + "─" * w_n
+        + "  "
+        + "─" * w_s
+        + "  "
+        + "─" * w_f
+        + "  "
+        + "─" * 34
+        + "[/]",
+    ]
+    for n, screen, field, says in rows:
+        here = int(n) == current
+        marker = "[bold bright_yellow]▶[/]" if here else " "
+        num = f"[bold bright_yellow]{n.rjust(w_n)}[/]" if here else f"[dim]{n.rjust(w_n)}[/]"
+        out.append(
+            f" {marker}{num}  "
+            f"[cyan]{safe_escape(clip(screen, w_s)).ljust(w_s)}[/]  "
+            f"[bold yellow]{safe_escape(clip(field, w_f)).ljust(w_f)}[/]  "
+            f"[white]{safe_escape(clip(says, 52))}[/]"
+        )
+    return out
+
+
+class RouteModal(Static):
+    """An overlay laid over whatever is on screen, for the route or the keys.
+
+    Summoned and dismissed without moving anything underneath: the step keeps
+    its position, so reading either costs the reader nothing.
+    """
+
+    kind: str = ""
+
+    def show(self, steps: list, current: int, width: int, height: int) -> None:
+        self.show_lines(step_table(steps, current=current), width, height, "route")
+
+    def show_lines(self, lines: list[str], width: int, height: int, kind: str) -> None:
+        if not lines:
+            return
+        self.kind = kind
+        body = "\n".join(lines)
+        # Centre it over the pane. The border and padding add four columns and
+        # two rows to whatever the table itself needs.
+        plain = [re.sub(r"\[/?[^\]]*\]", "", line) for line in lines]
+        w = min(width - 4, max(len(line) for line in plain) + 4)
+        h = min(height - 2, len(lines) + 2)
+        self.update(body)
+        self.styles.width = w
+        self.styles.offset = (max(0, (width - w) // 2), max(0, (height - h) // 2))
+        self.display = True
+
+    def hide(self) -> None:
+        self.display = False
+
+
 class TutorialLanding(VerticalScroll):
     """Full-screen scrollable landing page and itinerary for a guided tutorial."""
 
@@ -493,6 +656,15 @@ class TutorialLanding(VerticalScroll):
         lines.append("")
 
         # Tutorial steps
+        lines.append(
+            f"[bold cyan]The route ({len(steps)} steps):[/]  "
+            f"[dim]each row is one screen, the row it asks for, and why[/]"
+        )
+        lines.append("")
+        lines.extend(step_table(steps, current=getattr(self, "_current_step", 0)))
+        lines.append("")
+        lines.append("  [bold bright_yellow]▼ Scroll down (↓ / j / PgDn) for the rest[/]")
+        lines.append("")
         lines.append(f"[bold cyan]Tutorial steps & itinerary ({len(steps)} live steps):[/]  [bold bright_yellow]▼ Scroll down (↓ / j / PgDn / mouse wheel) to view all steps[/]")
         lines.append("  [dim]" + "─" * 72 + "[/dim]")
         for idx, step in enumerate(steps, start=1):
@@ -512,7 +684,6 @@ class TutorialLanding(VerticalScroll):
             if idx == 5 and len(steps) > 5:
                 lines.append(f"  [bold bright_yellow]─── ▼ Scroll down (↓ / PgDn) for remaining steps 6 to {len(steps)} ▼ ───[/]")
                 lines.append("")
-
         lines.append("  [bold bright_yellow]▲ End of itinerary · Scroll up (↑ / k / PgUp) to return to top[/]")
         lines.append("  [dim]" + "─" * 72 + "[/dim]")
         lines.append(
@@ -651,7 +822,7 @@ class Explorer(App):
         Binding("O", "sort_reverse", "reverse", show=False),
         Binding("r", "refresh", "refresh"),
         Binding("u", "userspace", "userspace"),
-        Binding("v", "cycle_view", "view"),
+        Binding("v", "cycle_view", "view", show=False),
         Binding("a", "toggle_auto", "autoplay"),
         Binding("H", "toggle_header_variant", "header variant", show=False),
         Binding("Y", "toggle_highlight_style", "highlight style", show=False),
@@ -659,13 +830,16 @@ class Explorer(App):
         Binding("C", "copy_row", "copy row", show=False),
         Binding("y", "copy", "copy", show=False),
         Binding("N", "copy_narration", "copy narration", show=False),
+        Binding("i", "itinerary", "route"),
+        Binding("question_mark", "keys", "keys"),
+        Binding("h", "keys", "keys", show=False),
         Binding("m", "toggle_mouse", "mouse"),
         Binding("n", "tutorial_next", "next step"),
         Binding("p", "tutorial_prev", "prev step"),
         Binding("s", "source", "source"),
         Binding("t", "trace_command", "trace command"),
         Binding("g", "graph", "graph"),
-        Binding("colon", "repl", "drgn repl"),
+        Binding("colon", "repl", "drgn repl", show=False),
         # Escape undoes whatever is most local: the filter box, then the same
         # step backspace takes. Hidden from the footer, which already shows one.
         Binding("escape", "escape", "back", show=False),
@@ -788,6 +962,16 @@ class Explorer(App):
 
         landing_shown = self._landing_displayed()
         showing_src = self._showing_source()
+
+        in_step = (
+            self.active_tutorial is not None
+            and self.active_tutorial.current_idx > 0
+            and not landing_shown
+        )
+        screen = "landing" if landing_shown else ("step" if in_step else "browse")
+        allowed = ACTION_SCREENS.get(action)
+        if allowed is not None and screen not in allowed:
+            return None
 
         # Step navigation: strictly context-dependent
         if action in ("tutorial_next", "tour_next"):
@@ -1019,9 +1203,10 @@ class Explorer(App):
                 yield TutorialLanding(id="tutorial-landing")
                 yield FieldsTable(id="fields", cursor_type="row", zebra_stripes=True)
                 yield TutorialCallout(id="tutorial-callout")
+                yield RouteModal(id="route-modal")
                 yield Static("", id="hint")
         yield Input(placeholder="filter fields…", id="search")
-        yield Footer()
+        yield ContextFooter()
 
     def on_mount(self) -> None:
         self.refresh_bindings()
@@ -1289,6 +1474,10 @@ class Explorer(App):
         if self.active_tutorial is None:
             return
 
+        try:
+            self.query_one("#route-modal", RouteModal).hide()
+        except Exception:  # noqa: BLE001
+            pass
         banner = self.query_one(TutorialBanner)
         landing = self.query_one(TutorialLanding)
         table = self.query_one("#fields", DataTable)
@@ -1489,10 +1678,11 @@ class Explorer(App):
         self._tutorial_action_idx = None
         self._tutorial_action_clean_name = ""
         self._tutorial_action_target = ""
-        try:
-            self.query_one("#tutorial-callout", TutorialCallout).hide()
-        except Exception:  # noqa: BLE001
-            pass
+        for widget_id, kind in (("#tutorial-callout", TutorialCallout), ("#route-modal", RouteModal)):
+            try:
+                self.query_one(widget_id, kind).hide()
+            except Exception:  # noqa: BLE001
+                pass
         self._tutorial_action_is_final = False
         self.query_one(TutorialBanner).display = False
         self.query_one(TutorialLanding).display = False
@@ -1914,6 +2104,15 @@ class Explorer(App):
             if len(hint_text):
                 hint_text.append("  ·  ")
             hint_text.append(row.doc)
+
+        # In userspace mode the command sits in the type column, where a long
+        # one is cut off by the column width. The hint line has the width to
+        # show it whole, and a command that cannot be read cannot be run.
+        if row.original_type and row.type_name:
+            if len(hint_text):
+                hint_text.append("  ·  ")
+            hint_text.append(row.type_name, style="bold")
+            hint_text.append(f"  ({row.original_type})", style="dim")
 
         if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
             step_idx = self.active_tutorial.current_idx - 1
@@ -2422,6 +2621,97 @@ class Explorer(App):
         preview = _clip(row_text.replace("\t", "  │  "), 60)
         self.notify(f"Copied row: {preview}", title="Clipboard", timeout=2.5, markup=False)
 
+    def action_keys(self) -> None:
+        """Every key, with the ones this screen cannot act on kept out of the way.
+
+        The footer carries only what is possible here, so the rest need
+        somewhere to be found. Keys sharing an action share a row, and the ones
+        that do nothing here are named on one line rather than given a row
+        each: a list of thirty greyed entries costs as much to read past as the
+        footer did.
+        """
+        modal = self.query_one("#route-modal", RouteModal)
+        if modal.display and modal.kind == "keys":
+            modal.hide()
+            return
+
+        def pretty(key: str) -> str:
+            return key.replace("question_mark", "?").replace("colon", ":")
+
+        here: dict[str, list[str]] = {}
+        order: list[str] = []
+        elsewhere: list[str] = []
+        for binding in self.BINDINGS:
+            key = getattr(binding, "key", "")
+            action = getattr(binding, "action", "")
+            if not getattr(binding, "description", ""):
+                continue
+            if self.check_action(action, ()) is None:
+                elsewhere.append(pretty(key))
+                continue
+            if action not in here:
+                here[action] = []
+                order.append(action)
+            here[action].append(pretty(key))
+
+        labels = {a: ", ".join(k) for a, k in here.items()}
+        width = max((len(v) for v in labels.values()), default=3)
+        lines = [
+            "  [dim]" + "key".ljust(width) + "  what it does[/]",
+            "  [dim]" + "─" * width + "  " + "─" * 58 + "[/]",
+        ]
+        for action in order:
+            description = KEY_HELP.get(
+                action,
+                next(
+                    (
+                        b.description
+                        for b in self.BINDINGS
+                        if getattr(b, "action", "") == action
+                    ),
+                    "",
+                ),
+            )
+            lines.append(
+                f"  [bold yellow]{safe_escape(labels[action]).ljust(width)}[/]  "
+                f"[white]{safe_escape(description)}[/]"
+            )
+        if elsewhere:
+            lines.append("")
+            lines.append(
+                "  [dim]not on this screen: "
+                + safe_escape(" ".join(dict.fromkeys(elsewhere)))
+                + "[/]"
+            )
+        lines.append("")
+        lines.append("  [dim]esc or ? closes this[/]")
+        detail = self.query_one("#detail")
+        modal.show_lines(lines, detail.region.width, detail.region.height, "keys")
+
+    def action_itinerary(self) -> None:
+        """Lay the route over the current step, or take it away again.
+
+        A step shows one screen and says why one row on it matters. The route is
+        what no step can show, and reading it must not cost the reader their
+        place, so this leaves the walkthrough exactly where it was.
+        """
+        if self.active_tutorial is None or self.active_tutorial.current_idx == 0:
+            self.notify("no step on screen to summon the route over", severity="warning")
+            return
+        modal = self.query_one("#route-modal", RouteModal)
+        if modal.display and modal.kind == "route":
+            modal.hide()
+            return
+        if self.auto_play:
+            self._pause_auto()
+        detail = self.query_one("#detail")
+        modal.show(
+            self.active_tutorial.steps,
+            self.active_tutorial.current_idx,
+            detail.region.width,
+            detail.region.height,
+        )
+
     def action_copy_narration(self) -> None:
         """Copy the current step's narration to the system clipboard.
 
@@ -2659,6 +2949,15 @@ class Explorer(App):
         frame itself. Escape drops the innermost one, so it never navigates
         away from a frame the user was still filtering.
         """
+        for widget_id, kind in (("#route-modal", RouteModal),):
+            try:
+                overlay = self.query_one(widget_id, kind)
+            except Exception:  # noqa: BLE001
+                continue
+            if overlay.display:
+                overlay.hide()
+                return
+
         search = self.query_one("#search", Input)
         if search.display:
             search.value = ""

@@ -148,9 +148,68 @@ fault. `mm->map_count` against a walk of the VMAs, and `sk_rmem_alloc` against
 the summed `truesize` of a socket's queued skbs, are the same exercise.
 
 
+## A /proc file read line by line, pivoted back to the structures
+
+Userspace mode goes one way: a struct or a link, and the command you would type
+instead. The pivot is the other way, and starts from the file a person already
+reads. Show the output of a /proc file, put the cursor on one line, and the
+pane below says which kernel state produced that number.
+
+Read from the lab VM, sampling the file and the counters in one pass: the two
+zones held 569332 and 814208 free pages, which at 4 kB a page is 5534160 kB,
+exactly the MemFree the file printed. Sampled seconds apart instead, the two
+differed by 109 MB, so a view like this has to read both at once and say that
+it did.
+
+```
+/proc/meminfo
+  MemTotal:        8096472 kB
+  MemFree:         5534160 kB     <- cursor
+  Percpu:              408 kB
+  HardwareCorrupted:     0 kB
+
+  si_meminfo() fills struct sysinfo.freeram from
+  global_zone_page_state(NR_FREE_PAGES), summed over zones
+  zone DMA      zone->vm_stat[NR_FREE_PAGES]   569332 pages
+  zone Normal   zone->vm_stat[NR_FREE_PAGES]   814208 pages
+                sum 1383540 pages = 5534160 kB, the line above
+```
+
+The mapping exists in one place and can be read: `fs/proc/meminfo.c` is a
+sequence of `show_val_kb(m, "MemFree:        ", i.freeram)` calls, line 61 on
+the kernel in the lab VM. What that file gives is the expression behind each
+line, not the storage, so resolving a line falls into three cases worth
+separating:
+
+- the line is a counter read, such as a `vm_stat` entry. It resolves to a
+  field, and the existing entry machinery can show it.
+- the line is computed by a helper, such as `si_meminfo()`. It resolves to the
+  several places the helper reads, which is more instructive than the number.
+- the line is a sum over structures. Only a walk reproduces it, which is what
+  the catalog entries already do, so the view would link to the entry rather
+  than restate it.
+
+This is the same data the catalog already holds, indexed by the userspace line
+instead of by the struct. It pairs with the trace view: that one shows the path
+a command takes into the kernel at runtime, this one shows where a number came
+from without running anything.
+
+Open questions:
+
+- Whether the mapping is hand-written per file, like the link table, or derived
+  per kernel from the source of each `show` function. Hand-written is honest
+  and small for `/proc/meminfo`; it does not scale to `/proc/<pid>/status`.
+- Which files earn it first. `/proc/meminfo`, `/proc/<pid>/status`,
+  `/proc/stat` and `/proc/zoneinfo` are the ones people read under pressure.
+- What a line shows when nothing resolves it. It has to say that the mapping is
+  missing, not leave the pane empty, or an unmapped line looks like a line with
+  no kernel state behind it.
+
+
 ## Subsystems with no entry point
 
 Types this kernel has that nothing in the catalog reaches yet: block (`bio`,
-`request`, `request_queue`), irq (`irq_desc`, measured but not browsable),
-timers, cgroup, page cache (`address_space`), reclaim (`lruvec`), the buddy
-allocator, rcu, workqueues.
+`request`, `request_queue`), cgroup, page cache (`address_space`), reclaim
+(`lruvec`), the buddy allocator, and IPC (System V queues, semaphores, shared
+memory). The irq, timer, workqueue and RCU structures listed here before are
+now the `irq`, `time` and `sync` branches.

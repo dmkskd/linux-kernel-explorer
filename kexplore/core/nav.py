@@ -200,7 +200,7 @@ def _address(obj: Object) -> str:
         return ""
 
 
-def _item_row(label: str | tuple[str, ...], obj: Object) -> Row:
+def _item_row(label: str | tuple[str, ...], obj: Object | None) -> Row:
     """One item of a collection.
 
     A provider that yields a tuple is describing columns of its own -- pid,
@@ -208,7 +208,16 @@ def _item_row(label: str | tuple[str, ...], obj: Object) -> Row:
     the frame supplies the header to match. A provider that yields a string
     gets the field/type/value layout, which is what a list of structures with
     nothing in particular to say about them wants.
+
+    An item with no object is something the provider can report but not open:
+    a list that changed while it was being read, say. It gets a row so the
+    gap is visible, and nothing to follow.
     """
+    if obj is None:
+        text = label if not isinstance(label, tuple) else " ".join(
+            str(cell).strip() for cell in label if str(cell).strip()
+        )
+        return Row(text, None, "", "", False, kind="error")
     if not isinstance(label, tuple):
         return Row(
             name=label,

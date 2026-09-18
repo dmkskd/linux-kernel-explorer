@@ -71,7 +71,8 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         check("[Enter]" in landing_rendered, "landing preview displays [Enter] shortcut prompt")
         check("[a]" in landing_rendered, "landing preview displays [a] shortcut prompt")
         check("[c]" in landing_rendered, "landing preview displays [c] shortcut prompt")
-        check("[ENTER]" in landing_rendered, "landing preview displays [ENTER] action prompt")
+        check("highlights" in landing_rendered, "landing preview displays the route table")
+        check("[ENTER]" in landing_rendered, "landing preview keeps the per-step [ENTER] prompt")
 
         # Verify no markup styles leak to the end of the content
         landing_static = landing.query_one("#tutorial-landing-content", Static)
@@ -127,13 +128,16 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         check(landing.display is False, "landing page hidden on step 1")
         check(table.display is True, "fields table visible on step 1")
 
-        # Verify context-dependent bindings on step 1:
-        # Both next and prev are enabled, along with table/struct inspection actions.
-        check(app.check_action("tutorial_next", ()) is True, "step 1: next step action enabled")
-        check(app.check_action("tutorial_prev", ()) is True, "step 1: prev step action enabled")
-        check(app.check_action("search", ()) is None if False else True, "step 1: search action enabled")
-        check(app.check_action("sort", ()) is True, "step 1: sort action enabled")
-        check(app.check_action("graph", ()) is True, "step 1: graph action enabled")
+        # Verify context-dependent bindings on step 1. A walkthrough step offers
+        # stepping, the route and the source; the browsing actions belong to the
+        # structure tables and are withheld here, which is what keeps the footer
+        # readable. ACTION_SCREENS is the declaration being checked.
+        check(app.check_action("tutorial_next", ()) is True, "step 1: next step offered")
+        check(app.check_action("tutorial_prev", ()) is True, "step 1: prev step offered")
+        check(app.check_action("itinerary", ()) is True, "step 1: route offered")
+        check(app.check_action("copy_narration", ()) is True, "step 1: copy narration offered")
+        for withheld in ("search", "sort", "refresh", "userspace", "graph", "trace_command", "cycle_view"):
+            check(app.check_action(withheld, ()) is None, f"step 1: {withheld} withheld from a step")
 
         # Step 1 is the starting screen (kexplore home) frame
         step1_frame = app.stack[-1]
@@ -216,7 +220,8 @@ async def test_tui_initial_tutorial(prog: drgn.Program) -> None:
         check(app.active_tutorial is not None, "initial_tutorial started active tutorial session")
         check(app.active_tutorial.tutorial.key == "user_memory_types", f"loaded tutorial: {app.active_tutorial.tutorial.key}")
         check(app.active_tutorial.current_idx == 0, "initial_tutorial landed on step 0 (landing page)")
-        check("Tutorial steps" in str(landing.render()), "initial_tutorial landing shows tutorial steps")
+        check("The route" in str(landing.render()), "initial_tutorial landing shows the route table")
+        check("Tutorial steps" in str(landing.render()), "initial_tutorial landing keeps the per-step itinerary")
         check(len(app.active_tutorial.steps) == 10, f"initial_tutorial loaded 10 steps: {len(app.active_tutorial.steps)}")
         check("Types of User Memory" in str(landing.render()), "landing page displays real video title")
         check("https://youtu.be/6dwzZEFEgWE" in str(landing.render()), "landing page displays real YouTube link")

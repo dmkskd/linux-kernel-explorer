@@ -97,8 +97,8 @@ def main() -> int:
     subs = subsystems()
     keys = [s.key for s in subs]
     check(
-        keys == ["system", "process", "sched", "irq", "time", "mm", "page",
-                 "slab", "vfs", "net", "socket", "skb", "device"],
+        keys == ["system", "process", "sched", "sync", "irq", "time", "mm",
+                 "page", "slab", "vfs", "net", "socket", "skb", "device"],
         f"subsystems register in module order: {keys}",
     )
     # Registration happens at import, so importing a catalog module that

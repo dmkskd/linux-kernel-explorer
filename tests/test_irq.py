@@ -89,8 +89,8 @@ async def main() -> int:
         pools = app.stack[-1].rows
         check(len(pools) > 1, f"{len(pools)} worker pools")
 
-        # A BH pool runs work in softirq context and has no threads to walk,
-        # so pick one that is not BH: the first with more than one worker.
+        # A BH pool's worker has no task (its work runs in softirq context), so
+        # pick a pool backed by kthreads: the first with more than one worker.
         threaded = next((r for r in pools if "worker(s)" in r.name
                          and int(r.name.split("nice")[1].split()[1]) > 1), pools[0])
         follow_named(app, table, threaded.name)
@@ -99,6 +99,36 @@ async def main() -> int:
         check(context is not None, f"a pool says where its work runs: {getattr(context, 'value', '?')}")
         check(row(app, "workers") is not None, "a threaded pool links to its workers")
 
+        # The BH pools are the ones this used to fault on: their single worker
+        # has a NULL task, and naming it dereferenced that.
+        open_entry(app, tree, "pools")
+        await settle(app, pilot)
+        bh = next((r for r in app.stack[-1].rows if " 1 worker(s)" in r.name), None)
+        if bh is not None:
+            follow_named(app, table, bh.name)
+            await settle(app, pilot)
+            workers = row(app, "workers")
+            check(workers is not None, "a BH pool still lists its worker")
+            if workers is not None:
+                follow_named(app, table, "workers")
+                await settle(app, pilot)
+                rows = app.stack[-1].rows
+                names = [r.name for r in rows]
+                check("error" not in {r.kind for r in rows},
+                      f"walking it does not fault: {names[:3]}")
+                # One worker, so following the link lands on the worker itself
+                # rather than a list of one.
+                task_link = next(
+                    (r for r in rows if r.name == "task" and r.kind == "link"), None
+                )
+                check(row(app, "= doing") is not None and task_link is None,
+                      f"the BH worker offers no task link, only the NULL field: "
+                      f"{names[:3]}")
+
+        open_entry(app, tree, "pools")
+        await settle(app, pilot)
+        follow_named(app, table, threaded.name)
+        await settle(app, pilot)
         check(follow_named(app, table, "workers"), "followed the worker list")
         await settle(app, pilot)
         app.action_follow()
