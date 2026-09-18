@@ -200,10 +200,13 @@ def subsystems() -> list[Subsystem]:
     # The order reads as: what exists and when it runs (system, process,
     # sched), the two things that take the CPU away from it (irq, timers),
     # then the memory it runs in and the I/O paths out of it, ending at the
-    # hardware they all reach.
+    # hardware they all reach. block sits between vfs and net because a write
+    # leaves a filesystem as a bio and reaches a driver as a request, and ipc
+    # follows sync because both answer what one task is waiting for another to
+    # do -- sync inside the kernel, ipc through objects userspace names.
     from . import (  # noqa: F401,I001
-        system, process, sched, sync, irq, timers, mm, page, slab, vfs, net,
-        socket, skb, device, measure,
+        system, process, sched, sync, ipc, irq, timers, mm, page, slab, vfs,
+        block, net, socket, skb, device, measure,
     )
 
     return [

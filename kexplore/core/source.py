@@ -93,7 +93,12 @@ class KernelSource:
     """Locates and caches kernel source for the running build."""
 
     def __init__(self, release: str | None = None, build_id: str | None = None,
-                 *, source_timeout: float = 120, deadline: float | None = None) -> None:
+                 *, source_timeout: float = 120, deadline: float | None = None,
+                 source_root: str | None = None, source_prefix: str | None = None) -> None:
+        root = source_root or os.environ.get("KEXPLORE_SOURCE_ROOT")
+        self.local_root = Path(root).expanduser().resolve() if root else None
+        prefix = source_prefix or os.environ.get("KEXPLORE_SOURCE_PREFIX")
+        self.local_prefix = prefix.rstrip("/") + "/" if prefix else None
         self.release = release or os.uname().release
         self.build_id = build_id or kernel_build_id()
         self._debuginfo: str | None = None
@@ -106,9 +111,12 @@ class KernelSource:
 
     @property
     def debuginfo(self) -> str | None:
-        """Path to the cached vmlinux debuginfo, fetching it if needed."""
-        if self._debuginfo is None and self.build_id:
-            self._debuginfo = self._find("debuginfo", None)
+        """Use an installed debug image, otherwise fetch the build ID from debuginfod."""
+        if self._debuginfo is None:
+            from .debuginfod import local_vmlinux
+
+            local = local_vmlinux()
+            self._debuginfo = str(local) if local else self._find("debuginfo", None)
         return self._debuginfo
 
     def _find(self, kind: str, path: str | None) -> str | None:
@@ -140,6 +148,8 @@ class KernelSource:
         Distro-specific, so it's probed once against a file that always exists
         rather than assumed.
         """
+        if self.local_root is not None:
+            return self.local_prefix or str(self.local_root) + "/"
         if self._prefix is not None:
             return self._prefix or None
 
@@ -163,11 +173,14 @@ class KernelSource:
 
     @property
     def available(self) -> bool:
-        """True if both pahole and debuginfod source lookups work here."""
+        """Whether a debug image and a local or remote source root are available."""
         if self._available is None:
-            self._available = bool(
-                self.build_id and self.debuginfo and self.source_prefix
-            )
+            if self.local_root is not None:
+                self._available = bool(
+                    self.debuginfo and self.local_file("kernel/sched/sched.h")
+                )
+            else:
+                self._available = bool(self.build_id and self.debuginfo and self.source_prefix)
         return self._available
 
     # ---------------------------------------------------------------- lookups
@@ -195,7 +208,18 @@ class KernelSource:
 
     @functools.lru_cache(maxsize=64)  # noqa: B019
     def local_file(self, relative_path: str) -> str | None:
-        """Path to the debuginfod-cached copy of a kernel source file."""
+        """Resolve a source file within the supplied tree or debuginfod cache."""
+        if self.local_root is not None:
+            path = relative_path
+            if self.local_prefix and path.startswith(self.local_prefix.rstrip("/") + "/"):
+                path = path[len(self.local_prefix.rstrip("/")) + 1:]
+            candidate = Path(path)
+            if not candidate.is_absolute():
+                candidate = self.local_root / candidate
+            candidate = candidate.resolve()
+            if candidate.is_relative_to(self.local_root) and candidate.is_file():
+                return str(candidate)
+            return None
         prefix = self.source_prefix
         if not prefix:
             return None
@@ -208,7 +232,7 @@ class KernelSource:
 
     @functools.lru_cache(maxsize=64)  # noqa: B019
     def read(self, relative_path: str) -> list[str] | None:
-        """Fetch a source file via debuginfod and return its lines."""
+        """Open a local or debuginfod-cached source file and return its lines."""
         local = self.local_file(relative_path)
         if not local:
             return None
@@ -289,7 +313,7 @@ class KernelSource:
         doc.decl_file, doc.decl_line = declaration
 
         if progress:
-            progress(f"debuginfod: fetching {doc.decl_file}")
+            progress(f"source: opening {doc.decl_file}")
         lines = self.read(doc.decl_file)
         if lines is None:
             doc.error = f"could not fetch {doc.decl_file}"

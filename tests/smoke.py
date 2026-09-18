@@ -10,12 +10,13 @@ compose/layout errors and navigation regressions without a terminal. Run with:
 from __future__ import annotations
 
 import asyncio
+import platform
 import sys
 
 import drgn
+from harness import settle, tree_nodes
 from textual.widgets import DataTable, Static, Tree
 
-from harness import tree_nodes
 from kexplore.catalog.registry import Entry
 from kexplore.tui.app import Explorer
 
@@ -27,13 +28,25 @@ def check(condition: bool, message: str) -> bool:
 
 async def main() -> int:
     prog = drgn.program_from_kernel()
-    app = Explorer(prog)
+    # This smoke test covers browsing without optional source downloads.
+    app = Explorer(prog, source_available=False)
     ok = True
 
     async with app.run_test(size=(120, 40)) as pilot:
+        await settle(app, pilot)
         tree = app.query_one("#nav", Tree)
         table = app.query_one("#fields", DataTable)
         path = app.query_one("#path", Static)
+        ok &= check(
+            any(row.name == "distribution" and
+                row.value == platform.freedesktop_os_release()["PRETTY_NAME"]
+                for row in app.stack[-1].rows),
+            "overview identifies the running lab distribution",
+        )
+        ok &= check(
+            "Kernel source unavailable" in str(app.query_one("#source-status", Static).render()),
+            "missing source has a persistent status message",
+        )
 
         entries = tree_nodes(tree)
         ok &= check(len(entries) >= 15, f"tree exposes {len(entries)} entries")
@@ -45,6 +58,18 @@ async def main() -> int:
         tree.select_node(runqueues)
         await pilot.pause()
         ok &= check(table.row_count >= 1, f"runqueues listed {table.row_count} CPUs")
+        notices = []
+        original_notify = app.notify
+        app.notify = lambda message, **kwargs: notices.append(message)
+        try:
+            await pilot.press("s")
+            await pilot.pause()
+        finally:
+            app.notify = original_notify
+        ok &= check(
+            any("Kernel source unavailable" in message for message in notices),
+            "pressing s explains unavailable source",
+        )
 
         # Follow cpu0's rq, then into a pointer field.
         table.focus()
@@ -65,7 +90,7 @@ async def main() -> int:
         ok &= check("comm" in task_fields, "landed on a task_struct (has comm)")
         comm = next(r.value for r in app.stack[-1].rows if r.name == "comm")
         print(f"         rq.curr.comm = {comm}")
-        ok &= check("›" in str(path.renderable), "breadcrumb shows the path")
+        ok &= check("›" in str(path.render()), "breadcrumb shows the path")
 
         # Filtering.
         app.filter = "pid"

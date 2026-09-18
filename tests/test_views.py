@@ -273,7 +273,7 @@ async def main() -> int:
         index = app.stack[-1].rows
         check(app.stack[-1].label == "subsystems",
               f"the root heading opens a listing: {app.stack[-1].label}")
-        check(len(index) == 10 and all(r.item is not None for r in index),
+        check(len(index) == 12 and all(r.item is not None for r in index),
               f"{len(index)} top-level subsystems listed, each openable")
         check(all(r.doc for r in index), "every subsystem row says what it is")
 

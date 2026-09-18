@@ -20,6 +20,12 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from drgn import Object, TypeKind, cast, container_of
+from drgn.helpers.linux.block import (
+    blk_rq_bytes,
+    blk_rq_pos,
+    part_name,
+    request_queue_busy_iter,
+)
 from drgn.helpers.linux.cpumask import for_each_online_cpu
 from drgn.helpers.linux.fs import mount_dst
 from drgn.helpers.linux.idr import idr_for_each
@@ -43,7 +49,12 @@ from drgn.helpers.linux.mm import (
 )
 from drgn.helpers.linux.mmzone import for_each_online_pgdat
 from drgn.helpers.linux.net import SOCKET_I, netdev_name, skb_shinfo
-from drgn.helpers.linux.pid import for_each_task_in_group
+from drgn.helpers.linux.ipc import (
+    for_each_sysv_msg_queue,
+    for_each_sysv_sem_array,
+    for_each_sysv_shm,
+)
+from drgn.helpers.linux.pid import for_each_task_in_group, pid_task
 from drgn.helpers.linux.rbtree import rbtree_inorder_for_each_entry
 from drgn.helpers.linux.sched import task_rq, task_state_to_char
 from drgn.helpers.linux.slab import (
@@ -52,6 +63,7 @@ from drgn.helpers.linux.slab import (
     slab_cache_objects_per_slab,
     slab_cache_order,
 )
+from drgn.helpers.linux.xarray import xa_for_each
 
 from ..core import ctypes as ct
 from .decoders import (
@@ -60,6 +72,7 @@ from .decoders import (
     DELAYED_WORK_TIMER,
     HRTIMER_WAKEUP,
     WQ_FLAG_NAMES,
+    request_op_name,
 )
 from .format import as_text, task_comm
 from .walk import files_of, path_of
@@ -823,6 +836,10 @@ def _leaf_cfs_rqs(rq: Object):
 
 def _namespaces(task: Object):
     nsproxy = task.nsproxy
+    # A zombie has already dropped its nsproxy in exit_task_namespaces();
+    # member_() only builds a reference, so the NULL would fault on read.
+    if not nsproxy.value_():
+        return
     for field in ("mnt_ns", "uts_ns", "ipc_ns", "net_ns", "pid_ns_for_children", "cgroup_ns"):
         value = ct.safe(lambda f=field: nsproxy.member_(f), None)
         if value is not None and value.value_():
@@ -893,6 +910,344 @@ def _fs_type_supers(fs_type: Object):
         if first is not None:
             where = ct.safe(lambda m=first[1]: as_text(mount_dst(m)), "?")
         yield f"{as_text(sb.s_id.string_())}  {where}", sb
+
+
+def _sock_prot(s: Object) -> Object:
+    """The struct proto behind a sock.
+
+    Newer kernels moved the pointer into the common part: read sk->sk_prot
+    where it still exists, sk->__sk_common.skc_prot where it does not.
+    """
+    if _has_member(s, "sk_prot"):
+        return s.sk_prot
+    return s.__sk_common.skc_prot
+
+
+# --------------------------------------------------------------------- block
+
+
+def _disk_partitions(disk: Object):
+    """The partitions of a disk, from the xarray it indexes them in.
+
+    Index 0 is the whole disk (``part0``), so a disk with no partition table
+    still yields one entry, and the numbering matches the name: index 2 is
+    vda2.
+    """
+    for index, entry in xa_for_each(disk.part_tbl):
+        bdev = Object(disk.prog_, "struct block_device *", entry)
+        yield f"{index}  {as_text(part_name(bdev))}", bdev
+
+
+def _queue_hw_queues(queue: Object):
+    """The hardware queues of a request_queue, in queue_num order."""
+    for index in range(int(queue.nr_hw_queues)):
+        hctx = queue.queue_hw_ctx[index]
+        yield f"hctx {index}  {int(hctx.nr_ctx)} cpu queue(s)", hctx
+
+
+def _hctx_sw_queues(hctx: Object):
+    """The per-CPU software queues mapped to this hardware queue.
+
+    ``hctx->ctxs`` is the array the mapping built; ``nr_ctx`` is how much of
+    it is used, and reading past that returns stale pointers.
+    """
+    for index in range(int(hctx.nr_ctx)):
+        ctx = hctx.ctxs[index]
+        yield f"cpu {int(ctx.cpu)}", ctx
+
+
+def _queue_in_flight(queue: Object):
+    """Requests this queue has dispatched and not yet completed.
+
+    The tag bitmap is the only registry of live requests, so this is a walk of
+    the bitmap rather than of a list.
+    """
+    for request in request_queue_busy_iter(queue):
+        tag = ct.safe(lambda: int(request.tag), -1)
+        yield f"tag {tag}  {request_op_name(request.cmd_flags)}", request
+
+
+def _request_bios(request: Object):
+    """The bios merged into this request, in submission order.
+
+    A request starts as one bio and grows by merging adjacent ones, which is
+    what an I/O scheduler is for. ``biotail`` is the last of the chain.
+    """
+    bio = request.bio
+    while bio:
+        sector = ct.safe(lambda: int(bio.bi_iter.bi_sector), 0)
+        yield f"sector {sector}", bio
+        bio = bio.bi_next
+
+
+def _bio_pages(bio: Object):
+    """The pages this bio transfers, from its bio_vec array.
+
+    ``bi_vcnt`` counts the vectors that were filled in; ``bi_max_vecs`` is the
+    allocation, and the entries between the two hold nothing. One vector can
+    cover more than a page: since multipage bvecs, ``bv_len`` runs over as many
+    physically contiguous pages as were available, and ``bv_page`` is the first
+    of them. So the count here is vectors, not pages transferred.
+    """
+    for index in range(int(bio.bi_vcnt)):
+        vec = bio.bi_io_vec[index]
+        length = ct.safe(lambda: int(vec.bv_len), 0)
+        yield f"bv_page[{index}]  first of {length} bytes", vec.bv_page
+
+
+def _disk_capacity(disk: Object) -> str:
+    """Size of the whole disk, from part0's sector count."""
+    sectors = ct.safe(lambda: int(disk.part0.bd_nr_sectors), 0)
+    return f"{sectors} sectors, {sectors * 512 / (1 << 30):.1f} GiB"
+
+
+def _queue_path(queue: Object) -> str:
+    """Whether this queue takes requests or bios.
+
+    ``mq_ops`` is the driver's blk-mq table. NULL means the driver registered
+    a ``submit_bio`` instead, and then no request is ever built.
+    """
+    if ct.safe(lambda: queue.mq_ops.value_(), 0):
+        return f"blk-mq, {int(queue.nr_hw_queues)} hardware queue(s)"
+    return "bio-based: the driver's submit_bio takes each bio directly"
+
+
+def _queue_elevator(queue: Object) -> str:
+    """The I/O scheduler sorting this queue, or none."""
+    if not ct.safe(lambda: queue.elevator.value_(), 0):
+        return "none (requests dispatch in the order they arrive)"
+    return ct.safe(
+        lambda: as_text(queue.elevator.type.elevator_name.string_()), "?"
+    )
+
+
+def _hctx_tags(hctx: Object) -> str:
+    """How much of this queue's depth is in use.
+
+    A request holds a tag from allocation to completion, so tags in use is the
+    count of requests the driver is working on.
+    """
+    depth = ct.safe(lambda: int(hctx.tags.nr_tags), 0)
+    active = ct.safe(lambda: int(hctx.nr_active), 0)
+    return f"{active} of {depth} tag(s) in use"
+
+
+def _request_target(request: Object) -> str:
+    """What this request asks the device for: where, how much, which way."""
+    op = request_op_name(request.cmd_flags)
+    sector = ct.safe(lambda: int(blk_rq_pos(request)), 0)
+    nbytes = ct.safe(lambda: int(blk_rq_bytes(request)), 0)
+    return f"{op} {nbytes} bytes at sector {sector}"
+
+
+def _bio_target(bio: Object) -> str:
+    """The device and sector this bio was submitted against."""
+    name = ct.safe(lambda: as_text(part_name(bio.bi_bdev)), "?")
+    sector = ct.safe(lambda: int(bio.bi_iter.bi_sector), 0)
+    size = ct.safe(lambda: int(bio.bi_iter.bi_size), 0)
+    return f"{request_op_name(bio.bi_opf)} {size} bytes on {name} at sector {sector}"
+
+
+def _bdev_devt(bdev: Object) -> str:
+    """The major:minor a /dev node names this device by."""
+    dev = ct.safe(lambda: int(bdev.bd_dev), 0)
+    return f"{dev >> 20}:{dev & 0xFFFFF}"
+
+
+# ----------------------------------------------------------------------- ipc
+
+
+def _ipc_task(pid: Object):
+    """The task a ``struct pid *`` on an IPC object still refers to.
+
+    These record who last acted on the object: the last sender, the creator,
+    the process that ran the last semop. The creating process has usually
+    exited, and the pid then holds no task. The IPC objects keep a struct pid
+    rather than a task_struct so that this case reads as NULL instead of as a
+    pointer to whatever now occupies that memory.
+    """
+    if not ct.safe(lambda: pid.value_(), 0):
+        return None
+    task = ct.safe(lambda: pid_task(pid, pid.prog_["PIDTYPE_PID"]), None)
+    # pid_task answers with a NULL object rather than nothing when the pid has
+    # no task left, and a link resolving to NULL is a row that goes nowhere.
+    if task is None or not ct.safe(lambda: task.value_(), 0):
+        return None
+    return task
+
+
+def _ipc_pid_label(pid: Object) -> str:
+    """"pid, and the program running under it, or what became of it."""
+    if not ct.safe(lambda: pid.value_(), 0):
+        return "none recorded"
+    task = _ipc_task(pid)
+    if task is None or not ct.safe(lambda: task.value_(), 0):
+        return "the process has exited"
+    return f"{ct.safe(lambda: int(task.pid), -1)}  {ct.safe(lambda: task_comm(task), '?')}"
+
+
+def _task_shm_segments(task: Object):
+    """The segments this task created, which it is still on the hook for.
+
+    ``shm_clist`` holds the segments this task created. The kernel keeps it so
+    that shm_rmid_forced can destroy them when the creator exits. Segments this
+    task has attached are found instead among its VMAs, as mappings of the
+    segment's file.
+    """
+    for segment in list_for_each_entry(
+        "struct shmid_kernel", task.sysvshm.shm_clist.address_of_(), "shm_clist"
+    ):
+        yield (
+            f"shmid {ct.safe(lambda: int(segment.shm_perm.id), -1)}  "
+            f"{ct.safe(lambda: int(segment.shm_segsz), 0)} bytes",
+            segment,
+        )
+
+
+def _list_nonempty(head: Object) -> bool:
+    """Whether a list_head has entries, and is safe to walk.
+
+    An empty list points at itself. A list that was never initialised has a
+    NULL next instead, which walking dereferences: the idle tasks reach the
+    crawl with sysvshm.shm_clist in that state, since INIT_TASK does not set
+    it up. Both cases have to be excluded before the walk.
+    """
+    following = ct.safe(lambda: head.next.value_(), 0)
+    return bool(following) and following != head.address_of_().value_()
+
+
+def _ipc_key(perm: Object) -> str:
+    """The key, as ipcs prints it, plus what IPC_PRIVATE means."""
+    raw = ct.safe(lambda: int(perm.key), 0) & 0xFFFFFFFF
+    if raw == 0:
+        return "0x00000000 (IPC_PRIVATE: no key, reachable only by id)"
+    return f"0x{raw:08x}"
+
+
+def _ipc_owner(perm: Object) -> str:
+    """Owner and creator ids, with names where this is the local machine."""
+    uid = ct.safe(lambda: int(perm.uid.val), -1)
+    gid = ct.safe(lambda: int(perm.gid.val), -1)
+    cuid = ct.safe(lambda: int(perm.cuid.val), -1)
+    owner = f"uid {_id_label(uid)}, gid {_id_label(gid)}"
+    if cuid != uid:
+        return f"{owner} (created by uid {_id_label(cuid)})"
+    return owner
+
+
+def _ipc_mode(perm: Object) -> str:
+    """The permission bits, and who they let in."""
+    mode = ct.safe(lambda: int(perm.mode), 0) & 0o7777
+    bits = "".join(
+        letter if mode & bit else "-"
+        for letter, bit in (
+            ("r", 0o400), ("w", 0o200), ("r", 0o040), ("w", 0o020),
+            ("r", 0o004), ("w", 0o002),
+        )
+    )
+    return f"{mode:04o}  {bits[:2]} owner, {bits[2:4]} group, {bits[4:]} other"
+
+
+def _ns_message_queues(ns: Object):
+    for queue in for_each_sysv_msg_queue(ns):
+        yield (
+            f"msqid {ct.safe(lambda: int(queue.q_perm.id), -1)}  "
+            f"{ct.safe(lambda: int(queue.q_qnum), 0)} message(s)",
+            queue,
+        )
+
+
+def _ns_semaphore_arrays(ns: Object):
+    for array in for_each_sysv_sem_array(ns):
+        yield (
+            f"semid {ct.safe(lambda: int(array.sem_perm.id), -1)}  "
+            f"{ct.safe(lambda: int(array.sem_nsems), 0)} semaphore(s)",
+            array,
+        )
+
+
+def _ns_shared_memory(ns: Object):
+    for segment in for_each_sysv_shm(ns):
+        yield (
+            f"shmid {ct.safe(lambda: int(segment.shm_perm.id), -1)}  "
+            f"{ct.safe(lambda: int(segment.shm_segsz), 0)} bytes",
+            segment,
+        )
+
+
+def _ipc_ns_counts(ns: Object) -> str:
+    """How many of each kind this namespace holds."""
+    names = ((0, "semaphore array"), (1, "message queue"), (2, "shared memory segment"))
+    parts = []
+    for index, name in names:
+        count = ct.safe(lambda: int(ns.ids[index].in_use), 0)
+        parts.append(f"{count} {name}" + ("s" if count != 1 else ""))
+    return ", ".join(parts)
+
+
+def _msg_messages(queue: Object):
+    for message in list_for_each_entry(
+        "struct msg_msg", queue.q_messages.address_of_(), "m_list"
+    ):
+        yield (
+            f"type {ct.safe(lambda: int(message.m_type), 0)}  "
+            f"{ct.safe(lambda: int(message.m_ts), 0)} bytes",
+            message,
+        )
+
+
+def _msg_receivers(queue: Object):
+    for receiver in list_for_each_entry(
+        "struct msg_receiver", queue.q_receivers.address_of_(), "r_list"
+    ):
+        task = ct.safe(lambda: receiver.r_tsk, None)
+        label = ct.safe(lambda: task_comm(task), "?") if task else "?"
+        yield f"waiting: {label}", receiver
+
+
+def _msg_usage(queue: Object) -> str:
+    """Why a sender would block here: the byte budget, not the count."""
+    used = ct.safe(lambda: int(queue.q_cbytes), 0)
+    limit = ct.safe(lambda: int(queue.q_qbytes), 0)
+    count = ct.safe(lambda: int(queue.q_qnum), 0)
+    return f"{count} message(s), {used} of {limit} bytes used"
+
+
+def _sem_members(array: Object):
+    """The individual semaphores, which is what an operation names by index."""
+    for index in range(ct.safe(lambda: int(array.sem_nsems), 0)):
+        member = array.sems[index]
+        yield f"sems[{index}] = {ct.safe(lambda: int(member.semval), -1)}", member.address_of_()
+
+
+def _sem_pending(head: Object):
+    for queue in list_for_each_entry("struct sem_queue", head.address_of_(), "list"):
+        task = ct.safe(lambda: queue.sleeper, None)
+        who = ct.safe(lambda: task_comm(task), "?") if task else "(gone)"
+        yield f"{ct.safe(lambda: int(queue.nsops), 0)} operation(s), {who}", queue
+
+
+def _sem_values(array: Object) -> str:
+    count = ct.safe(lambda: int(array.sem_nsems), 0)
+    values = ",".join(
+        str(ct.safe(lambda: int(array.sems[index].semval), -1))
+        for index in range(min(count, 12))
+    )
+    return f"[{values}{',…' if count > 12 else ''}]"
+
+
+def _sem_queue_operations(queue: Object) -> str:
+    """What the blocked task asked for, and whether it changes a value."""
+    count = ct.safe(lambda: int(queue.nsops), 0)
+    alter = ct.safe(lambda: int(queue.alter), 0)
+    kind = "would change a value" if alter else "waiting for zero"
+    return f"{count} operation(s), {kind}"
+
+
+def _shm_pages(segment: Object) -> str:
+    """The segment's size, in bytes and in pages."""
+    size = ct.safe(lambda: int(segment.shm_segsz), 0)
+    return f"{size} bytes, {(size + 4095) // 4096} page(s) at 4K"
 
 
 LINKS: dict[str, list[Link]] = {
@@ -971,6 +1326,13 @@ LINKS: dict[str, list[Link]] = {
         Link("namespaces", "The nsproxy's namespaces.", _namespaces,
              origin="task->nsproxy members",
              userspace="ls -l /proc/<pid>/ns"),
+        Link("shared memory created",
+             "System V segments this task created and still owns.",
+             _task_shm_segments,
+             applies=lambda t: (_has_member(t, "sysvshm")
+                               and _list_nonempty(t.sysvshm.shm_clist)),
+             origin="walks task->sysvshm.shm_clist (shmid_kernel->shm_clist)",
+             userspace="ipcs -m  # match the cpid column"),
         Link("signal", "signal_struct: shared signal state for the group.",
              lambda t: t.signal,
              origin="task->signal",
@@ -1184,8 +1546,8 @@ LINKS: dict[str, list[Link]] = {
              lambda s: s.sk_socket,
              origin="sk->sk_socket"),
         Link("proto", "struct proto: tcp_prot, udp_prot, unix_stream_proto…",
-             lambda s: s.sk_prot,
-             origin="sk->sk_prot",
+             _sock_prot,
+             origin="sk->sk_prot, or sk->__sk_common.skc_prot on kernels that moved it",
              userspace="ss -tani"),
         Link(
             "as tcp_sock",
@@ -1228,10 +1590,278 @@ LINKS: dict[str, list[Link]] = {
         Link("fs type", "file_system_type describing it.", lambda s: s.s_type,
              origin="sb->s_type",
              userspace="findmnt -o FSTYPE"),
+        Link("block device", "The block_device this filesystem was mounted from.",
+             lambda s: s.s_bdev,
+             applies=lambda s: _has_member(s, "s_bdev") and s.s_bdev.value_() != 0,
+             origin="sb->s_bdev",
+             userspace="findmnt -o SOURCE"),
         Link("mounts", "struct mount instances referencing this super_block.", _sb_mounts,
              applies=lambda s: _has_member(s, "s_mounts"),
              origin="sb->s_mounts",
              userspace="findmnt -o TARGET --source <device>"),
+    ],
+    "gendisk": [
+        Link("request queue", "The queue every I/O to this disk goes through.",
+             lambda d: d.queue,
+             origin="disk->queue",
+             userspace="ls /sys/block/<disk>/queue/"),
+        Link("whole disk (part0)", "The block_device covering the whole disk.",
+             lambda d: d.part0,
+             origin="disk->part0",
+             userspace="ls -l /dev/<disk>"),
+        Link("partitions", "Every block_device carved out of this disk.",
+             _disk_partitions,
+             origin="walks the disk->part_tbl xarray",
+             userspace="cat /proc/partitions"),
+        Link("block_device_operations", "The driver's entry points for this disk.",
+             lambda d: d.fops,
+             origin="disk->fops"),
+    ],
+    "block_device": [
+        Link("disk", "The gendisk this device or partition belongs to.",
+             lambda b: b.bd_disk,
+             origin="bdev->bd_disk",
+             userspace="lsblk"),
+        Link("request queue", "The queue this device's I/O goes through.",
+             lambda b: b.bd_queue,
+             origin="bdev->bd_queue",
+             userspace="ls /sys/block/<disk>/queue/"),
+        Link("page cache", "The address_space caching this device's blocks.",
+             lambda b: b.bd_mapping,
+             applies=lambda b: _has_member(b, "bd_mapping"),
+             origin="bdev->bd_mapping",
+             userspace="grep ^Buffers /proc/meminfo"),
+        Link("device", "The driver-model device, as sysfs sees it.",
+             lambda b: b.bd_device.address_of_(),
+             origin="&bdev->bd_device",
+             userspace="ls -l /sys/class/block/<name>"),
+    ],
+    "request_queue": [
+        Link("disk", "The gendisk this queue serves.", lambda q: q.disk,
+             applies=lambda q: q.disk.value_() != 0,
+             origin="q->disk",
+             userspace="lsblk"),
+        Link("hardware queues", "The blk_mq_hw_ctx a driver dispatches from.",
+             _queue_hw_queues,
+             applies=lambda q: int(q.nr_hw_queues) > 0,
+             origin="q->queue_hw_ctx[0 .. nr_hw_queues)",
+             userspace="ls /sys/kernel/debug/block/<disk>/hctx*"),
+        Link("in flight", "Requests dispatched and not yet completed.",
+             _queue_in_flight,
+             applies=lambda q: q.mq_ops.value_() != 0,
+             origin="walks the tag bitmap (blk_mq_queue_tag_busy_iter)",
+             userspace="cat /sys/block/<disk>/inflight"),
+        Link("elevator", "The I/O scheduler instance sorting this queue.",
+             lambda q: q.elevator,
+             applies=lambda q: q.elevator.value_() != 0,
+             origin="q->elevator",
+             userspace="cat /sys/block/<disk>/queue/scheduler"),
+        Link("tag set", "The tag set shared by this device's queues.",
+             lambda q: q.tag_set,
+             applies=lambda q: q.tag_set.value_() != 0,
+             origin="q->tag_set",
+             userspace="cat /sys/block/<disk>/queue/nr_requests"),
+        Link("limits", "What this device accepts: block size, segments, sizes.",
+             lambda q: q.limits.address_of_(),
+             origin="&q->limits",
+             userspace="ls /sys/block/<disk>/queue/"),
+    ],
+    "blk_mq_hw_ctx": [
+        Link("request queue", "The queue this hardware queue belongs to.",
+             lambda h: h.queue,
+             origin="hctx->queue"),
+        Link("software queues", "The per-CPU queues feeding this one.",
+             _hctx_sw_queues,
+             applies=lambda h: int(h.nr_ctx) > 0,
+             origin="hctx->ctxs[0 .. nr_ctx)"),
+        Link("tags", "The request pool and its bitmap: one tag per request.",
+             lambda h: h.tags,
+             applies=lambda h: h.tags.value_() != 0,
+             origin="hctx->tags",
+             userspace="cat /sys/kernel/debug/block/<disk>/hctx0/tags"),
+        Link("scheduler tags", "The extra tags the I/O scheduler queues against.",
+             lambda h: h.sched_tags,
+             applies=lambda h: h.sched_tags.value_() != 0,
+             origin="hctx->sched_tags"),
+    ],
+    "blk_mq_ctx": [
+        Link("request queue", "The queue this per-CPU queue stages for.",
+             lambda c: c.queue,
+             origin="ctx->queue"),
+    ],
+    "blk_mq_tag_set": [
+        Link("queues", "Every request_queue sharing this tag set.",
+             lambda t: (
+                 (as_text(q.disk.disk_name.string_()) if q.disk else "?", q)
+                 for q in list_for_each_entry(
+                     "struct request_queue", t.tag_list.address_of_(), "tag_set_list"
+                 )
+             ),
+             applies=lambda t: _has_member(t, "tag_list"),
+             origin="walks tag_set->tag_list (q->tag_set_list)"),
+    ],
+    "request": [
+        Link("request queue", "The queue this request was allocated on.",
+             lambda r: r.q,
+             applies=lambda r: r.q.value_() != 0,
+             origin="rq->q"),
+        Link("hardware queue", "The hardware queue it dispatches from.",
+             lambda r: r.mq_hctx,
+             applies=lambda r: r.mq_hctx.value_() != 0,
+             origin="rq->mq_hctx"),
+        Link("software queue", "The per-CPU queue it was submitted on.",
+             lambda r: r.mq_ctx,
+             applies=lambda r: r.mq_ctx.value_() != 0,
+             origin="rq->mq_ctx"),
+        Link("bios", "The bios merged into this request.", _request_bios,
+             applies=lambda r: r.bio.value_() != 0,
+             origin="walks rq->bio, chained by bio->bi_next"),
+        Link("partition", "The block_device the I/O is accounted to.",
+             lambda r: r.part,
+             applies=lambda r: _has_member(r, "part") and r.part.value_() != 0,
+             origin="rq->part",
+             userspace="cat /proc/diskstats"),
+    ],
+    "bio": [
+        Link("block device", "The device or partition this bio targets.",
+             lambda b: b.bi_bdev,
+             applies=lambda b: b.bi_bdev.value_() != 0,
+             origin="bio->bi_bdev",
+             userspace="lsblk"),
+        Link("pages", "The pages this bio transfers.", _bio_pages,
+             applies=lambda b: int(b.bi_vcnt) > 0,
+             origin="bio->bi_io_vec[0 .. bi_vcnt), each bv_page"),
+        Link("next bio", "The next bio in a merged chain.", lambda b: b.bi_next,
+             applies=lambda b: b.bi_next.value_() != 0,
+             origin="bio->bi_next"),
+    ],
+    "elevator_queue": [
+        Link("scheduler", "The elevator_type this instance runs.", lambda e: e.type,
+             origin="elevator->type",
+             userspace="cat /sys/block/<disk>/queue/scheduler"),
+    ],
+    "ipc_namespace": [
+        Link("message queues", "System V message queues created in this namespace.",
+             _ns_message_queues,
+             applies=lambda n: int(n.ids[1].in_use) > 0,
+             origin="walks ns->ids[IPC_MSG_IDS].ipcs_idr",
+             userspace="ipcs -q"),
+        Link("semaphore arrays", "System V semaphore arrays in this namespace.",
+             _ns_semaphore_arrays,
+             applies=lambda n: int(n.ids[0].in_use) > 0,
+             origin="walks ns->ids[IPC_SEM_IDS].ipcs_idr",
+             userspace="ipcs -s"),
+        Link("shared memory", "System V shared memory segments in this namespace.",
+             _ns_shared_memory,
+             applies=lambda n: int(n.ids[2].in_use) > 0,
+             origin="walks ns->ids[IPC_SHM_IDS].ipcs_idr",
+             userspace="ipcs -m"),
+    ],
+    "msg_queue": [
+        Link("permissions", "kern_ipc_perm: the key, owner and mode.",
+             lambda q: q.q_perm.address_of_(),
+             origin="&queue->q_perm",
+             userspace="ipcs -q"),
+        Link("messages", "Messages sent and not yet received.", _msg_messages,
+             applies=lambda q: int(q.q_qnum) > 0,
+             origin="walks queue->q_messages (msg_msg->m_list)",
+             userspace="ipcs -q  # the messages column"),
+        Link("receivers", "Tasks blocked in msgrcv(2) on this queue.", _msg_receivers,
+             applies=lambda q: _list_nonempty(q.q_receivers),
+             origin="walks queue->q_receivers (msg_receiver->r_list)"),
+        Link("last sender", "The process that last put a message on this queue.",
+             lambda q: _ipc_task(q.q_lspid),
+             applies=lambda q: _ipc_task(q.q_lspid) is not None,
+             origin="pid_task(queue->q_lspid)",
+             userspace="ipcs -q -i <msqid>  # lspid"),
+        Link("last receiver", "The process that last took a message off it.",
+             lambda q: _ipc_task(q.q_lrpid),
+             applies=lambda q: _ipc_task(q.q_lrpid) is not None,
+             origin="pid_task(queue->q_lrpid)",
+             userspace="ipcs -q -i <msqid>  # lrpid"),
+    ],
+    "sem_array": [
+        Link("permissions", "kern_ipc_perm: the key, owner and mode.",
+             lambda a: a.sem_perm.address_of_(),
+             origin="&array->sem_perm",
+             userspace="ipcs -s"),
+        Link("semaphores", "The individual semaphores an operation indexes into.",
+             _sem_members,
+             applies=lambda a: int(a.sem_nsems) > 0,
+             origin="array->sems[0 .. sem_nsems)",
+             userspace="ipcs -s -i <semid>"),
+        Link("pending (alter)",
+             "Operations spanning several semaphores that would change a value.",
+             lambda a: _sem_pending(a.pending_alter),
+             applies=lambda a: _list_nonempty(a.pending_alter),
+             origin="walks array->pending_alter (sem_queue->list)"),
+        Link("pending (const)",
+             "Operations spanning several semaphores waiting for a zero.",
+             lambda a: _sem_pending(a.pending_const),
+             applies=lambda a: _list_nonempty(a.pending_const),
+             origin="walks array->pending_const (sem_queue->list)"),
+    ],
+    "sem": [
+        Link("pending (alter)",
+             "Operations on this one semaphore that would change its value.",
+             lambda s: _sem_pending(s.pending_alter),
+             applies=lambda s: _list_nonempty(s.pending_alter),
+             origin="walks sem->pending_alter (sem_queue->list)"),
+        Link("pending (const)",
+             "Operations on this one semaphore waiting for it to reach zero.",
+             lambda s: _sem_pending(s.pending_const),
+             applies=lambda s: _list_nonempty(s.pending_const),
+             origin="walks sem->pending_const (sem_queue->list)"),
+        Link("last operation by", "The process whose semop(2) last changed this value.",
+             lambda s: _ipc_task(s.sempid),
+             applies=lambda s: _ipc_task(s.sempid) is not None,
+             origin="pid_task(sem->sempid)",
+             userspace="ipcs -s -i <semid>  # the pid column"),
+    ],
+    "sem_queue": [
+        Link("blocked task", "The task waiting inside semop(2) for this operation.",
+             lambda q: q.sleeper,
+             applies=lambda q: q.sleeper.value_() != 0,
+             origin="sem_queue->sleeper",
+             userspace="cat /proc/<pid>/stack"),
+    ],
+    "msg_receiver": [
+        Link("blocked task", "The task waiting inside msgrcv(2).", lambda r: r.r_tsk,
+             applies=lambda r: r.r_tsk.value_() != 0,
+             origin="msg_receiver->r_tsk"),
+    ],
+    "msg_msg": [
+        Link("next segment", "The rest of a message too long for one page.",
+             lambda m: m.next,
+             applies=lambda m: m.next.value_() != 0,
+             origin="msg_msg->next (struct msg_msgseg)"),
+    ],
+    "shmid_kernel": [
+        Link("permissions", "kern_ipc_perm: the key, owner and mode.",
+             lambda s: s.shm_perm.address_of_(),
+             origin="&segment->shm_perm",
+             userspace="ipcs -m"),
+        Link("file", "The tmpfs file holding the segment's pages.",
+             lambda s: s.shm_file,
+             applies=lambda s: s.shm_file.value_() != 0,
+             origin="segment->shm_file",
+             userspace="none: the file has no path, it lives in an internal mount"),
+        Link("namespace", "The IPC namespace this segment belongs to.",
+             lambda s: s.ns,
+             applies=lambda s: s.ns.value_() != 0,
+             origin="segment->ns",
+             userspace="readlink /proc/<pid>/ns/ipc"),
+        Link("creator", "The process that called shmget(2), if it is still running.",
+             lambda s: _ipc_task(s.shm_cprid),
+             applies=lambda s: _ipc_task(s.shm_cprid) is not None,
+             origin="pid_task(segment->shm_cprid)",
+             userspace="ipcs -m -i <shmid>  # cpid"),
+        Link("last attached or detached by",
+             "The process that last called shmat(2) or shmdt(2).",
+             lambda s: _ipc_task(s.shm_lprid),
+             applies=lambda s: _ipc_task(s.shm_lprid) is not None,
+             origin="pid_task(segment->shm_lprid)",
+             userspace="ipcs -m -i <shmid>  # lpid"),
     ],
     "file_system_type": [
         Link("superblocks", "Live filesystems of this type.", _fs_type_supers,
@@ -1441,6 +2071,67 @@ LINKS: dict[str, list[Link]] = {
 
 
 DERIVED: dict[str, list[Derived]] = {
+    "kern_ipc_perm": [
+        Derived("= key", "What a process passes to msgget/semget/shmget.", _ipc_key),
+        Derived("= owner", "Who owns this object, and who created it.", _ipc_owner),
+        Derived("= mode", "The permission bits, and who they let in.", _ipc_mode),
+    ],
+    "ipc_namespace": [
+        Derived("= holds", "What exists in this namespace.", _ipc_ns_counts),
+    ],
+    "msg_queue": [
+        Derived("= usage", "Messages queued, and the byte budget a sender waits on.",
+                _msg_usage),
+        Derived("= last sender", "The process that last sent to this queue.",
+                lambda q: _ipc_pid_label(q.q_lspid)),
+    ],
+    "sem_array": [
+        Derived("= values", "The current value of each semaphore.", _sem_values),
+    ],
+    "sem": [
+        Derived("= last operation by", "The process whose semop(2) last changed it.",
+                lambda s: _ipc_pid_label(s.sempid)),
+    ],
+    "sem_queue": [
+        Derived("= waiting for", "What this blocked task asked semop(2) to do.",
+                _sem_queue_operations),
+    ],
+    "shmid_kernel": [
+        Derived("= size", "How much memory this segment covers.", _shm_pages),
+        Derived("= creator", "The process that called shmget(2).",
+                lambda s: _ipc_pid_label(s.shm_cprid)),
+    ],
+    "msg_msg": [
+        Derived("= message", "The type a receiver selects on, and the size.",
+                lambda m: f"type {ct.safe(lambda: int(m.m_type), 0)}, "
+                          f"{ct.safe(lambda: int(m.m_ts), 0)} bytes"),
+    ],
+
+    "gendisk": [
+        Derived("= capacity", "How much the whole disk holds.", _disk_capacity),
+    ],
+    "request_queue": [
+        Derived("= path", "Whether I/O here becomes requests or stays bios.",
+                _queue_path),
+        Derived("= elevator", "The I/O scheduler sorting this queue.",
+                _queue_elevator),
+    ],
+    "blk_mq_hw_ctx": [
+        Derived("= tags in use", "Requests this hardware queue is working on.",
+                _hctx_tags),
+    ],
+    "request": [
+        Derived("= transfer", "The operation, its size, and where on the device.",
+                _request_target),
+    ],
+    "bio": [
+        Derived("= transfer", "The operation, its size, and where it is going.",
+                _bio_target),
+    ],
+    "block_device": [
+        Derived("= dev_t", "The major:minor a /dev node names this by.",
+                _bdev_devt),
+    ],
     "mutex": [
         Derived("= state", "Whether this mutex is held, and by whom.", _mutex_state),
     ],

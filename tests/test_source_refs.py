@@ -3,15 +3,77 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from kexplore.core import debuginfod
 from kexplore.core.probe import parse_keyed_stacks, parse_stacks
 from kexplore.core.source import KernelSource
 from kexplore.core.source_refs import field_references, function_body, parameter_calls
 
 
 class SourceTests(unittest.TestCase):
+    def test_debug_cache_rejects_malformed_and_mismatched_files(self):
+        for notes in ("", "Build ID: deadbeef"):
+            with self.subTest(notes=notes), tempfile.TemporaryDirectory() as directory:
+                entry = Path(directory) / "abcd"
+                entry.mkdir()
+                (entry / "debuginfo").write_bytes(b"nonempty but invalid")
+                with patch.object(debuginfod, "cache_path", return_value=Path(directory)), \
+                     patch.object(debuginfod.subprocess, "run", return_value=
+                                  subprocess.CompletedProcess([], 0, notes, "")):
+                    self.assertFalse(debuginfod.is_cached("abcd"))
+                self.assertFalse((entry / "debuginfo").exists())
+                self.assertTrue((entry / "debuginfo.invalid").exists())
+
+    def test_debug_cache_accepts_matching_build_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entry = Path(directory) / "abcd"
+            entry.mkdir()
+            (entry / "debuginfo").write_bytes(b"debug image")
+            with patch.object(debuginfod, "cache_path", return_value=Path(directory)), \
+                 patch.object(debuginfod.subprocess, "run", return_value=
+                              subprocess.CompletedProcess([], 0, "Build ID: abcd", "")):
+                self.assertTrue(debuginfod.is_cached("abcd"))
+            self.assertTrue((entry / "debuginfo").exists())
+
+    def test_local_source_uses_installed_dwarf_without_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            header = root / "kernel/sched/sched.h"
+            header.parent.mkdir(parents=True)
+            header.write_text("/* Scheduling state. */\nstruct rq {\n int count; /* runnable */\n};\n")
+            source = KernelSource(
+                build_id="test", source_root=directory, source_prefix="/build/linux"
+            )
+            with (
+                patch("kexplore.core.debuginfod.local_vmlinux", return_value=root / "vmlinux"),
+                patch.object(source, "_find") as fetch,
+                patch.object(source, "declaration", return_value=("/build/linux/kernel/sched/sched.h", 2)),
+            ):
+                self.assertTrue(source.available)
+                self.assertEqual(source.debuginfo, str(root / "vmlinux"))
+                doc = source.document("rq", frozenset({"count"}))
+                self.assertEqual(doc.summary, "Scheduling state.")
+                self.assertEqual(doc.members, {"count": "runnable"})
+                self.assertEqual(doc.local_path, str(header.resolve()))
+                fetch.assert_not_called()
+
+    def test_local_source_rejects_escape_and_does_not_fetch_missing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            outside = Path(directory) / "outside.c"
+            outside.write_text("outside")
+            (root / "escape.c").symlink_to(outside)
+            source = KernelSource(build_id="test", source_root=str(root))
+            with patch.object(source, "_find") as fetch:
+                for path in ("../outside.c", str(outside), "escape.c", "missing.c"):
+                    self.assertIsNone(source.local_file(path))
+                fetch.assert_not_called()
+
     def test_trace_source_timeout_reports_unavailable(self):
         source = KernelSource(build_id="test", source_timeout=5)
         with patch(

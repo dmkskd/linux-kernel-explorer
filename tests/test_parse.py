@@ -133,7 +133,7 @@ def test_runnable() -> None:
 
 def test_proc_fields() -> None:
     stat = [name for name, _command in fields_from("/proc/<pid>/stat")]
-    check(len(stat) == 7, f"{len(stat)} fields come out of /proc/<pid>/stat")
+    check(len(stat) == 8, f"{len(stat)} fields come out of /proc/<pid>/stat")
     check(
         all("status" not in command for _n, command in fields_from("/proc/<pid>/stat")),
         "stat does not claim the fields that status publishes",

@@ -64,6 +64,24 @@ async def main() -> int:
         sock_names = [r.name for r in app.stack[-1].rows]
         check("sk_prot" in sock_names or "proto" in sock_names, "landed on struct sock")
 
+        # The proto link must resolve, not just be listed: sk->sk_prot moved
+        # to sk->__sk_common.skc_prot on newer kernels, and a hardcoded member
+        # read only fails when the edge is actually followed.
+        follow_named(app, table, "proto")
+        await pilot.pause()
+        proto_rows = app.stack[-1].rows
+        check(proto_rows and all(r.kind != "error" for r in proto_rows),
+              "following proto resolves instead of raising")
+        app.action_follow()
+        await pilot.pause()
+        check("obj_size" in [r.name for r in app.stack[-1].rows],
+              "landed on struct proto (has obj_size)")
+
+        # Back to the sock frame for the conditional-cast checks below.
+        app.stack.pop()  # struct proto
+        app.stack.pop()  # the link's collection
+        sock_names = [r.name for r in app.stack[-1].rows]
+
         # Conditional links: exactly one protocol cast should be offered.
         casts = [n for n in sock_names if n.startswith("as ")]
         check(len(casts) <= 1, f"at most one protocol cast offered: {casts}")

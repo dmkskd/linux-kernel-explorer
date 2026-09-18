@@ -2,7 +2,7 @@
 # Prepare the machine kexplore runs on: the VM or container, the packages,
 # and the sysctl. Then list what is installed.
 #
-# What this script never does is touch the kernel's debug info. That is a
+# On Fedora, run.sh manages the kernel debug info. That is a
 # few hundred MB keyed to the running kernel's build-id, and run.sh owns it
 # end to end (download, cache repair, --prefetch, --offline). Splitting it
 # across both scripts is what let setup.sh fail on a cache entry that
@@ -24,14 +24,15 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # backend.
 . "$REPO/detect.sh"
 
-VM="${KEXPLORE_VM:-kernel-lab}"
+VM="$(kexplore_lima_vm)" || exit 1
 IMAGE=kexplore
 
 usage() {
   cat <<USAGE
 usage: ./setup.sh [-h|--help]
 
-Set up the machine kexplore runs on (lima, native or docker). Safe to run
+Set up a kernel learning lab (lima, native or docker). Not intended for
+production servers. Safe to run
 again: an existing setup is re-checked rather than recreated.
 
 What this installs:
@@ -39,7 +40,7 @@ What this installs:
   the VM or container image, kexplore's packages (drgn, elfutils, pahole,
   binutils, python3-textual), and kernel.sched_schedstats=1
 
-What it leaves to run.sh:
+Fedora debug information, managed by run.sh:
 
   the running kernel's debug info, a few hundred MB fetched from a
   debuginfod server. ./run.sh downloads it on the first attach, or
@@ -49,7 +50,10 @@ The backend is detected (lima on macOS; native on Linux when kexplore's
 packages are installed, docker when docker or podman is), or pinned:
 
   KEXPLORE_BACKEND   lima, native or docker
+  KEXPLORE_DISTRO    lima distro: fedora (default), ubuntu (26.04), debian (13)
   KEXPLORE_VM        lima backend: name of the VM (currently: $VM)
+  KEXPLORE_DOWNLOAD_SOURCE  0 skips optional Ubuntu/Debian kernel sources
+                           (default: 1; required debug symbols still installed)
 
 run.sh reads the same variables, so set them for both or neither.
 USAGE
@@ -78,11 +82,11 @@ step() {
 # libdebuginfod writes for a 404, discarding partial transfers, pinning the
 # retention, --prefetch and --offline. Resolving types here would run that
 # fetch with none of it, and failed on exactly those poisoned entries. The
-# DWARF belongs to run.sh; this script never touches it.
+# Fedora downloads belong to run.sh; the Debian/Ubuntu recipe installs DWARF.
 read -r -d '' VERIFY <<'EOF' || true
 set -u
 fail=0
-for tool in drgn debuginfod-find pahole addr2line nm; do
+for tool in drgn debuginfod-find pahole addr2line nm readelf; do
   if command -v "$tool" >/dev/null; then
     printf "  ok       %s\n" "$tool"
   else
@@ -117,7 +121,37 @@ PYCHECK
 exit $(( fail + $? ))
 EOF
 
+# Run the command in the foreground so Lima can still use the terminal.
+# The heartbeat reports elapsed time, not a guessed completion percentage.
+lima_wait() (
+  local activity="$1"
+  shift
+  local started=$SECONDS heartbeat
+  (
+    while sleep 15; do
+      printf '\n  Still waiting: %s (%ss elapsed).\n' "$activity" "$((SECONDS - started))"
+    done
+  ) &
+  heartbeat=$!
+  trap 'kill "$heartbeat" 2>/dev/null || true; wait "$heartbeat" 2>/dev/null || true' EXIT
+  "$@"
+)
+
 setup_lima() {
+  case "${KEXPLORE_DOWNLOAD_SOURCE:-1}" in
+    0|1) ;;
+    *) echo "KEXPLORE_DOWNLOAD_SOURCE must be 0 or 1." >&2; return 2 ;;
+  esac
+  if [ "$(kexplore_lima_distro)" = fedora ]; then
+    echo "Kernel sources: fetched on demand through Fedora debuginfod."
+  elif [ "${KEXPLORE_DOWNLOAD_SOURCE:-1}" = 1 ]; then
+    echo "Kernel source downloads: ENABLED (KEXPLORE_DOWNLOAD_SOURCE=1, default)."
+    echo "Matching sources will be installed or reused; allow several minutes and several GB of disk space."
+    echo "To skip optional source downloads: KEXPLORE_DOWNLOAD_SOURCE=0 ./setup.sh"
+  else
+    echo "Kernel source downloads: DISABLED (KEXPLORE_DOWNLOAD_SOURCE=0)."
+    echo "Existing sources remain usable. Required debug symbols are still installed."
+  fi
   if ! command -v limactl >/dev/null; then
     if [ "$(uname -s)" = Darwin ]; then
       echo "limactl not found. Install it with: brew install lima" >&2
@@ -128,16 +162,55 @@ setup_lima() {
     exit 1
   fi
 
+  echo "First setup can take several minutes to download and install packages."
+  echo "Lima may pause at 'boot scripts must have finished' while installation continues."
+  echo "Elapsed-time updates below confirm setup is still waiting, not installation progress."
+  echo "To inspect installation in another terminal:"
+  printf '  limactl shell %q sudo tail -f /var/log/cloud-init-output.log\n' "$VM"
+
   if limactl list --quiet 2>/dev/null | grep -qx "$VM"; then
     step "VM '$VM' exists; starting it if it is not running"
-    limactl start "$VM" >/dev/null
+    lima_wait "VM startup and boot scripts" limactl start "$VM"
   else
-    step "Creating VM '$VM' (downloads a Fedora cloud image, about 1 GB)"
-    limactl start --name="$VM" "$REPO/lima/kexplore.yaml"
+    step "Creating $(kexplore_lima_distro) lab VM '$VM'"
+    lima_wait "VM startup and boot scripts" limactl start --name="$VM" "$REPO/lima/$(kexplore_lima_template)"
   fi
 
+  kexplore_check_lima_distro "$VM" || exit 1
+  if [ "$(kexplore_lima_distro)" != fedora ]; then
+    step "Installing experimental lab dependencies and matching kernel DWARF"
+    local provision_status=0 expected_release actual_release
+    lima_wait "lab packages and matching kernel DWARF installation" \
+      limactl shell "$VM" sudo env KEXPLORE_LAB_PROVISION=1 \
+        KEXPLORE_DOWNLOAD_SOURCE="${KEXPLORE_DOWNLOAD_SOURCE:-1}" \
+        bash "$REPO/scripts/provision-deb-lab.sh" || provision_status=$?
+    case "$provision_status" in
+      0) ;;
+      20)
+        step "Restarting lab VM '$VM' into the installed kernel"
+        limactl stop "$VM"
+        lima_wait "booting the installed lab kernel" limactl start "$VM"
+        ;;
+      *) return "$provision_status" ;;
+    esac
+    expected_release="$(limactl shell "$VM" cat /var/lib/kexplore/kernel-release)"
+    actual_release="$(limactl shell "$VM" uname -r)"
+    if [ "$actual_release" != "$expected_release" ]; then
+      echo "Lab booted $actual_release, expected $expected_release. Setup cannot report Ready." >&2
+      return 1
+    fi
+    step "Verifying kernel '$actual_release' with its installed debug symbols"
+    limactl shell "$VM" sudo /opt/kexplore/bin/python3 -c \
+      'import drgn; p = drgn.program_from_kernel(); p.type("struct task_struct"); print("  ok       live kernel types resolved")'
+    if [ "${KEXPLORE_DOWNLOAD_SOURCE:-1}" = 1 ]; then
+      step "Verifying installed kernel sources"
+      limactl shell "$VM" sudo env PYTHONPATH="$REPO" \
+        bash "$REPO/scripts/launch-deb-lab.sh" /opt/kexplore/bin/python3 -c \
+        'from kexplore.core.source import KernelSource; s = KernelSource(); assert s.available, "Installed kernel source is unavailable"; print("  ok       kernel sources: " + str(s.local_root))'
+    fi
+  fi
   step "Checking the tools inside '$VM'"
-  limactl shell "$VM" sudo bash -s <<<"$VERIFY"
+  limactl shell "$VM" sudo env PATH=/opt/kexplore/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -s <<<"$VERIFY"
 }
 
 confirm_install() {
@@ -157,11 +230,9 @@ set_schedstats() {
   sudo sysctl -w kernel.sched_schedstats=1 >/dev/null
 }
 
-# Debian/Ubuntu, automated but unsupported: apt for the C tools, PyPI for
-# drgn (apt's is older than kexplore's 0.1.0 floor), and the distro's debug
-# symbol package for the kernel DWARF (their debuginfod serves none,
-# LP#2106030). Struct documentation is disabled: neither distro serves
-# kernel source.
+# Debian/Ubuntu, experimental: apt for C tools, PyPI for drgn, and a local
+# kernel debug package for DWARF. Optional source features use a matching
+# local source tree; this recipe does not download that tree.
 repair_ubuntu_ddebs() {
   local codename="$1" source
   # Only accept a plain Ubuntu codename before using it in a regex.
@@ -201,7 +272,7 @@ install_native_deb() {
   echo
   echo "  # runtime tools and dependencies for building drgn from source"
   echo "  sudo apt-get install -y ${packages[*]}"
-  echo "  sudo pip3 install --break-system-packages --upgrade drgn   (apt's drgn is older than 0.1.0)"
+  echo "  sudo pip3 install --break-system-packages 'drgn>=0.1.0,<0.3' 'textual>=1,<9'"
   if [ "$id" = ubuntu ]; then
     echo "  # new apt repo ddebs.ubuntu.com, for the kernel debug symbols"
   else
@@ -237,7 +308,7 @@ deb http://deb.debian.org/debian-debug $codename-debug main
 deb http://deb.debian.org/debian-debug $codename-proposed-updates-debug main
 EOF
   fi
-  sudo pip3 install --break-system-packages --upgrade drgn
+  sudo pip3 install --break-system-packages 'drgn>=0.1.0,<0.3' 'textual>=1,<9'
   sudo apt-get update
   sudo apt-get install -y "$dbgsym"
   sudo apt-get install -y bpftrace || true
@@ -318,6 +389,8 @@ setup_docker() {
   $RUNTIME run --rm -i "$IMAGE" bash -s <<<"$VERIFY"
 }
 
+echo "Kernel learning lab: disposable VMs or dedicated lab machines only."
+echo "Not intended for production servers."
 echo "Detected: $(kexplore_os_name)"
 
 if [ -n "${KEXPLORE_BACKEND:-}" ]; then
@@ -338,12 +411,12 @@ elif ! BACKEND="$(kexplore_backend 2>/dev/null)"; then
     MENU=native
   elif kexplore_deb_installable; then
     # Debian/Ubuntu: automatable, but second-class (see install_native_deb).
-    echo "kexplore runs best in a Fedora VM on $(kexplore_os_name): the distro"
-    echo "serves no kernel debug info and its drgn is older than 0.1.0."
+    echo "For a learning lab on $(kexplore_os_name), a Fedora VM is recommended:"
+    echo "it supplies automatic kernel DWARF and matching source."
     echo
     echo "  1) create a Fedora VM with lima and run kexplore in it (recommended)"
     echo "  2) install on this machine anyway (kernel dbgsym, several GB, drgn"
-    echo "     from PyPI; struct documentation disabled)"
+    echo "     from PyPI; source features need an optional local source tree)"
     MENU=deb
   else
     # Anything else: no native route, automated or otherwise.
@@ -394,7 +467,7 @@ fi
 if [ -n "${KEXPLORE_BACKEND:-}" ]; then
   echo "Backend: $BACKEND (pinned by KEXPLORE_BACKEND)"
 elif [ "$BACKEND" = lima ]; then
-  echo "Backend: lima (macOS host; a Linux VM is required)"
+  echo "Backend: lima (selected Linux learning lab)"
 elif [ "$BACKEND" = native ] && kexplore_native_ready; then
   echo "Backend: native (detected Linux with kexplore's packages installed)"
 elif [ "$BACKEND" = docker ]; then
@@ -411,11 +484,13 @@ esac
 
 step "Ready ($BACKEND)"
 cat <<NEXT
-The machine is set up. This script did not touch the kernel's debug info:
-it is a few hundred MB, keyed to the running kernel, and run.sh is what
-fetches, caches and repairs it.
+Backend tools are installed. Use only disposable VMs or dedicated lab machines,
+not production servers. Fedora fetches DWARF on first run. Ubuntu/Debian Lima
+setup installs local debug symbols and verifies live kernel type resolution.
+Use run.sh --check to verify the complete catalog against the running kernel.
 
-  ./run.sh           the explorer. The first run downloads the debug info
-                     once, with progress; later runs start from the cache
+  ./run.sh --check   verify catalog access against the kernel
+  ./run.sh           start the explorer; fetch debug info if not installed
+                     or cached
   ./run.sh --help    the rest, including how to work with no network
 NEXT

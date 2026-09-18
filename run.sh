@@ -22,7 +22,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$REPO/detect.sh"
 
 # lima backend. Must match setup.sh, which is what creates the VM.
-VM="${KEXPLORE_VM:-kernel-lab}"
+VM="$(kexplore_lima_vm)" || exit 1
 # docker backend: the image setup.sh builds, and the volume holding the
 # debuginfod cache. A kernel DWARF is hundreds of MB with no resume, so an
 # ephemeral container would otherwise re-download it on every run.
@@ -36,7 +36,8 @@ usage() {
   cat <<USAGE
 usage: ./run.sh [--record file.cast] [--test] [options]
 
-Run kexplore as root against a live kernel. Where it runs:
+Learning and experimentation on disposable VMs or dedicated lab machines.
+Not intended for production servers. Runs as root. Where it runs:
 
   lima      a lima VM (the only option on macOS)
   native    this Linux host, with kexplore's packages installed
@@ -52,7 +53,9 @@ Run kexplore as root against a live kernel. Where it runs:
   --prefetch     download the kernel debuginfo to completion and exit; a cold
                  first run does this anyway, so this is for preparing offline
   --no-prefetch  attach without downloading debuginfo to completion first
-  --offline      never contact a debuginfod server; use only the cache
+  --offline      never contact a debuginfod server; use local files or the cache
+  --source-root D    matching local kernel source tree (optional)
+  --source-prefix P  build-time source root to map into that tree
   -c, --core F   explore the vmcore F instead of the live kernel
   -h, --help     this message
 
@@ -62,11 +65,14 @@ Environment:
 
   KEXPLORE_BACKEND   pin the backend: lima, native or docker
                      (currently: ${KEXPLORE_BACKEND:-auto})
+  KEXPLORE_DISTRO    lima distro: fedora (default), ubuntu (26.04), debian (13)
   KEXPLORE_VM        lima backend: name of the VM (currently: $VM)
   KEXPLORE_OFFLINE   set to 1 for --offline without passing the flag
+  KEXPLORE_SOURCE_ROOT    absolute path to matching local source
+  KEXPLORE_SOURCE_PREFIX  build-time source root to map into that tree
   DEBUGINFOD_URLS    where to fetch the kernel's debug info from. Defaults
-                     to Fedora's server for lima and docker, and to this
-                     host's distro server for native
+                     to the selected distro's server for lima, and to the
+                     Linux host's server for native and docker
 
 setup.sh reads the same variables, so set them for both or neither.
 USAGE
@@ -133,6 +139,10 @@ case "$BACKEND" in
       echo "lima VM '$VM' is not running. Run ./setup.sh to start it" >&2
       exit 1
     fi
+    kexplore_check_lima_distro "$VM" || exit 1
+    if [ "$(kexplore_lima_distro)" != fedora ]; then
+      TARGET[0]=/opt/kexplore/bin/python3
+    fi
     # The repo is virtiofs-mounted into the VM read-only at the same path, so
     # there is nothing to sync. PYTHONDONTWRITEBYTECODE is required because
     # that mount is read-only.
@@ -140,10 +150,12 @@ case "$BACKEND" in
       PYTHONDONTWRITEBYTECODE=1
       PYTHONPATH="$REPO"
       DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend lima)}"
+      KEXPLORE_SOURCE_ROOT="${KEXPLORE_SOURCE_ROOT:-}"
+      KEXPLORE_SOURCE_PREFIX="${KEXPLORE_SOURCE_PREFIX:-}"
       KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
       TERM="${TERM:-xterm-256color}"
       COLORTERM="${COLORTERM:-truecolor}"
-      "${TARGET[@]}")
+      bash "$REPO/scripts/launch-deb-lab.sh" "${TARGET[@]}")
     ;;
   native)
     if ! kexplore_native_ready; then
@@ -156,6 +168,8 @@ case "$BACKEND" in
     LAUNCH=(sudo env
       PYTHONPATH="$REPO"
       DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend native)}"
+      KEXPLORE_SOURCE_ROOT="${KEXPLORE_SOURCE_ROOT:-}"
+      KEXPLORE_SOURCE_PREFIX="${KEXPLORE_SOURCE_PREFIX:-}"
       KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
       "${TARGET[@]}")
     ;;
@@ -164,6 +178,15 @@ case "$BACKEND" in
       echo "the docker backend needs docker or rootful podman (rootless" >&2
       echo "podman cannot read /proc/kcore)" >&2
       exit 1
+    fi
+    DEBUG_MOUNTS=()
+    for directory in /usr/lib/debug /lib/modules; do
+      if [ -d "$directory" ]; then
+        DEBUG_MOUNTS+=(-v "$directory:$directory:ro")
+      fi
+    done
+    if [ -n "${KEXPLORE_SOURCE_ROOT:-}" ]; then
+      DEBUG_MOUNTS+=(-v "$KEXPLORE_SOURCE_ROOT:$KEXPLORE_SOURCE_ROOT:ro")
     fi
     TTY=()
     if [ -t 0 ] && [ -t 1 ]; then TTY=(-it); fi
@@ -174,11 +197,14 @@ case "$BACKEND" in
     # shellcheck disable=SC2206,SC2207
     LAUNCH=($RUNTIME run --rm "${TTY[@]}"
       $(kexplore_container_kernel_flags "$RUNTIME")
+      "${DEBUG_MOUNTS[@]}"
       -v "$REPO:$REPO:ro" -w "$REPO"
       -v "$CACHE_VOLUME:/root/.cache/debuginfod_client"
       -e PYTHONDONTWRITEBYTECODE=1
       -e PYTHONPATH="$REPO"
       -e DEBUGINFOD_URLS="${DEBUGINFOD_URLS:-$(kexplore_debuginfod_for_backend docker)}"
+      -e KEXPLORE_SOURCE_ROOT="${KEXPLORE_SOURCE_ROOT:-}"
+      -e KEXPLORE_SOURCE_PREFIX="${KEXPLORE_SOURCE_PREFIX:-}"
       -e KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
       -e TERM="${TERM:-xterm-256color}"
       -e COLORTERM="${COLORTERM:-truecolor}"

@@ -18,8 +18,9 @@ kexplore_native_ready() {
     && command -v pahole >/dev/null \
     && command -v addr2line >/dev/null \
     && command -v nm >/dev/null \
+    && command -v readelf >/dev/null \
     && python3 -c 'from drgn.helpers.linux.mm import vma_name' >/dev/null 2>&1 \
-    && python3 -c 'import textual' >/dev/null 2>&1
+    && python3 -c 'from textual.widgets import DataTable; from importlib.metadata import version; assert int(version("textual").split(".")[0]) >= 1' >/dev/null 2>&1
 }
 
 # Echoes the container runtime command ("docker", "podman", "sudo podman")
@@ -119,8 +120,8 @@ kexplore_os_name() {
 # qualifies: it packages a current drgn and its debuginfod server carries
 # kernel DWARF and source. drgn itself only uses debuginfod for the kernel
 # on Fedora (elsewhere the transfers are too slow), Arch ships no kernel
-# debug symbols at all, and Debian/Ubuntu have neither kernel debuginfo on
-# their servers nor a new enough drgn (LP#2106030). Anything else fails
+# debug symbols through the route used here. Debian/Ubuntu use local kernel
+# debug packages and the separate recipe in setup.sh. Anything else fails
 # here and takes another route: the Debian/Ubuntu recipe in setup.sh, or
 # the lima backend.
 kexplore_package_command() {
@@ -157,9 +158,8 @@ kexplore_deb_installable() {
 }
 
 # The debuginfod server matching this machine's distro, the default for the
-# native backend. The lima and docker backends use Fedora's server directly:
-# drgn only uses debuginfod for the kernel there (other servers are too slow
-# for kernel-size files), and a container kernel is Fedora's in practice.
+# native and container backends. Lima uses the selected lab distribution.
+# Other distros can require local kernel debug packages.
 kexplore_debuginfod_default() {
   local id=""
   if [ -r /etc/os-release ]; then
@@ -176,12 +176,78 @@ kexplore_debuginfod_default() {
 }
 
 # The debuginfod server a given backend defaults to, so run.sh never spells a
-# URL out itself. lima always runs the Fedora VM this repo provisions, and a
-# container kernel is Fedora's in practice; only the native backend varies
-# with the host distro.
+# URL out itself. Lima uses the selected lab distribution; containers use the
+# host distro because they read the host kernel.
 kexplore_debuginfod_for_backend() {
   case "$1" in
-    lima|docker) echo "https://debuginfod.fedoraproject.org/" ;;
+    lima) kexplore_lima_server ;;
     *)           kexplore_debuginfod_default ;;
   esac
+}
+
+# Shared Lima profile selection. Preserve the original Fedora default VM.
+kexplore_lima_distro() {
+  case "${KEXPLORE_DISTRO:-fedora}" in
+    fedora|ubuntu|debian) echo "${KEXPLORE_DISTRO:-fedora}" ;;
+    *) echo "KEXPLORE_DISTRO must be fedora, ubuntu or debian" >&2; return 1 ;;
+  esac
+}
+
+kexplore_lima_vm() {
+  local distro
+  distro="$(kexplore_lima_distro)" || return 1
+  if [ -n "${KEXPLORE_VM:-}" ]; then
+    echo "$KEXPLORE_VM"
+  elif [ "$distro" = fedora ]; then
+    echo kernel-lab
+  elif [ "$distro" = ubuntu ]; then
+    echo kernel-lab-ubuntu-26-04
+  else
+    echo "kernel-lab-$distro"
+  fi
+}
+
+kexplore_lima_template() {
+  local distro
+  distro="$(kexplore_lima_distro)" || return 1
+  case "$distro" in
+    fedora) echo kexplore.yaml ;;
+    *) echo "kexplore-$distro.yaml" ;;
+  esac
+}
+
+kexplore_lima_server() {
+  local distro
+  distro="$(kexplore_lima_distro)" || return 1
+  case "$distro" in
+    fedora) echo https://debuginfod.fedoraproject.org/ ;;
+    ubuntu) echo https://debuginfod.ubuntu.com ;;
+    debian) echo https://debuginfod.debian.net ;;
+  esac
+}
+
+# Refuse to repurpose an existing VM of a different distribution.
+kexplore_check_lima_distro() {
+  local expected actual release identity
+  expected="$(kexplore_lima_distro)" || return 1
+  # Variables intentionally expand inside the guest shell.
+  # shellcheck disable=SC2016
+  identity="$(limactl shell "$1" sh -c '. /etc/os-release; printf "%s %s\n" "$ID" "$VERSION_ID"')" || return 1
+  read -r actual release <<<"$identity"
+  if [ "$actual" != "$expected" ]; then
+    echo "VM '$1' runs $actual, but KEXPLORE_DISTRO selects $expected." >&2
+    echo "Choose a different KEXPLORE_VM or select the matching distro." >&2
+    return 1
+  fi
+  if [ "$expected" = ubuntu ] && [ "$release" != 26.04 ]; then
+    echo "VM '$1' runs Ubuntu $release; the Ubuntu profile requires 26.04." >&2
+    echo "Unset KEXPLORE_VM to create a separate 26.04 lab; existing VMs are not upgraded." >&2
+    return 1
+  fi
+  if { [ "$expected" = fedora ] && [ "$release" != 44 ]; } || \
+     { [ "$expected" = debian ] && [ "$release" != 13 ]; }; then
+    echo "VM '$1' runs $actual $release; this profile requires Fedora 44 or Debian 13 respectively." >&2
+    echo "Choose a separate KEXPLORE_VM; existing VMs are not upgraded." >&2
+    return 1
+  fi
 }

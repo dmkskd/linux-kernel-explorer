@@ -208,8 +208,15 @@ Open questions:
 
 ## Subsystems with no entry point
 
-Types this kernel has that nothing in the catalog reaches yet: block (`bio`,
-`request`, `request_queue`), cgroup, page cache (`address_space`), reclaim
-(`lruvec`), the buddy allocator, and IPC (System V queues, semaphores, shared
-memory). The irq, timer, workqueue and RCU structures listed here before are
-now the `irq`, `time` and `sync` branches.
+Types this kernel has that nothing in the catalog reaches yet: cgroup, page
+cache (`address_space`), reclaim (`lruvec`) and the buddy allocator. The irq,
+timer, workqueue and RCU structures listed here before are now the `irq`,
+`time` and `sync` branches; `bio`, `request` and `request_queue` are the
+`block` branch; the System V queues, semaphores and shared memory are the
+`ipc` branch. An `address_space` is reachable from a `block_device` and from a
+shared memory segment's file, but has no links of its own yet.
+
+POSIX IPC is not covered: the mq_open(3) queues have a count in
+`init_ipc_ns.mq_queues_count` but reaching the queues themselves means walking
+the internal mqueue mount, and POSIX shared memory is ordinary tmpfs files
+under /dev/shm.

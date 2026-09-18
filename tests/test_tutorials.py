@@ -71,7 +71,7 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         check("[Enter]" in landing_rendered, "landing preview displays [Enter] shortcut prompt")
         check("[a]" in landing_rendered, "landing preview displays [a] shortcut prompt")
         check("[c]" in landing_rendered, "landing preview displays [c] shortcut prompt")
-        check("highlights" in landing_rendered, "landing preview displays the route table")
+        check("highlights" not in landing_rendered, "landing preview omits the short route table")
         check("[ENTER]" in landing_rendered, "landing preview keeps the per-step [ENTER] prompt")
 
         # Verify no markup styles leak to the end of the content
@@ -111,7 +111,7 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         check(app.check_action("tutorial_prev", ()) is None, "step 0: prev step action hidden")
         check(app.check_action("search", ()) is None, "step 0: search action hidden")
         check(app.check_action("sort", ()) is None, "step 0: sort action hidden")
-        check(app.check_action("refresh", ()) is None, "step 0: refresh action hidden")
+        check(app.check_action("refresh", ()) is False, "step 0: refresh action hidden")
         check(app.check_action("userspace", ()) is None, "step 0: userspace action hidden")
         check(app.check_action("source", ()) is None, "step 0: source action hidden")
         check(app.check_action("trace_command", ()) is None, "step 0: trace_command action hidden")
@@ -135,9 +135,11 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         check(app.check_action("tutorial_next", ()) is True, "step 1: next step offered")
         check(app.check_action("tutorial_prev", ()) is True, "step 1: prev step offered")
         check(app.check_action("itinerary", ()) is True, "step 1: route offered")
+        check(app.check_action("review", ()) is True, "step 1: review offered")
         check(app.check_action("copy_narration", ()) is True, "step 1: copy narration offered")
-        for withheld in ("search", "sort", "refresh", "userspace", "graph", "trace_command", "cycle_view"):
+        for withheld in ("search", "sort", "userspace", "graph", "trace_command", "cycle_view"):
             check(app.check_action(withheld, ()) is None, f"step 1: {withheld} withheld from a step")
+        check(app.check_action("refresh", ()) is False, "step 1: refresh withheld from a step")
 
         # Step 1 is the starting screen (kexplore home) frame
         step1_frame = app.stack[-1]
@@ -220,7 +222,7 @@ async def test_tui_initial_tutorial(prog: drgn.Program) -> None:
         check(app.active_tutorial is not None, "initial_tutorial started active tutorial session")
         check(app.active_tutorial.tutorial.key == "user_memory_types", f"loaded tutorial: {app.active_tutorial.tutorial.key}")
         check(app.active_tutorial.current_idx == 0, "initial_tutorial landed on step 0 (landing page)")
-        check("The route" in str(landing.render()), "initial_tutorial landing shows the route table")
+        check("The route" not in str(landing.render()), "initial_tutorial landing omits the route table")
         check("Tutorial steps" in str(landing.render()), "initial_tutorial landing keeps the per-step itinerary")
         check(len(app.active_tutorial.steps) == 10, f"initial_tutorial loaded 10 steps: {len(app.active_tutorial.steps)}")
         check("Types of User Memory" in str(landing.render()), "landing page displays real video title")

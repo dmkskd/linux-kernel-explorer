@@ -119,8 +119,16 @@ register(
             Entry("buses", "buses", "Registered bus types, via subsys_private.", buses),
             Entry("classes", "classes", "Registered struct class instances backing /sys/class.", classes),
             Entry("pci", "PCI devices", "struct pci_dev, with vendor:device ids.", pci_devices),
-            Entry("disks", "block disks", "struct gendisk per disk.", disks),
-            Entry("partitions", "partitions", "struct block_device per partition.", partitions),
+            # The same objects the block branch lists, reached from the driver
+            # model instead of from the queue. sysfs does exactly this: the
+            # disk lives under /sys/devices/.../block/vda, and /sys/block and
+            # /sys/class/block are symlink views into it -- the first of whole
+            # disks, the second of disks and partitions together.
+            Entry("disks", "block disks",
+                  "struct gendisk per disk, as /sys/block lists them.", disks),
+            Entry("partitions", "partitions",
+                  "struct block_device per disk and partition, as /sys/class/block "
+                  "lists them.", partitions),
         ],
     )
 )

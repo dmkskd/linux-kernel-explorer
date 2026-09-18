@@ -136,8 +136,23 @@ def is_cached(build_id: str) -> bool:
     leave one behind too. Either way drgn would load an empty vmlinux.
     """
     try:
-        return (_entry_dir(build_id) / "debuginfo").stat().st_size > 0
+        path = _entry_dir(build_id) / "debuginfo"
+        if path.stat().st_size == 0:
+            return False
+        result = subprocess.run(["readelf", "-W", "-h", "-S", "-n", str(path)], capture_output=True,
+                                text=True, timeout=30)
+        found = re.search(r"Build ID: ([0-9a-fA-F]+)", result.stdout)
+        if (result.returncode == 0 and not result.stderr.strip() and found
+                and found.group(1).lower() == build_id.lower()):
+            return True
+        # Preserve the bad file for diagnosis while allowing a fresh download.
+        path.rename(path.with_name("debuginfo.invalid"))
+        print("kernel debug info: invalid cached file or mismatched build ID; "
+              "saved as debuginfo.invalid; a replacement is required", file=sys.stderr)
+        return False
     except OSError:
+        return False
+    except subprocess.TimeoutExpired:
         return False
 
 

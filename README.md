@@ -1,7 +1,11 @@
 # kexplore
 
-A terminal explorer for a live Linux kernel, built on
-[drgn](https://drgn.readthedocs.io/).
+A terminal explorer for learning and experimenting with a live Linux kernel,
+built on [drgn](https://drgn.readthedocs.io/).
+
+Use a disposable VM or a dedicated lab machine. **kexplore is not intended for
+production servers.** On macOS, the Fedora VM is the recommended learning
+environment: it runs a real Linux kernel you can inspect and exercise.
 
 Explore a live kernel as a map of connected structures. Start from a subsystem
 or a single task, then follow its fields and curated relationships to its
@@ -32,14 +36,16 @@ it), and it needs that kernel's DWARF debug info. Both are what the
 requirements below are about; the Python code itself needs nothing but the
 packages listed here.
 
-Everything is installed by `./setup.sh`, except the two host tools you need
-before it can run: `limactl` on macOS, a container runtime for the docker
-backend.
+Download or clone this repository first (Git is needed only for cloning).
+`./setup.sh` installs backend dependencies. On macOS, install `limactl` first;
+the container backend requires Docker or rootful Podman first. Native Linux
+installation requires Bash, Python 3.11 or newer, and sudo or equivalent
+administrator access. Setup currently uses sudo.
 
 ### macOS
 
-There is no native option: macOS has no Linux kernel to read. Everything runs
-in a Fedora VM, and the kernel you explore is that VM's.
+There is no native option: macOS has no Linux kernel to read. The explorer runs in a Linux VM and reads that VM's kernel. Fedora is the
+default; Ubuntu 26.04 and Debian 13 are experimental alternatives.
 
 | Need | Detail |
 | --- | --- |
@@ -52,6 +58,31 @@ in a Fedora VM, and the kernel you explore is that VM's.
 Everything inside the VM (drgn, elfutils, pahole, binutils, textual, bpftrace)
 is provisioned by `./setup.sh`; nothing but lima is installed on the mac.
 
+### Choosing a distro on macOS
+
+Use a new terminal and select a Lima lab profile:
+
+```sh
+export KEXPLORE_BACKEND=lima
+export KEXPLORE_DISTRO=ubuntu  # fedora (default), ubuntu (26.04), debian (13)
+./setup.sh
+./run.sh --check
+./run.sh
+```
+
+Default VM names are `kernel-lab`, `kernel-lab-ubuntu-26-04`, and `kernel-lab-debian`.
+`KEXPLORE_VM` overrides the name; unset an old override before switching profiles.
+The launcher refuses a VM whose distro or release differs from the selected
+profile (Fedora 44, Ubuntu 26.04, Debian 13). Existing labs are not upgraded
+to another distribution release.
+Ubuntu/Debian install matching local DWARF and isolated Python dependencies;
+matching kernel source trees are downloaded and configured automatically.
+Downloads and extraction can take several minutes and require several GB.
+Set `KEXPLORE_DOWNLOAD_SOURCE=0` before `./setup.sh` to skip optional source
+downloads. Required debug symbols are still installed. See
+[source download options](docs/installation.md#optional-source-downloads).
+Each VM has its own packages and debug cache.
+
 ### Linux
 
 Three backends. `detect.sh` resolves one on every run, and
@@ -59,10 +90,10 @@ Three backends. `detect.sh` resolves one on every run, and
 
 | Distro | Backend | Why |
 | --- | --- | --- |
-| Fedora | native | the only distro whose debuginfod server carries kernel DWARF *and* source, and drgn uses debuginfod for the kernel only there |
+| Fedora | native | recommended lab distro; automatic kernel DWARF and matching source through debuginfod |
 | any, with docker or rootful podman | docker | a container reads the host kernel; the host keeps only the runtime, an image and a cache volume |
-| Ubuntu 24.04+, Debian 12+ | native, second-class | automated by `setup.sh` with a warning |
-| Arch, self-built kernels, anything else | lima | no fetchable kernel debug info, so a Fedora VM supplies both kernel and symbols |
+| Ubuntu 24.04+, Debian 12+ | native, experimental | automated recipe; exact release and kernel must be validated |
+| Arch, self-built kernels, anything else | lima | recommended learning environment; custom kernels need their own matching DWARF for native use |
 
 **native (Fedora)**, installed by `setup.sh`:
 
@@ -81,12 +112,17 @@ cannot work at all: `/proc/kcore` needs `CAP_SYS_RAWIO` in the initial user
 namespace, which a rootless container never has. The container shares the host
 kernel, so the host's debug info situation applies unchanged.
 
-**native (Ubuntu/Debian)**: not a supported setup, but `setup.sh` automates it.
-The C tools come from apt, drgn from PyPI (apt's is older than 0.1.0,
-LP#2106030), and the kernel's symbols from a multi-GB `linux-image-*-dbgsym`
-package added through a new apt repo, because neither distro's debuginfod
-serves kernel debug info. Struct documentation is disabled: neither serves
-kernel source either.
+**native (Ubuntu/Debian lab machines)**: experimental; `setup.sh` automates
+an installation but fresh installs on every accepted release are not validated.
+C tools and Textual come from apt. The current recipe installs drgn from PyPI
+into system Python and adds debug-package repositories. It installs
+`linux-image-$(uname -r)-dbgsym` on Ubuntu or
+`linux-image-$(uname -r)-dbg` on Debian. These packages can require several GB;
+availability depends on the exact running kernel, flavour and repository.
+
+Source files are optional, separate from DWARF. Ubuntu/Debian source can be
+obtained from distribution source packages; it is not automatically integrated
+through our debuginfod path. See [local source installation](docs/installation.md).
 
 **lima on Linux**: same Fedora VM as on macOS. limactl comes from
 <https://github.com/lima-vm/lima/releases>.
@@ -99,13 +135,13 @@ kernel source either.
   Use the VM.
 - `python3` on the host, for `python3 tests/run_all.py`: the tests that need
   no kernel. Everything else runs where the backend does.
-- The lima VM is named `kernel-lab`. `KEXPLORE_VM` overrides it, and both
+- The default Fedora VM is named `kernel-lab`. `KEXPLORE_VM` overrides it, and both
   `run.sh` and `setup.sh` read it.
 
 ## Setup
 
 ```sh
-./setup.sh                                    # prepare the backend, then verify it end to end
+./setup.sh                                    # prepare the backend and check installed tools
 ./run.sh                                      # start the explorer
 ./run.sh --tutorial list                      # list curated live guided tutorials
 ./run.sh --tutorial memory                    # launch directly into a live guided tutorial
@@ -114,8 +150,11 @@ kernel source either.
 ./run.sh --help                               # every option, and the environment it reads
 ```
 
-`setup.sh` installs the machine and stops there: the kernel's debug info is
-`run.sh`'s, start to finish (see [Working offline](#working-offline)).
+`setup.sh` checks installed tools, not whether the kernel can be explored.
+Fedora debug information is fetched on first run; the Ubuntu/Debian recipe
+installs a local debug package during setup. Run `./run.sh --check` to verify
+actual catalog access. See [installation details](docs/installation.md) and
+[Working offline](#working-offline).
 
 With nothing usable installed, `setup.sh` asks which backend to set up and
 runs it to completion. `run.sh` never asks; it tells you to run `setup.sh`

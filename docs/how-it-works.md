@@ -36,9 +36,9 @@ the VM.
 
 ## [debuginfod](https://sourceware.org/elfutils/Debuginfod.html)
 
-Fedora does not publish a `kernel-debuginfo` package for the stock kernel, so
-there is no local DWARF. `DEBUGINFOD_URLS` points drgn at Fedora's debuginfod
-server, which serves both:
+The recommended Fedora lab uses debuginfod instead of requiring a local
+debug package. Fedora also supports manual kernel debug-package installation.
+`DEBUGINFOD_URLS` points at Fedora's server, which serves both:
 
 - **DWARF**, fetched automatically by drgn on first type lookup. Without this
   drgn cannot resolve `struct task_struct` at all.
@@ -132,8 +132,13 @@ Nothing runs in the background and nothing accumulates between runs.
 
 ## Other kernels
 
-The tool assumes a debuginfod server that serves the running kernel's DWARF and
-source. On a distro without one, drgn needs a local `vmlinux` with debug info
-(`-s /path/to/vmlinux`), and the source-derived documentation needs a matching
-source tree. The structure browser degrades to working without comments; the
-walkthrough view loses its source links.
+The browser needs matching DWARF, either in a standard local debug-package
+location or in the debuginfod cache. Kernel source is optional. An installed
+local debug image is also reused for source declaration and address lookups.
+Use `--source-root` for an extracted matching source tree and `--source-prefix`
+when DWARF records a different build-time root. These options belong to
+kexplore; drgn's separate `-s` option is not a kexplore option.
+
+Without source, structure browsing and curated explanations still work;
+source-derived comments and code links are unavailable. A supplied source
+revision is not automatically verified. See [installation](installation.md).

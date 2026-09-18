@@ -1,0 +1,13 @@
+# Experimental Ubuntu 26.04 learning lab. setup.sh installs tools after boot.
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-26.04
+cpus: 4
+memory: 8GiB
+disk: 60GiB
+mounts:
+- location: "~"
+  writable: false
+containerd:
+  system: false
+  user: false

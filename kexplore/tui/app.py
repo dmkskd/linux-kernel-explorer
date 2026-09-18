@@ -190,7 +190,8 @@ ACTION_SCREENS: dict[str, frozenset[str]] = {
     "trace_command": frozenset({"browse"}),
     "expand": frozenset({"browse", "step"}),
     "source": frozenset({"browse", "step"}),
-    "itinerary": frozenset({"step"}),
+    "itinerary": frozenset({"landing", "step"}),
+    "review": frozenset({"landing", "step"}),
     "copy_narration": frozenset({"step"}),
 }
 
@@ -219,8 +220,9 @@ KEY_HELP: dict[str, str] = {
     "tutorial_next": "go to the next step",
     "tutorial_prev": "go back a step",
     "toggle_auto": "advance the walkthrough on a timer",
-    "itinerary": "lay the whole route over this step",
-    "keys": "this list",
+    "itinerary": "lay the review and route table over this step",
+    "review": "lay the review and route table over this step",
+    "keys": "show keyboard shortcuts",
     "escape": "close the filter, or go back",
     "quit": "leave kexplore",
     "toggle_header_variant": "show or hide the roadmap line in the banner",
@@ -237,7 +239,13 @@ class ContextFooter(Footer):
     """
 
     def compose(self) -> ComposeResult:
-        keys = [key for key in super().compose() if not getattr(key, "disabled", False)]
+        keys = [
+            key
+            for key in super().compose()
+            if not getattr(key, "_disabled", False)
+            and not getattr(key, "disabled", False)
+            and not key.has_class("-disabled")
+        ]
         self.styles.grid_size_columns = max(1, len(keys))
         yield from keys
 
@@ -501,7 +509,12 @@ class RouteModal(Static):
     kind: str = ""
 
     def show(self, steps: list, current: int, width: int, height: int) -> None:
-        self.show_lines(step_table(steps, current=current), width, height, "route")
+        lines = [
+            "  [bold cyan]Walkthrough Review & Route[/]  [dim](r, i or esc closes this)[/]",
+            "",
+        ]
+        lines.extend(step_table(steps, current=current))
+        self.show_lines(lines, width, height, "route")
 
     def show_lines(self, lines: list[str], width: int, height: int, kind: str) -> None:
         if not lines:
@@ -533,9 +546,11 @@ class TutorialLanding(VerticalScroll):
         Binding("n", "start_step_1", "begin step 1", priority=True, show=False),
         Binding("a", "start_auto", "auto-play walkthrough", priority=True),
         Binding("p", "prev", "back", priority=True, show=False),
+        Binding("r,i", "review", "review", priority=True),
         Binding("c", "copy", "copy link / overview", priority=True),
         Binding("y", "copy", "copy link / overview", priority=True, show=False),
         Binding("m", "toggle_mouse", "mouse selection", priority=True),
+        Binding("question_mark,h", "keys", "shortcuts", priority=True, show=False),
         Binding("escape", "exit", "exit", priority=True, show=False),
         Binding("down", "scroll_down", "scroll ↓", show=True),
         Binding("up", "scroll_up", "scroll ↑", show=True),
@@ -577,6 +592,11 @@ class TutorialLanding(VerticalScroll):
         if app is not None and hasattr(app, "action_tutorial_prev"):
             app.action_tutorial_prev()
 
+    def action_review(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_review"):
+            app.action_review()
+
     def action_copy(self) -> None:
         app = getattr(self, "app", None)
         if app is not None and hasattr(app, "action_copy"):
@@ -586,6 +606,11 @@ class TutorialLanding(VerticalScroll):
         app = getattr(self, "app", None)
         if app is not None and hasattr(app, "action_toggle_mouse"):
             app.action_toggle_mouse()
+
+    def action_keys(self) -> None:
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "action_keys"):
+            app.action_keys()
 
     def action_exit(self) -> None:
         app = getattr(self, "app", None)
@@ -621,13 +646,13 @@ class TutorialLanding(VerticalScroll):
             lines.append(
                 "  [bold white on #1e3a8a]  ▶ Press \\[Enter], \\[Space], or \\[n] to Begin Step 1  [/]    "
                 "[bold white on #059669]  \\[a] Auto-Play Walkthrough  [/]    "
-                "[dim]•  \\[c] Copy Link  •  \\[Esc] Exit[/dim]"
+                "[dim]•  \\[r] Review  •  \\[c] Copy Link  •  \\[Esc] Exit[/dim]"
             )
         else:
             lines.append(
                 "  [bold white on #0284c7]  👉 Press \\[Enter] to Select & Launch Tutorial  [/]    "
                 "[bold white on #059669]  \\[a] Auto-Play  [/]    "
-                "[dim]•  \\[c] Copy Link[/dim]"
+                "[dim]•  \\[r] Review  •  \\[c] Copy Link[/dim]"
             )
         lines.append("")
 
@@ -655,16 +680,6 @@ class TutorialLanding(VerticalScroll):
         lines.append("  " + " [bold dim cyan]──▶[/] ".join(flow_parts))
         lines.append("")
 
-        # Tutorial steps
-        lines.append(
-            f"[bold cyan]The route ({len(steps)} steps):[/]  "
-            f"[dim]each row is one screen, the row it asks for, and why[/]"
-        )
-        lines.append("")
-        lines.extend(step_table(steps, current=getattr(self, "_current_step", 0)))
-        lines.append("")
-        lines.append("  [bold bright_yellow]▼ Scroll down (↓ / j / PgDn) for the rest[/]")
-        lines.append("")
         lines.append(f"[bold cyan]Tutorial steps & itinerary ({len(steps)} live steps):[/]  [bold bright_yellow]▼ Scroll down (↓ / j / PgDn / mouse wheel) to view all steps[/]")
         lines.append("  [dim]" + "─" * 72 + "[/dim]")
         for idx, step in enumerate(steps, start=1):
@@ -693,6 +708,8 @@ class TutorialLanding(VerticalScroll):
         )
         lines.append(
             "  [dim]Shortcuts: [bold bright_yellow]\\[m][/] Mouse Select   •   "
+            "[bold bright_yellow]\\[r][/] Review   •   "
+            "[bold bright_yellow]\\[?][/] Shortcuts   •   "
             "[bold bright_yellow]\\[p][/] Overview   •   "
             "[bold bright_yellow]\\[Esc][/] Exit[/dim]"
         )
@@ -821,6 +838,7 @@ class Explorer(App):
         # worth a second slot on the footer.
         Binding("O", "sort_reverse", "reverse", show=False),
         Binding("r", "refresh", "refresh"),
+        Binding("r", "review", "review"),
         Binding("u", "userspace", "userspace"),
         Binding("v", "cycle_view", "view", show=False),
         Binding("a", "toggle_auto", "autoplay"),
@@ -830,9 +848,9 @@ class Explorer(App):
         Binding("C", "copy_row", "copy row", show=False),
         Binding("y", "copy", "copy", show=False),
         Binding("N", "copy_narration", "copy narration", show=False),
-        Binding("i", "itinerary", "route"),
-        Binding("question_mark", "keys", "keys"),
-        Binding("h", "keys", "keys", show=False),
+        Binding("i", "review", "review", show=False),
+        Binding("question_mark", "keys", "shortcuts"),
+        Binding("h", "keys", "shortcuts", show=False),
         Binding("m", "toggle_mouse", "mouse"),
         Binding("n", "tutorial_next", "next step"),
         Binding("p", "tutorial_prev", "prev step"),
@@ -888,7 +906,7 @@ class Explorer(App):
         )
         # False means startup probed and found no kernel source (or a vmcore,
         # where a lookup would describe the host kernel): the 's' key is
-        # hidden by check_action and refuses in action_source. The default
+        # explained by action_source when unavailable. The default
         # keeps tests and direct construction ungated.
         self._source_available = source_available
         # Set by action_source when a fetch is in flight, so the view opens as
@@ -971,7 +989,15 @@ class Explorer(App):
         screen = "landing" if landing_shown else ("step" if in_step else "browse")
         allowed = ACTION_SCREENS.get(action)
         if allowed is not None and screen not in allowed:
+            if action == "refresh":
+                return False
             return None
+
+        # Review / itinerary modal: available throughout an active tutorial
+        if action in ("review", "itinerary"):
+            if self.active_tutorial is not None:
+                return True
+            return False
 
         # Step navigation: strictly context-dependent
         if action in ("tutorial_next", "tour_next"):
@@ -1056,9 +1082,9 @@ class Explorer(App):
             return True
 
 
-        # Source inspection: requires source available and a loaded stack frame
+        # Keep the shortcut active so unavailable source gets an explanation.
         if action == "source":
-            if not self._source_available or not self.stack:
+            if not self.stack:
                 return None
             return True
 
@@ -1184,6 +1210,12 @@ class Explorer(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        if not self._source_available:
+            yield Static(
+                "Kernel source unavailable for this build: source browsing (s) and "
+                "source comments are unavailable. Live structures remain available.",
+                id="source-status", markup=False,
+            )
         yield Static("select a subsystem", id="path", markup=False)
         with Horizontal():
             with Vertical(id="sidebar"):
@@ -2646,8 +2678,11 @@ class Explorer(App):
             action = getattr(binding, "action", "")
             if not getattr(binding, "description", ""):
                 continue
-            if self.check_action(action, ()) is None:
+            status = self.check_action(action, ())
+            if status is None:
                 elsewhere.append(pretty(key))
+                continue
+            if status is False:
                 continue
             if action not in here:
                 here[action] = []
@@ -2657,6 +2692,8 @@ class Explorer(App):
         labels = {a: ", ".join(k) for a, k in here.items()}
         width = max((len(v) for v in labels.values()), default=3)
         lines = [
+            "  [bold cyan]Keyboard Shortcuts[/]  [dim](? or esc closes this)[/]",
+            "",
             "  [dim]" + "key".ljust(width) + "  what it does[/]",
             "  [dim]" + "─" * width + "  " + "─" * 58 + "[/]",
         ]
@@ -2683,10 +2720,12 @@ class Explorer(App):
                 + safe_escape(" ".join(dict.fromkeys(elsewhere)))
                 + "[/]"
             )
-        lines.append("")
-        lines.append("  [dim]esc or ? closes this[/]")
         detail = self.query_one("#detail")
         modal.show_lines(lines, detail.region.width, detail.region.height, "keys")
+
+    def action_review(self) -> None:
+        """Lay the review and route table over the current step, or take it away again."""
+        self.action_itinerary()
 
     def action_itinerary(self) -> None:
         """Lay the route over the current step, or take it away again.
@@ -2695,8 +2734,7 @@ class Explorer(App):
         what no step can show, and reading it must not cost the reader their
         place, so this leaves the walkthrough exactly where it was.
         """
-        if self.active_tutorial is None or self.active_tutorial.current_idx == 0:
-            self.notify("no step on screen to summon the route over", severity="warning")
+        if self.active_tutorial is None:
             return
         modal = self.query_one("#route-modal", RouteModal)
         if modal.display and modal.kind == "route":
@@ -2783,7 +2821,11 @@ class Explorer(App):
         (the function), since a step already carries its file:line.
         """
         if not self._source_available:
-            self.notify("no kernel source for this build", severity="warning")
+            self.notify(
+                "Kernel source unavailable for this build. Configure a matching "
+                "source tree with --source-root (see docs/installation.md).",
+                severity="warning", timeout=10,
+            )
             return
         if self._showing_source():
             return

@@ -248,6 +248,78 @@ SLAB_FLAGS = (
 )
 
 
+# ---------------------------------------------------------------------- block
+
+# blk_opf_t packs the operation into the low REQ_OP_BITS, with REQ_* modifiers
+# above it. The operation names come from enum req_op in the debug info. Every
+# bitmask name comes from an array the kernel carries for blk-mq's debugfs
+# files: blk_queue_flag_name, rqf_name, hctx_flag_name and hctx_state_name in
+# block/blk-mq-debugfs.c. The names then belong to the kernel being examined.
+# The arrays exist only with CONFIG_BLK_DEBUG_FS, so every lookup falls back to
+# bit numbers.
+REQ_OP_BITS = 8
+REQ_OP_MASK = (1 << REQ_OP_BITS) - 1
+
+
+def request_op_name(opf: Object) -> str:
+    """The operation half of a blk_opf_t: READ, WRITE, FLUSH, DISCARD.
+
+    ``REQ_OP_LAST`` is a count rather than an operation, so it is skipped. An
+    unrecognised value prints as its number.
+    """
+    raw = int(opf) & REQ_OP_MASK
+
+    def lookup() -> str:
+        for enumerator in opf.prog_.type("enum req_op").enumerators:
+            if enumerator.value == raw and enumerator.name != "REQ_OP_LAST":
+                return enumerator.name[len("REQ_OP_"):]
+        return str(raw)
+
+    return ct.safe(lookup, str(raw))
+
+
+def _kernel_bit_names(prog, symbol: str) -> tuple[tuple[str, int], ...]:
+    """(name, mask) pairs from one of blk-mq-debugfs's name arrays.
+
+    The arrays are indexed by bit number and a gap is a NULL pointer, which is
+    how cmd_flag_name leaves room for the operation field in the low bits.
+    """
+    array = prog[symbol]
+    return tuple(
+        (array[bit].string_().decode("utf-8", "replace"), 1 << bit)
+        for bit in range(len(array))
+        if array[bit].value_()
+    )
+
+
+def _kernel_flags(symbol: str, zero: str = "none"):
+    """A decoder for a bitmask the kernel names in ``symbol``."""
+
+    def decode(parent: Object, value: Object) -> str:
+        raw = value.value_()
+        if raw == 0:
+            return zero
+        pairs = ct.safe(lambda: _kernel_bit_names(parent.prog_, symbol), ())
+        if not pairs:
+            return decode_flags(raw, (), bit_numbers=True)
+        return decode_flags(raw, pairs, bit_numbers=False)
+
+    return decode
+
+
+def _blk_opf(parent: Object, value: Object) -> str:
+    """One blk_opf_t as "WRITE | SYNC,FUA": the operation, then its modifiers."""
+    op = request_op_name(value)
+    raw = int(value) & ~REQ_OP_MASK
+    if not raw:
+        return op
+    pairs = ct.safe(lambda: _kernel_bit_names(value.prog_, "cmd_flag_name"), ())
+    flags = ct.safe(
+        lambda: decode_flags(raw, pairs, bit_numbers=not pairs), hex(raw)
+    )
+    return f"{op} | {flags}"
+
+
 DECODERS: dict[tuple[str, str], Decoder] = {
     ("task_struct", "__state"): Decoder(
         "Task state. TASK_RUNNING is 0; these are #defines, so absent from DWARF.",
@@ -278,6 +350,33 @@ DECODERS: dict[tuple[str, str], Decoder] = {
     ("sock_common", "skc_family"): Decoder("Address family.", _lookup(ADDRESS_FAMILIES)),
     ("sock", "sk_protocol"): Decoder("IP protocol number.", _lookup(IP_PROTOCOLS)),
     ("kmem_cache", "flags"): Decoder("SLAB_* cache flags.", _flags(SLAB_FLAGS)),
+    ("request", "cmd_flags"): Decoder(
+        "The operation this request performs, and the REQ_* modifiers on it.",
+        _blk_opf,
+    ),
+    ("request", "rq_flags"): Decoder(
+        "RQF_* state the block layer keeps about this request.",
+        _kernel_flags("rqf_name"),
+    ),
+    ("bio", "bi_opf"): Decoder(
+        "The operation this bio performs, and the REQ_* modifiers on it.",
+        _blk_opf,
+    ),
+    ("request_queue", "queue_flags"): Decoder(
+        "QUEUE_FLAG_* state of the queue.", _kernel_flags("blk_queue_flag_name")
+    ),
+    ("blk_mq_tag_set", "flags"): Decoder(
+        "BLK_MQ_F_* properties the driver set for every queue in this set.",
+        _kernel_flags("hctx_flag_name"),
+    ),
+    ("blk_mq_hw_ctx", "flags"): Decoder(
+        "BLK_MQ_F_* properties this hardware queue was created with.",
+        _kernel_flags("hctx_flag_name"),
+    ),
+    ("blk_mq_hw_ctx", "state"): Decoder(
+        "BLK_MQ_S_* runtime state: stopped, restarting, inactive.",
+        _kernel_flags("hctx_state_name"),
+    ),
 }
 
 

@@ -46,15 +46,15 @@ def install_stubs() -> None:
 
     names = [
         "drgn", "drgn.helpers", "drgn.helpers.common", "drgn.helpers.common.format",
-        "drgn.helpers.linux", "rich", "rich.syntax", "rich.text", "textual",
-        "textual.app",
-        "textual.binding", "textual.color", "textual.containers", "textual.screen",
-        "textual.widgets",
+        "drgn.helpers.linux", "rich", "rich.markup", "rich.syntax", "rich.text",
+        "textual",
+        "textual.app", "textual.binding", "textual.color", "textual.containers",
+        "textual.coordinate", "textual.screen", "textual.widgets",
     ] + [
         f"drgn.helpers.linux.{name}" for name in (
-            "block", "cpumask", "device", "fs", "kthread", "list", "mm", "mmzone",
-            "module", "net", "pci", "percpu", "pid", "rbtree", "sched", "slab",
-            "timekeeping",
+            "block", "cpumask", "device", "fs", "idr", "ipc", "irq", "kthread", "list",
+            "locking", "mm", "mmzone", "module", "net", "pci", "percpu", "pid",
+            "plist", "rbtree", "sched", "slab", "timekeeping", "xarray",
         )
     ]
     for name in names:
@@ -97,8 +97,9 @@ def main() -> int:
     subs = subsystems()
     keys = [s.key for s in subs]
     check(
-        keys == ["system", "process", "sched", "sync", "irq", "time", "mm",
-                 "page", "slab", "vfs", "net", "socket", "skb", "device"],
+        keys == ["system", "process", "sched", "sync", "ipc", "irq", "time",
+                 "mm", "page", "slab", "vfs", "block", "net", "socket", "skb",
+                 "device"],
         f"subsystems register in module order: {keys}",
     )
     # Registration happens at import, so importing a catalog module that

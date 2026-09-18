@@ -48,7 +48,20 @@ def main() -> int:
         help="open directly into a live guided tutorial (use '--tutorial list' to show available tutorials)",
         default=None,
     )
+    parser.add_argument(
+        "--source-root", help="matching local kernel source tree (optional)", default=None
+    )
+    parser.add_argument(
+        "--source-prefix", help="build-time source root to map into --source-root", default=None
+    )
     args = parser.parse_args()
+    if args.source_root:
+        root = os.path.abspath(os.path.expanduser(args.source_root))
+        if not os.path.isfile(os.path.join(root, "kernel/sched/sched.h")):
+            parser.error("--source-root must contain kernel/sched/sched.h")
+        os.environ["KEXPLORE_SOURCE_ROOT"] = root
+    if args.source_prefix:
+        os.environ["KEXPLORE_SOURCE_PREFIX"] = args.source_prefix
 
     if args.tutorial and args.tutorial.strip().lower() == "list":
         from .operations.tutorial import tutorials
@@ -157,6 +170,10 @@ def main() -> int:
                 size = sum(p.stat().st_size for p in partials)
                 print(f"the last download was interrupted: {debuginfod.human(size)} "
                       "of a partial file is in the cache. Run:", file=sys.stderr)
+            elif build_id and debuginfod.is_cached(build_id):
+                print("debug info is cached, but drgn could not load it; "
+                      "the download is not the problem.", file=sys.stderr)
+                return 1
             else:
                 print("nothing is cached: the fetch never completed. Run:",
                       file=sys.stderr)
@@ -181,11 +198,16 @@ def main() -> int:
         # host kernel, not the core.
         source = _probe_source()
         if source is not None:
-            say("source", f"on demand via debuginfod, rooted at "
-                          f"{source.source_prefix}")
+            if source.local_root is not None:
+                installed_version = os.environ.get("KEXPLORE_INSTALLED_SOURCE_VERSION")
+                detail = (f"setup-installed revision {installed_version}" if installed_version
+                          else "user-supplied; revision not verified")
+                say("source", f"local tree: {source.local_root} ({detail})")
+            else:
+                say("source", f"on demand via debuginfod, rooted at {source.source_prefix}")
         else:
             say("source", "unavailable for this build; struct documentation "
-                          "and the 's' key are disabled")
+                          "and source browsing are unavailable")
 
     from .tui.app import Explorer
 

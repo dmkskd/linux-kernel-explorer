@@ -42,8 +42,7 @@ provision:
     # Optional: the "measure" groups need these. Remove if not wanted.
     dnf install -y bpftrace bcc-tools perf || true
 
-    # Fedora publishes kernel DWARF and source through debuginfod rather than a
-    # kernel-debuginfo package, so this is required, not a convenience.
+    # Use automatic DWARF and matching source downloads for this lab.
     mkdir -p /etc/profile.d
     cat > /etc/profile.d/debuginfod.sh <<'EOF'
     export DEBUGINFOD_URLS="https://debuginfod.fedoraproject.org/"

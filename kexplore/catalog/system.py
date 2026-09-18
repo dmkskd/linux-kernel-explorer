@@ -12,6 +12,7 @@ that produced it.
 from __future__ import annotations
 
 import drgn
+import platform
 from drgn import Program
 from drgn.helpers.linux.cpumask import num_online_cpus, num_possible_cpus
 from drgn.helpers.linux.mm import PFN_PHYS, totalram_pages
@@ -66,6 +67,14 @@ def _uts(prog: Program, field: str) -> str:
 
 
 def overview(prog: Program):
+    if prog.flags & drgn.ProgramFlags.IS_LIVE:
+        try:
+            distribution = platform.freedesktop_os_release().get("PRETTY_NAME", "unknown")
+        except OSError:
+            distribution = "unknown (/etc/os-release unavailable)"
+        yield Fact("distribution", distribution,
+                   "Userspace distribution from os-release in the environment running kexplore; "
+                   "containers may use a different distribution from the kernel host.")
     yield Fact("kernel release", _uts(prog, "release"), "init_uts_ns.name.release")
     yield Fact("architecture", _uts(prog, "machine"), "init_uts_ns.name.machine")
     yield Fact("build", _uts(prog, "version"), "init_uts_ns.name.version")

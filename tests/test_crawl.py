@@ -44,7 +44,8 @@ def visit(label, obj, ctx, failures, depth):
         failures.append((label, f"{type(exc).__name__}: {exc}"))
         return
 
-    # Link expansion traps its own errors and reports them as an error row.
+    # Link expansion traps its own errors and reports them as an error row --
+    # both in this frame's rows and, below, in what a followed row expands to.
     for row in frame.rows:
         if row.kind == "error":
             failures.append((f"{label} › {row.name}", "link raised"))
@@ -70,6 +71,9 @@ def visit(label, obj, ctx, failures, depth):
         try:
             if row.expand is not None:
                 sub = row.expand()
+                for subrow in sub:
+                    if subrow.kind == "error":
+                        failures.append((f"{label} › {row.name}", subrow.name))
                 for item in sub[:1]:
                     if item.obj is not None:
                         visit(f"{label} › {row.name}", deref(item.obj), ctx,
