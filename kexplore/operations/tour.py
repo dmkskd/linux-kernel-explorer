@@ -34,6 +34,10 @@ class TourStep:
     action: str
     commentary: str
     userspace: str = ""
+    # A command the viewer runs themselves to create what the step describes.
+    # Nothing in kexplore runs it: a walkthrough that changed the machine it is
+    # describing would be measuring its own work.
+    condition: str = ""
     structures: Resolver | None = None
     doc: str = ""
     highlight_field: str = ""
@@ -1450,6 +1454,316 @@ def _build_eevdf_scheduler_steps(prog: Program | None) -> list[TourStep]:
 # ------------------------------------------------------------- Tour Registry
 
 
+
+# ------------------------------------------- Time accounting Tour Builders
+
+
+def _is_explorer(task) -> bool:
+    """Whether this task belongs to a kexplore process.
+
+    Another instance of the explorer is still the explorer, so the pid of this
+    one is not enough. The argv of the thread group leader names it.
+    """
+    from drgn.helpers.linux.mm import cmdline
+
+    leader = ct.safe(lambda: task.group_leader, None)
+    argv = ct.safe(lambda: cmdline(leader), None) if leader is not None else None
+    return bool(argv) and any(b"kexplore" in arg for arg in argv)
+
+
+def _find_accounting_task(prog: Program | None):
+    """A task whose scheduler counters are worth reading.
+
+    The helper in tests/helpers/cpu_contention.py renames its children, so
+    prefer one of those. Without it, take the userspace task with the largest
+    run_delay, which is the best this machine has to offer.
+    """
+    if prog is None:
+        return None
+    try:
+        import os
+
+        from drgn.helpers.linux.pid import find_task, for_each_task
+
+        # kexplore's own threads are the busiest userspace tasks on an idle
+        # machine, and a walkthrough of the explorer inspecting itself explains
+        # nothing about the machine it is attached to.
+        self_tgid = os.getpid()
+        best = None
+        best_delay = -1
+        for task in for_each_task(prog):
+            comm = ct.safe(lambda: task.comm.string_().decode(), "")
+            if comm == "kexplore-spin":
+                return task
+            if ct.safe(lambda: task.tgid.value_(), 0) == self_tgid:
+                continue
+            if _is_explorer(task):
+                continue
+            if not ct.safe(lambda: task.mm.value_(), 0):
+                continue  # kernel threads: their blocked time is idling
+            delay = ct.safe(lambda: task.sched_info.run_delay.value_(), 0)
+            if delay > best_delay:
+                best, best_delay = task, delay
+        return best or find_task(prog, 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _build_time_accounting_steps(prog: Program | None) -> list[TourStep]:
+    task = _find_accounting_task(prog)
+    comm = ct.safe(lambda: task.comm.string_().decode(), "target") if task else "target"
+    pid = ct.safe(lambda: task.pid.value_(), 1) if task else 1
+
+
+    def _resolve_task(p: Program):
+        t = _find_accounting_task(p)
+        if t:
+            yield f"{ct.safe(lambda: t.pid.value_(), 0)} {ct.safe(lambda: t.comm.string_().decode(), '?')}", t
+
+    def _resolve_sched_info(p: Program):
+        t = _find_accounting_task(p)
+        if t:
+            yield f"{comm} sched_info", t.sched_info.address_of_()
+
+    def _resolve_se(p: Program):
+        t = _find_accounting_task(p)
+        if t:
+            yield f"{comm} sched_entity", t.se.address_of_()
+
+    def _resolve_stats(p: Program):
+        t = _find_accounting_task(p)
+        if t:
+            yield f"{comm} sched_statistics", t.stats.address_of_()
+
+    def _resolve_cgroup(p: Program):
+        t = _find_accounting_task(p)
+        if t:
+            cg = ct.safe(lambda: t.cgroups.dfl_cgrp, None)
+            if cg is not None and cg.value_():
+                name = ct.safe(lambda: cg.kn.name.string_().decode(), "/")
+                yield f"cgroup {name}", cg
+
+    def _resolve_psi(p: Program):
+        t = _find_accounting_task(p)
+        cg = ct.safe(lambda: t.cgroups.dfl_cgrp, None) if t else None
+        group = ct.safe(lambda: cg.psi, None) if cg is not None else None
+        if group is not None and group.value_():
+            name = ct.safe(lambda: cg.kn.name.string_().decode(), "/")
+            yield f"pressure of {name}", group
+        else:
+            yield "pressure of the whole machine", p["psi_system"].address_of_()
+
+    def _resolve_rq(p: Program):
+        from ..catalog.links import task_rq
+
+        t = _find_accounting_task(p)
+        if t:
+            rq = ct.safe(lambda: task_rq(t), None)
+            if rq is not None:
+                yield f"runqueue of cpu {ct.safe(lambda: rq.cpu.value_(), 0)}", rq
+
+    return [
+        TourStep(
+            title="Starting screen: kexplore entry points",
+            action="kexplore › what is running right now",
+            commentary=(
+                f"The walkthrough begins at the task_struct for '{comm}'. ps "
+                "reports a task as R whether it is executing or queued on a "
+                "runqueue. The kernel counts the two separately, along with the "
+                "time the task spends blocked."
+            ),
+            userspace="nproc; uptime",
+            structures=_resolve_home,
+            highlight_field="what is running right now",
+            action_field="what is running right now",
+            value_fields=("CPUs", "load average"),
+            insight="Running, runnable and blocked are counted separately.",
+            flow_label="kexplore",
+        ),
+        TourStep(
+            title=f"The task under inspection ({comm}, PID {pid})",
+            action=f"process › {pid} {comm}",
+            commentary=(
+                "__state is the task's current state, the field ps reads to print "
+                "R for TASK_RUNNING, S for interruptible sleep and D for "
+                "uninterruptible sleep. TASK_RUNNING covers two cases: on a CPU, or "
+                "queued on a runqueue. psi_flags "
+                "distinguishes the two: TSK_RUNNING alone indicates a queued task, "
+                "TSK_RUNNING with TSK_ONCPU a task executing. psi_flags is 0 in "
+                "interruptible sleep, since pressure accounting records only I/O "
+                "and memory stalls."
+            ),
+            userspace=f"ps -o pid,stat,comm -p {pid}",
+            structures=_resolve_task,
+            highlight_field="",
+            action_field="",
+            value_fields=("__state", "comm", "psi_flags"),
+            insight="R means runnable: on a CPU, or queued for one.",
+            flow_label="task_struct",
+        ),
+        TourStep(
+            title="CPU time charged to the task (utime and stime)",
+            action=f"{pid} {comm} › se",
+            commentary=(
+                "utime and stime are the task's CPU time in user mode and in "
+                "kernel mode. ps reports their sum as TIME. se is the scheduler's "
+                "own state for this task."
+            ),
+            userspace=f"ps -o pid,time,comm -p {pid}",
+            structures=_resolve_task,
+            highlight_field="se",
+            action_field="se",
+            value_fields=("utime", "stime"),
+            insight="utime and stime are the CPU time the task was charged.",
+            flow_label="task_struct",
+        ),
+        TourStep(
+            title="Scheduler accounting (struct sched_entity)",
+            action="task_struct › se",
+            commentary=(
+                "sum_exec_runtime is the task's total CPU time, updated by the "
+                "scheduler from the runqueue clock. utime and stime hold the same "
+                "CPU time, updated instead by the clock interrupt, which charges "
+                "each tick to the task it interrupts. vruntime advances with "
+                "sum_exec_runtime, scaled by the task's weight."
+            ),
+            userspace=f"awk '{{print $14, $15}}' /proc/{pid}/stat  # ticks, not ns",
+            structures=_resolve_se,
+            highlight_field="sum_exec_runtime",
+            action_field="sum_exec_runtime",
+            value_fields=("sum_exec_runtime", "nr_migrations", "vruntime"),
+            insight="utime plus stime and sum_exec_runtime measure the same time.",
+            flow_label="sched_entity",
+        ),
+        TourStep(
+            title="Context switches, voluntary and involuntary",
+            action=f"{pid} {comm} › sched_info",
+            commentary=(
+                "nvcsw counts the switches where the task gave up the CPU, nivcsw "
+                "the switches where the scheduler took the CPU away with work left. "
+                "sched_info holds how long the task then waited for a CPU again."
+            ),
+            userspace=f"grep ctxt_switches /proc/{pid}/status",
+            structures=_resolve_task,
+            highlight_field="sched_info",
+            action_field="sched_info",
+            value_fields=("nvcsw", "nivcsw"),
+            insight="Voluntary switches indicate blocking, involuntary ones contention.",
+            flow_label="task_struct",
+        ),
+        TourStep(
+            title="Time spent runnable but not running (struct sched_info)",
+            action="sched_info › runqueue",
+            commentary=(
+                "run_delay is the total time the task was queued without a CPU, "
+                "pcount the number of times it was queued, max_run_delay the longest "
+                "single wait. /proc/<pid>/schedstat prints run_delay as its second "
+                "field while kernel.sched_schedstats is set."
+            ),
+            userspace=f"cat /proc/{pid}/schedstat; sysctl kernel.sched_schedstats",
+            condition="for i in $(seq $(( $(nproc) * 2 ))); do yes >/dev/null & done"
+                      "   # pkill yes to stop",
+            structures=_resolve_sched_info,
+            highlight_field="run_delay",
+            action_field="runqueue",
+            value_fields=("run_delay", "pcount", "max_run_delay"),
+            insight="run_delay measures queueing, not work.",
+            flow_label="sched_info",
+        ),
+        TourStep(
+            title="The runqueue the task is queued on (struct rq)",
+            action="task_struct › runqueue",
+            commentary=(
+                "struct rq is the runqueue of one CPU. nr_running counts the "
+                "runnable tasks on this runqueue and curr points at the task "
+                "executing. The other runnable tasks are accumulating run_delay."
+            ),
+            userspace=f"ps -o pid,psr,comm -p {pid}; ps -eo psr,comm | sort | uniq -c",
+            condition="for i in $(seq $(( $(nproc) * 2 ))); do yes >/dev/null & done"
+                      "   # pkill yes to stop",
+            structures=_resolve_rq,
+            highlight_field="nr_running",
+            action_field="nr_running",
+            value_fields=("nr_running", "curr", "clock"),
+            insight="task_rq() reaches the runqueue in one dereference.",
+            flow_label="rq",
+        ),
+        TourStep(
+            title="Waiting and sleeping totals (struct sched_statistics)",
+            action="task_struct › stats",
+            commentary=(
+                "wait_sum is time on a runqueue, sum_block_runtime time blocked, "
+                "and nr_wakeups the number of times the task was made runnable again. "
+                "wait_sum and sched_info.run_delay both count runqueue time, from "
+                "different update sites, and can disagree."
+            ),
+            userspace=f"cat /proc/{pid}/sched",
+            structures=_resolve_stats,
+            highlight_field="wait_sum",
+            action_field="wait_sum",
+            value_fields=("wait_sum", "wait_max", "sum_block_runtime", "nr_wakeups"),
+            insight="Runqueue time and blocked time are counted separately.",
+            flow_label="stats",
+        ),
+        TourStep(
+            title="The cgroup the task belongs to (struct cgroup)",
+            action="task_struct › cgroup",
+            commentary=(
+                "task->cgroups is a css_set, the per-controller states this task "
+                "holds, and dfl_cgrp is the cgroup they belong to. A task inherits the "
+                "set at fork and changes it only when a pid is written into another "
+                "cgroup's cgroup.procs."
+            ),
+            userspace=f"cat /proc/{pid}/cgroup",
+            structures=_resolve_cgroup,
+            highlight_field="pressure (psi_group)",
+            action_field="pressure (psi_group)",
+            value_fields=("= name", "tasks"),
+            insight="Cgroup membership is inherited at fork and changed by a write.",
+            flow_label="cgroup",
+        ),
+        TourStep(
+            title="Pressure for that cgroup (struct psi_group)",
+            action="cgroup › pressure (psi_group)",
+            commentary=(
+                "struct psi_group holds pressure for a cgroup: the share of wall "
+                "clock over 10, 60 and 300 seconds during which one of its tasks was "
+                "stalled (some) or none could proceed (full). Each update also "
+                "propagates through parent to psi_system, which /proc/pressure "
+                "prints."
+            ),
+            userspace="cat /proc/pressure/cpu; cat /proc/pressure/io",
+            structures=_resolve_psi,
+            highlight_field="",
+            action_field="",
+            value_fields=("= pressure", "= stalled for"),
+            insight="run_delay is per task; pressure is per cgroup.",
+            flow_label="psi_group",
+        ),
+        TourStep(
+            title="Delay accounting (task->delays)",
+            action=f"{pid} {comm} › delays",
+            commentary=(
+                "task->delays is NULL unless kernel.task_delayacct was set before "
+                "the task was forked: the structure is allocated at fork, so setting "
+                "the sysctl does not populate it for processes already running. It "
+                "holds separate totals for block I/O, page reclaim, swap-in, "
+                "thrashing and hardirq time, which userspace reads through netlink "
+                "taskstats."
+            ),
+            userspace="sysctl kernel.task_delayacct",
+            condition="sysctl -w kernel.task_delayacct=1 && sleep 60 &"
+                      "   # delays is allocated for tasks forked after this",
+            structures=_resolve_task,
+            highlight_field="",
+            action_field="",
+            value_fields=("delays",),
+            insight="delays is allocated only while task_delayacct is set.",
+            flow_label="delays",
+        ),
+    ]
+
+
 PROCESS_ARCHITECTURE = GuidedTour(
     key="process_architecture",
     label="Multi-threaded Process Architecture",
@@ -1515,12 +1829,26 @@ EEVDF_SCHEDULER = GuidedTour(
     video_title="Linux Scheduler and Process Wait Chains (Deep Linux)",
 )
 
+TIME_ACCOUNTING = GuidedTour(
+    key="time_accounting",
+    label="Where a Process's Time Goes",
+    category="sched",
+    doc=(
+        "ps and top report CPU time. The kernel also records how long a task "
+        "waited on a runqueue for a CPU and how long it was blocked. Live tour "
+        "through CPU time, runqueue time and blocked time, the runqueue behind "
+        "the waiting, and the PSI pressure of the cgroup."
+    ),
+    builder=_build_time_accounting_steps,
+)
+
 TOURS: list[GuidedTour] = [
     PROCESS_ARCHITECTURE,
     PROCESS_LIFECYCLE,
     USER_MEMORY_TYPES,
     PAGE_TABLE_TRANSLATION,
     EEVDF_SCHEDULER,
+    TIME_ACCOUNTING,
 ]
 TUTORIALS = TOURS
 

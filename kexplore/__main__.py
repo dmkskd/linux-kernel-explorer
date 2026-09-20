@@ -5,10 +5,60 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import textwrap
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .core.source import KernelSource
+
+
+def print_script(key: str, tutorials) -> int:
+    """Print one tutorial's script: the steps as text, with no UI and no kernel.
+
+    The steps are built without a Program, so the labels are the generic ones
+    rather than the live process this machine happens to be running. That is
+    what a script is for: reading and correcting the sequence before it is run.
+    """
+    if key.lower() == "list":
+        for tutorial in tutorials:
+            print(f"  {tutorial.key:<25} {tutorial.label}")
+        return 0
+    match = next((t for t in tutorials if t.key == key), None)
+    if match is None:
+        print(f"no tutorial with key '{key}'. Keys:", file=sys.stderr)
+        for tutorial in tutorials:
+            print(f"  {tutorial.key}", file=sys.stderr)
+        return 1
+
+    steps = match.steps(None)
+    print(match.label)
+    print(f"  category  {match.category}")
+    if match.video_title:
+        print(f"  video     {match.video_title}")
+    if match.video_url:
+        print(f"            {match.video_url}")
+    print(f"  steps     {len(steps)}")
+    print()
+    width = 10
+    for index, step in enumerate(steps, start=1):
+        print(f"{index:>3}. {step.title}")
+        print(f"     {'path'.ljust(width)}{step.action}")
+        action_field = step.get_action_field()
+        if action_field:
+            print(f"     {'action'.ljust(width)}[ENTER] {action_field}")
+        values = step.get_value_fields()
+        if values:
+            print(f"     {'value'.ljust(width)}{', '.join(values)}")
+        if step.userspace:
+            print(f"     {'userspace'.ljust(width)}{step.userspace}")
+        if getattr(step, "condition", ""):
+            print(f"     {'run it'.ljust(width)}{step.condition}")
+        lines = textwrap.wrap(" ".join(step.commentary.split()), width=66)
+        for position, line in enumerate(lines):
+            label = "says" if position == 0 else ""
+            print(f"     {label.ljust(width)}{line}")
+        print()
+    return 0
 
 
 def main() -> int:
@@ -49,6 +99,13 @@ def main() -> int:
         default=None,
     )
     parser.add_argument(
+        "--script",
+        metavar="TUTORIAL",
+        help="print a tutorial's script and exit, without attaching to the kernel "
+             "(use '--script list' for the keys)",
+        default=None,
+    )
+    parser.add_argument(
         "--source-root", help="matching local kernel source tree (optional)", default=None
     )
     parser.add_argument(
@@ -62,6 +119,10 @@ def main() -> int:
         os.environ["KEXPLORE_SOURCE_ROOT"] = root
     if args.source_prefix:
         os.environ["KEXPLORE_SOURCE_PREFIX"] = args.source_prefix
+
+    if args.script:
+        from .operations.tutorial import tutorials
+        return print_script(args.script.strip(), tutorials())
 
     if args.tutorial and args.tutorial.strip().lower() == "list":
         from .operations.tutorial import tutorials

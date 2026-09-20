@@ -783,6 +783,29 @@ def _mapping_vmas(page: Object) -> Iterator[Object]:
     )
 
 
+def _next_slab_cache(cache: Object):
+    """The next kmem_cache on the global slab_caches list.
+
+    ``list`` sits part-way into the struct, so the pointer it yields has to be
+    walked back to the cache containing it. Casting it straight to a
+    kmem_cache lands that many bytes into the next cache, and every field read
+    afterwards is off by the same amount -- which reads as plausible numbers
+    and then faults when something walks the cache's slabs.
+    """
+    return container_of(cache.list.next, "struct kmem_cache", "list")
+
+
+def _has_next_slab_cache(cache: Object) -> bool:
+    """False for the last cache, whose next is the list head itself.
+
+    The head is a bare list_head in the kernel's data, not a kmem_cache, and
+    container_of on it produces an object that is not one either.
+    """
+    head = ct.safe(lambda: cache.prog_["slab_caches"].address_of_().value_(), 0)
+    following = ct.safe(lambda: cache.list.next.value_(), 0)
+    return bool(following) and following != head
+
+
 def _page_in_use(page: Object) -> bool:
     """Whether this frame is allocated.
 
@@ -1292,6 +1315,92 @@ def _shm_pages(segment: Object) -> str:
     return f"{size} bytes, {(size + 4095) // 4096} page(s) at 4K"
 
 
+
+def _task_cgroup(task: Object) -> Object | None:
+    """The cgroup v2 node this task is accounted in.
+
+    ``task->cgroups`` is a css_set, the set of per-controller states a task
+    points at; ``dfl_cgrp`` is the unified hierarchy node the whole set belongs
+    to. Tasks in the same cgroups share one css_set.
+    """
+    return ct.safe(lambda: task.cgroups.dfl_cgrp, None)
+
+
+def _cgroup_name(cgrp: Object) -> str:
+    name = ct.safe(lambda: cgrp.kn.name.string_().decode("utf-8", "replace"), "")
+    return name or "/"
+
+
+def _cgroup_tasks(cgrp: Object):
+    """Tasks whose css_set points at this cgroup."""
+    from drgn.helpers.linux.pid import for_each_task
+
+    for task in for_each_task(cgrp.prog_):
+        current = ct.safe(lambda: task.cgroups.dfl_cgrp.value_(), 0)
+        if current == cgrp.value_():
+            yield task
+
+
+def _cgroup_parent(cgrp: Object) -> Object | None:
+    parent = ct.safe(lambda: cgrp.self.parent, None)
+    if parent is None or not parent.value_():
+        return None
+    return ct.safe(lambda: parent.cgroup, None)
+
+
+# psi_group.avg and total are indexed by resource state. The enum is not in
+# DWARF on every build, so the names are listed here in kernel order.
+PSI_STATES = (
+    "io some", "io full", "mem some", "mem full", "cpu some", "cpu full", "irq full",
+)
+
+# psi stores its averages as fixed point, the same scaling the load average
+# uses: the printed percentage is the stored value divided by 2048. Verified
+# against /proc/pressure read in the same second.
+PSI_FIXED_1 = 2048
+
+
+def _psi_pressure(group: Object) -> str:
+    """The three averages per state, as the pressure files print them."""
+    parts = []
+    for index, name in enumerate(PSI_STATES):
+        avgs = ct.safe(
+            lambda: tuple(group.avg[index][j].value_() for j in range(3)), None
+        )
+        if not avgs or not any(avgs):
+            continue
+        rendered = "/".join(f"{value / PSI_FIXED_1:.2f}" for value in avgs)
+        parts.append(f"{name} {rendered}")
+    return ", ".join(parts) + " (avg10/60/300 %)" if parts else "no pressure recorded"
+
+
+def _psi_totals(group: Object) -> str:
+    """Accumulated stall time per state, in the units the files print."""
+    parts = []
+    for index, name in enumerate(PSI_STATES):
+        total = ct.safe(lambda: group.total[0][index].value_(), 0)
+        if total:
+            parts.append(f"{name} {total / 1_000_000:.0f} ms")
+    return ", ".join(parts) if parts else "nothing stalled yet"
+
+
+
+def _sched_info_task(info: Object) -> Object | None:
+    """The task this sched_info is embedded in.
+
+    sched_info holds counters and no pointers, so the way back to the task is
+    the address of the member itself.
+    """
+    from drgn import container_of
+
+    return ct.safe(lambda: container_of(info, "struct task_struct", "sched_info"), None)
+
+
+def _sched_info_rq(info: Object) -> Object | None:
+    task = _sched_info_task(info)
+    return ct.safe(lambda: task_rq(task), None) if task is not None else None
+
+
 LINKS: dict[str, list[Link]] = {
     "task_struct": [
         Link("threads", "Tasks sharing task->signal and task->tgid (thread group).", _threads,
@@ -1379,6 +1488,10 @@ LINKS: dict[str, list[Link]] = {
              lambda t: t.signal,
              origin="task->signal",
              userspace="grep -E 'Sig|Shd' /proc/<pid>/status"),
+        Link("cgroup", "The cgroup this task is accounted in.", _task_cgroup,
+             applies=lambda t: ct.safe(lambda: t.cgroups.dfl_cgrp.value_(), 0) != 0,
+             origin="task->cgroups->dfl_cgrp (the css_set's unified hierarchy node)",
+             userspace="cat /proc/<pid>/cgroup"),
         Link("fs (cwd/root)", "fs_struct: working directory and root.", lambda t: t.fs,
              origin="task->fs",
              userspace="ls -l /proc/<pid>/cwd /proc/<pid>/root"),
@@ -1441,6 +1554,35 @@ LINKS: dict[str, list[Link]] = {
              lambda s: s.curr_target, applies=lambda s: s.curr_target.value_() != 0,
              origin="signal->curr_target"),
     ],
+    "sched_info": [
+        Link("task", "The task these counters belong to.", _sched_info_task,
+             applies=lambda i: _sched_info_task(i) is not None,
+             origin="container_of(sched_info, struct task_struct, sched_info)"),
+        Link("runqueue", "The runqueue this task is queued on.", _sched_info_rq,
+             applies=lambda i: _sched_info_rq(i) is not None,
+             origin="container_of() back to the task, then task_rq()",
+             userspace="ps -o pid,psr,comm -p <pid>"),
+    ],
+    "cgroup": [
+        Link("pressure (psi_group)",
+             "Stall time accounted to the tasks in this cgroup and below it.",
+             lambda c: c.psi,
+             applies=lambda c: ct.safe(lambda: c.psi.value_(), 0) != 0,
+             origin="cgroup->psi; the root cgroup has none, its pressure is psi_system",
+             userspace="cat /sys/fs/cgroup/<path>/cpu.pressure"),
+        Link("tasks", "Tasks whose css_set points at this cgroup.", _cgroup_tasks,
+             origin="scans every task for cgroups->dfl_cgrp == this cgroup",
+             userspace="cat /sys/fs/cgroup/<path>/cgroup.procs"),
+        Link("parent", "The cgroup this one is nested in.", _cgroup_parent,
+             applies=lambda c: _cgroup_parent(c) is not None,
+             origin="cgroup->self.parent->cgroup"),
+    ],
+    "psi_group": [
+        Link("parent", "The group this one's stalls are also counted in.",
+             lambda g: g.parent,
+             applies=lambda g: ct.safe(lambda: g.parent.value_(), 0) != 0,
+             origin="psi_group->parent, ending at psi_system"),
+    ],
     "mm_struct": [
         Link("VMAs", "vm_area_struct instances in the address space's maple tree.",
              _mm_vmas,
@@ -1478,7 +1620,8 @@ LINKS: dict[str, list[Link]] = {
             userspace="slabtop, or cat /proc/slabinfo",
         ),
         Link("next cache", "The following entry in the global slab_caches list.",
-             lambda c: cast("struct kmem_cache *", c.list.next),
+             _next_slab_cache,
+             applies=_has_next_slab_cache,
              origin="cache->list.next, container_of",
              userspace="cat /proc/slabinfo"),
     ],
@@ -2113,6 +2256,15 @@ LINKS: dict[str, list[Link]] = {
 
 
 DERIVED: dict[str, list[Derived]] = {
+    "cgroup": [
+        Derived("= name", "The directory name under /sys/fs/cgroup.",
+                lambda c: f"{_cgroup_name(c)} (level {ct.safe(lambda: c.level.value_(), 0)})"),
+    ],
+    "psi_group": [
+        Derived("= pressure", "The averages the pressure files print.", _psi_pressure),
+        Derived("= stalled for", "Accumulated stall time per state.", _psi_totals),
+    ],
+
     "kern_ipc_perm": [
         Derived("= key", "What a process passes to msgget/semget/shmget.", _ipc_key),
         Derived("= owner", "Who owns this object, and who created it.", _ipc_owner),

@@ -236,12 +236,13 @@ async def test_tui_initial_tutorial(prog: drgn.Program) -> None:
         check(app.active_tutorial.tutorial.key == "user_memory_types", f"loaded tutorial: {app.active_tutorial.tutorial.key}")
         check(app.active_tutorial.current_idx == 0, "initial_tutorial landed on step 0 (landing page)")
         check("The route" not in str(landing.render()), "initial_tutorial landing omits the route table")
-        check("Tutorial steps" in str(landing.render()), "initial_tutorial landing keeps the per-step itinerary")
+        check("Itinerary" in str(landing.render()), "initial_tutorial landing keeps the per-step itinerary")
         check(len(app.active_tutorial.steps) == 10, f"initial_tutorial loaded 10 steps: {len(app.active_tutorial.steps)}")
         check("Types of User Memory" in str(landing.render()), "landing page displays real video title")
         check("https://youtu.be/6dwzZEFEgWE" in str(landing.render()), "landing page displays real YouTube link")
-        check("Scroll down" in str(landing.render()), "landing page has scroll down visual cue")
-        check("End of itinerary" in str(landing.render()), "landing page has end of itinerary cue")
+        check("PgDn" in str(landing.render()), "landing page says how to scroll the itinerary")
+        check("Begin Step 1" in str(landing.render()), "landing page closes with the launch bar")
+        check("[r]" in str(landing.render()), "landing page says [r] shows where you are")
 
         # Verify #path display on step 0: visible, clean text without raw markup tags
         path = app.query_one("#path", Static)
@@ -268,7 +269,7 @@ async def test_tui_initial_tutorial(prog: drgn.Program) -> None:
         check(banner.display is True, "step 1 banner displayed on Enter")
         check("Step 1 of 10" in str(banner.render()), "banner shows step 1 of 10")
         check(table.display is True, "fields table displayed on step 1")
-        check(path.display is False, "step 1: #path hidden to give banner breathing room")
+        check(path.display is True, "step 1: #path names the object the step stands on")
 
         # Step back to landing page with 'p'
         await pilot.press("p")
@@ -281,7 +282,7 @@ async def test_tui_initial_tutorial(prog: drgn.Program) -> None:
         await pilot.press("space")
         await pilot.pause()
         check(app.active_tutorial.current_idx == 1, "pressing Space on landing page moved to step 1")
-        check(path.display is False, "step 1: #path hidden after space advance")
+        check(path.display is True, "step 1: #path shows the breadcrumb after space advance")
 
         # Step back to landing page with 'p'
         await pilot.press("p")
@@ -292,7 +293,7 @@ async def test_tui_initial_tutorial(prog: drgn.Program) -> None:
         await pilot.press("n")
         await pilot.pause()
         check(app.active_tutorial.current_idx == 1, "pressing 'n' on landing page moved to step 1")
-        check(path.display is False, "step 1: #path hidden after 'n' advance")
+        check(path.display is True, "step 1: #path shows the breadcrumb after 'n' advance")
 
 
 async def test_tui_auto_and_highlights(prog: drgn.Program) -> None:

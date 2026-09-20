@@ -213,7 +213,7 @@ When launched (via `Enter` on a tutorial or `--tutorial <name>` from the CLI), t
 
 ---
 
-## 8. Video companion alignment and tutorial gap analysis
+## 8. What each video teaches, and what its tutorial inspects
 
 A review comparing what the Deep Linux video tutorials teach against what kexplore's guided tutorials currently inspect:
 
@@ -265,12 +265,39 @@ A review comparing what the Deep Linux video tutorials teach against what kexplo
 
 ---
 
-## 9. Proposed alignment plans for tutorials
+## 9. Step lists for the tutorials that do not match their video
 
-To align kexplore's guided tutorials directly with the Deep Linux video companion curriculum, the following step-by-step itineraries can be implemented:
+Each list below covers what its companion video covers, step by step.
 
-### Plan 1: User memory types (`USER_MEMORY_TYPES`)
-Aligned with: *Linux Memory Management: Types of User Memory* (`6dwzZEFEgWE`)
+### Status
+
+Builders live in `kexplore/operations/tour.py`; every registered tutorial is in
+`TOURS` there.
+
+| Plan | Tutorial | Builder | Status |
+| :--- | :--- | :--- | :--- |
+| 1 | `USER_MEMORY_TYPES` | `_build_user_memory_steps` | **Done.** 10 live steps, accepted 2026-09-17. |
+| 2 | `PAGE_TABLE_TRANSLATION` | `_build_page_table_steps` | **Done.** 9 live steps, built as a live walk rather than as plan 2 below. |
+| 3 | `EEVDF_SCHEDULER` | `_build_eevdf_scheduler_steps` | Registered, still the scheduler tour that predates section 8.3. |
+| 4 | `PROCESS_ARCHITECTURE` | `_build_process_architecture_steps` | Registered, still the thread-group tour, not the `execve` path. A scene by scene script for the rewrite is in [tutorial-scripts.md](tutorial-scripts.md). |
+| 5 | `PROCESS_LIFECYCLE` | `_build_process_lifecycle_steps` | Registered, still the namespaces tour, not the ELF format. |
+| 6 | `VMSCAN_RECLAIM` | none | Not started. |
+
+What the two finished memory tutorials do and do not cover:
+
+- Plan 1 landed steps 1 to 5, 8 and 9 (address space, text, shared library,
+  heap, stack, THP, `rss_stat`). The shared memory steps 6 and 7 (tmpfs, POSIX
+  `shm_open`, `memfd_create`, System V) were not wired up: `_resolve_shm` and
+  `_resolve_memfd` exist in `tour.py` but no step calls them.
+- Plan 2's itinerary below was not the one built. The implemented tutorial walks
+  home, `task_struct`, `mm_struct.pgd`, VMAs, one VMA, its resident pages, the
+  `struct page`, and the zone. Missing from the plan: the 9-bit index
+  decomposition, per-level descent rows, and the hardware PTE flag decode
+  (Present, Dirty, Accessed, NX). Steps 8 and 9 still end on `struct page` and
+  `struct zone`, the two the VMScan proposal in section 10 wants to own.
+
+### Plan 1: User memory types (`USER_MEMORY_TYPES`) -- implemented, minus steps 6 and 7
+Companion video: *Linux Memory Management: Types of User Memory* (`6dwzZEFEgWE`)
 
 1. **Address Space Overview (`mm_struct`)**: Inspect user address space bounds (`start_code..end_code`, `start_brk..brk`, `start_stack`).
 2. **File-Backed Private Memory (`r-xp` Text Segment)**: Inspect the executable code VMA, verifying `vma->vm_file` points to the on-disk binary and `VM_SHARED` is unset.
@@ -282,8 +309,8 @@ Aligned with: *Linux Memory Management: Types of User Memory* (`6dwzZEFEgWE`)
 8. **Huge Page Memory (Transparent Huge Pages - THP)**: Inspect 2MB-aligned memory regions and Transparent Huge Page indicators in `/proc/<pid>/smaps`.
 9. **Memory Accounting & Working Sets**: Inspect `mm->rss_stat` (`MM_FILEPAGES`, `MM_ANONPAGES`, `MM_SHMEMPAGES`) and correlate with `/proc/<pid>/smaps` (RSS vs PSS).
 
-### Plan 2: Page tables and address translation (`PAGE_TABLE_TRANSLATION`)
-Aligned with: *Linux Memory Management: Page Tables & Address Translation* (`Y2oSY_eenQ4`)
+### Plan 2: Page tables and address translation (`PAGE_TABLE_TRANSLATION`) -- tutorial implemented, this itinerary not
+Companion video: *Linux Memory Management: Page Tables & Address Translation* (`Y2oSY_eenQ4`)
 
 1. **MMU Translation Root (CR3 / TTBR0 Register)**: Inspect `mm->pgd` and the hardware MMU base register loaded upon context switch.
 2. **4-Level Virtual Address Decomposition**: Show how 48-bit virtual addresses split into 9-bit indices for PGD, PUD, PMD, and PTE plus a 12-bit page offset.
@@ -296,7 +323,7 @@ Aligned with: *Linux Memory Management: Page Tables & Address Translation* (`Y2o
 9. **Demand Paging & Page Fault Exception**: Walk through `handle_mm_fault()`, showing how unmapped addresses trigger allocation on first read or write.
 
 ### Plan 3: Scheduler and process wait chains (`EEVDF_SCHEDULER`)
-Aligned with: *Linux Scheduler and Process Wait Chains* (`SdpaIMBOdv4`)
+Companion video: *Linux Scheduler and Process Wait Chains* (`SdpaIMBOdv4`)
 
 1. **Per-CPU Runqueues (`struct rq`)**: Inspect live CPU runqueue structures and currently running task pointers (`rq->curr`).
 2. **Process Execution States (`__state`)**: Inspect `TASK_RUNNING`, interruptible sleep (`TASK_INTERRUPTIBLE`), and uninterruptible sleep (`TASK_UNINTERRUPTIBLE`).
@@ -309,7 +336,7 @@ Aligned with: *Linux Scheduler and Process Wait Chains* (`SdpaIMBOdv4`)
 9. **Live Scheduler Telemetry (bpftrace)**: Run live tracing of `sched_switch` and `sched_wakeup` latency to measure runqueue waiting delays.
 
 ### Plan 4: How Linux runs a program (`PROCESS_ARCHITECTURE`)
-Aligned with: *How Linux Runs a Program* (`9jNWc8RUFvs`)
+Companion video: *How Linux Runs a Program* (`9jNWc8RUFvs`)
 
 1. **Process Creation to Execution (`clone` to `execve`)**: The transition from fork/clone duplication to image replacement via `do_execveat_common()`.
 2. **Binary Format Inspection & ELF Magic**: How the kernel matches magic bytes (`7f 45 4c 46`) to register the `elf_format` binary handler.
@@ -322,7 +349,7 @@ Aligned with: *How Linux Runs a Program* (`9jNWc8RUFvs`)
 9. **User Space Entry (`start_thread`)**: Register state configuration setting instruction pointer (`IP`) to the program or interpreter entry point.
 
 ### Plan 5: Linux executable format (`PROCESS_LIFECYCLE`)
-Aligned with: *Inside a Linux Executable File* (`7Bvx5Gd99F0`)
+Companion video: *Inside a Linux Executable File* (`7Bvx5Gd99F0`)
 
 1. **ELF Header (`Elf64_Ehdr`)**: Magic bytes, machine architecture, entry point virtual address, and header offsets.
 2. **Program Headers (`Elf64_Phdr`)**: Segments that describe runtime memory layout (`LOAD`, `DYNAMIC`, `INTERP`, `NOTE`, `GNU_STACK`).
@@ -334,8 +361,8 @@ Aligned with: *Inside a Linux Executable File* (`7Bvx5Gd99F0`)
 8. **String Tables (`.strtab` & `.dynstr`)**: Stored null-terminated strings referenced by symbol names.
 9. **Kernel Loading Interface (`load_elf_binary`)**: Step-by-step kernel code that reads and parses these exact headers into memory.
 
-### Plan 6: Memory reclaim and VMScan (`VMSCAN_RECLAIM`)
-Aligned with: *Linux Memory Management - VMScan* (`tpRlczF0pqw`)
+### Plan 6: Memory reclaim and VMScan (`VMSCAN_RECLAIM`) -- proposed next
+Companion video: *Linux Memory Management - VMScan* (`tpRlczF0pqw`)
 
 1. **System Memory Balance (`/proc/meminfo`)**: Inspect total, free, available, cached, and anonymous memory distribution.
 2. **NUMA Node Root (`struct pglist_data`)**: Navigate into the primary NUMA memory node (`contig_page_data` or `node_data[0]`).

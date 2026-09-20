@@ -320,6 +320,17 @@ def _blk_opf(parent: Object, value: Object) -> str:
     return f"{op} | {flags}"
 
 
+
+# psi_flags on a task: which stall categories it is counted in. The enum is
+# internal to kernel/sched/psi.h and absent from DWARF, so the bits are listed.
+PSI_TASK_FLAGS: tuple[tuple[str, int], ...] = (
+    ("TSK_IOWAIT", 1 << 0),
+    ("TSK_MEMSTALL", 1 << 1),
+    ("TSK_RUNNING", 1 << 2),
+    ("TSK_MEMSTALL_RUNNING", 1 << 3),
+    ("TSK_ONCPU", 1 << 4),
+)
+
 DECODERS: dict[tuple[str, str], Decoder] = {
     ("task_struct", "__state"): Decoder(
         "Task state. TASK_RUNNING is 0; these are #defines, so absent from DWARF.",
@@ -330,6 +341,10 @@ DECODERS: dict[tuple[str, str], Decoder] = {
         _flags(EXIT_STATES, zero="not exited"),
     ),
     ("task_struct", "flags"): Decoder("PF_* per-task flags.", _flags(PF_FLAGS)),
+    ("task_struct", "psi_flags"): Decoder(
+        "What this task currently counts as for pressure accounting.",
+        _flags(PSI_TASK_FLAGS, zero="not stalled"),
+    ),
     ("task_struct", "policy"): Decoder("Scheduling policy.", _lookup(SCHED_POLICIES)),
     ("task_struct", "prio"): Decoder("Effective priority.", _priority),
     ("task_struct", "static_prio"): Decoder("Priority from nice, ignoring boosts.", _priority),

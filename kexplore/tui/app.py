@@ -183,6 +183,7 @@ ACTION_SCREENS: dict[str, frozenset[str]] = {
     "sort": frozenset({"browse"}),
     "sort_reverse": frozenset({"browse"}),
     "refresh": frozenset({"browse"}),
+    "reread": frozenset({"browse", "step"}),
     "userspace": frozenset({"browse"}),
     "graph": frozenset({"browse"}),
     "cycle_view": frozenset({"browse"}),
@@ -208,6 +209,7 @@ KEY_HELP: dict[str, str] = {
     "sort": "sort by the column under the cursor",
     "sort_reverse": "reverse that order",
     "refresh": "read the structure again from the live kernel",
+    "reread": "read the structure again from the live kernel",
     "userspace": "swap the kernel origins for commands that get the same from userspace",
     "cycle_view": "switch the sidebar between structures, operations and walkthroughs",
     "source": "open the kernel source this structure is declared in",
@@ -338,18 +340,41 @@ class TutorialBanner(Static):
         # narration is no longer part of this banner, so the roadmap is the only
         # thing left for the variants to differ over.
         if steps and self.header_variant >= 2:
-            flow_nodes = []
+            # Consecutive steps that stand on the same structure are one stop on
+            # the route: three "task_struct" nodes in a row read as three
+            # different structures.
+            groups: list[tuple[str, list[int]]] = []
             for i, s in enumerate(steps, start=1):
                 name = s.get_flow_label() if hasattr(s, "get_flow_label") else getattr(s, "flow_label", "")
                 if not name:
                     name = s.action.split("›")[-1].strip().split("(")[0].strip()[:14]
-                if i < step_num:
-                    flow_nodes.append(f"[dim green]✓ {safe_escape(name)}[/]")
-                elif i == step_num:
-                    flow_nodes.append(f"[bold bright_yellow]▶ {safe_escape(name)}[/]")
+                if groups and groups[-1][0] == name:
+                    groups[-1][1].append(i)
                 else:
-                    flow_nodes.append(f"[dim]{safe_escape(name)}[/]")
+                    groups.append((name, [i]))
+            flow_nodes = []
+            for name, indices in groups:
+                label = safe_escape(name)
+                if step_num in indices:
+                    # The one place on this screen that says where the reader is,
+                    # so it is painted rather than marked with a character.
+                    flow_nodes.append(f"[bold black on bright_yellow] {label} [/]")
+                elif indices[-1] < step_num:
+                    flow_nodes.append(f"[dim green]✓ {label}[/]")
+                else:
+                    flow_nodes.append(f"[dim]{label}[/]")
             lines.append("   [dim]Flow:[/] " + " [bold dim cyan]──▶[/] ".join(flow_nodes))
+
+        # A step that needs a condition on the machine says which command makes
+        # it, and how to read the frame again afterwards. The viewer runs it:
+        # nothing here does.
+        condition = getattr(step, "condition", "")
+        if condition:
+            lines.append(
+                "   [bold green]Run it yourself:[/] "
+                f"[green]{safe_escape(condition)}[/]   "
+                "[dim]then \\[R] to read the frame again[/]"
+            )
 
         # The narration itself is rendered by TutorialCallout, beside the row it
         # describes. Repeating a shortened form of it here put two accounts of
@@ -373,7 +398,9 @@ _NARRATION_TOKENS = re.compile(
     r"|(?P<perm>\br[-w][-x][ps]\b)"
     r"|(?P<call>\b[a-z_][a-z0-9_]*\(\))"
     r"|(?P<member>\b[a-z][a-z0-9]*_[a-z0-9_]+\b)"
-    r"|(?P<bare>\b(?:mm|brk|pid|tgid|comm|anon|shmem|NULL)\b)"
+    r"|(?P<bare>\b(?:mm|brk|pid|tgid|comm|anon|shmem|NULL"
+    r"|se|utime|stime|vruntime|nvcsw|nivcsw|pcount|curr|stats|delays|cgroup"
+    r"|nr_running)\b)"
 )
 
 _NARRATION_STYLES = {
@@ -510,8 +537,14 @@ class RouteModal(Static):
     kind: str = ""
 
     def show(self, steps: list, current: int, width: int, height: int) -> None:
+        where = (
+            f"  [bold bright_yellow]you are on step {current} of {len(steps)}[/]"
+            if 0 < current <= len(steps)
+            else "  [dim]not started: the landing page is showing[/]"
+        )
         lines = [
-            "  [bold cyan]Walkthrough Review & Route[/]  [dim](r, i or esc closes this)[/]",
+            "  [bold cyan]Walkthrough Review & Route[/]" + where
+            + "  [dim](r, i or esc closes this)[/]",
             "",
         ]
         lines.extend(step_table(steps, current=current))
@@ -621,6 +654,13 @@ class TutorialLanding(VerticalScroll):
     def on_click(self) -> None:
         self.focus()
 
+    def _rule(self, label: str = "", width: int = 78) -> str:
+        """A section divider: a labelled rule when given a label, plain otherwise."""
+        if not label:
+            return "[dim]" + "─" * width + "[/dim]"
+        fill = max(3, width - len(label) - 3)
+        return f"[dim]──[/dim] [bold green]{safe_escape(label)}[/] [dim]" + "─" * fill + "[/dim]"
+
     def update_tutorial(
         self,
         tutorial: GuidedTutorial,
@@ -628,8 +668,12 @@ class TutorialLanding(VerticalScroll):
         is_active: bool = True,
     ) -> None:
         lines: list[str] = []
+        label_w = 11
 
-        # Status badge and header
+        def field(name: str, value: str) -> str:
+            return f"      [dim]{name.ljust(label_w)}[/dim]{value}"
+
+        # ---------------------------------------------------------- header
         status_badge = (
             "[bold white on #15803d] TUTORIAL SELECTED [/]"
             if is_active
@@ -637,82 +681,103 @@ class TutorialLanding(VerticalScroll):
         )
         lines.append(
             f"{status_badge}  [bold white]{safe_escape(tutorial.label)}[/]   "
-            f"[dim cyan]({safe_escape(tutorial.category)})[/]   "
-            f"[bold white on #1e3a8a] {len(steps)} Live Steps [/]"
+            f"[dim cyan]{safe_escape(tutorial.category)}[/] [dim]·[/dim] "
+            f"[bold cyan]{len(steps)} live steps[/]"
         )
         lines.append("")
-
-        # Prominent launch action bar right at top of screen
         if is_active:
             lines.append(
-                "  [bold white on #1e3a8a]  ▶ Press \\[Enter], \\[Space], or \\[n] to Begin Step 1  [/]    "
-                "[bold white on #059669]  \\[a] Auto-Play Walkthrough  [/]    "
-                "[dim]•  \\[r] Review  •  \\[c] Copy Link  •  \\[Esc] Exit[/dim]"
+                "  [bold white on #1e3a8a]  ▶ \\[Enter] Begin Step 1  [/]  "
+                "[bold white on #059669]  \\[a] Auto-Play  [/]  "
+                "[dim]\\[r] Review: where you are   •   \\[c] Copy link   •   \\[Esc] Exit[/dim]"
             )
         else:
             lines.append(
-                "  [bold white on #0284c7]  👉 Press \\[Enter] to Select & Launch Tutorial  [/]    "
-                "[bold white on #059669]  \\[a] Auto-Play  [/]    "
-                "[dim]•  \\[r] Review  •  \\[c] Copy Link[/dim]"
+                "  [bold white on #0284c7]  👉 \\[Enter] Select & Launch  [/]  "
+                "[bold white on #059669]  \\[a] Auto-Play  [/]  "
+                "[dim]\\[r] Review the route   •   \\[c] Copy link[/dim]"
             )
         lines.append("")
 
-        # Overview / Scope
-        lines.append("[bold green]What You'll Explore:[/]")
-        lines.append(f"  {safe_escape(tutorial.doc)}")
+        # -------------------------------------------------------- overview
+        lines.append(self._rule("What You'll Explore"))
         lines.append("")
-
-        # Video companion (if available)
+        for para in textwrap.wrap(" ".join(tutorial.doc.split()), width=76):
+            lines.append(f"  {safe_escape(para)}")
         video_url = getattr(tutorial, "video_url", "")
         video_title = getattr(tutorial, "video_title", "")
         if video_url:
-            title_text = f"[bold white]{safe_escape(video_title)}[/]  " if video_title else ""
-            lines.append(f"  [bold cyan]Video companion:[/] {title_text}[bold underline bright_blue]{safe_escape(video_url)}[/]  [dim]('c' to copy link)[/dim]")
             lines.append("")
+            if video_title:
+                lines.append(field("video", f"[white]{safe_escape(video_title)}[/]"))
+                lines.append(
+                    field("", f"[underline bright_blue]{safe_escape(video_url)}[/]  [dim]('c' copies it)[/dim]")
+                )
+            else:
+                lines.append(
+                    field("video", f"[underline bright_blue]{safe_escape(video_url)}[/]  [dim]('c' copies it)[/dim]")
+                )
+        lines.append("")
 
-        # Architectural Traversal Flow
+        # -------------------------------------------------------- the route
         flow_parts = []
-        for i, s in enumerate(steps, start=1):
+        for s in steps:
             target = s.get_flow_label() if hasattr(s, "get_flow_label") else getattr(s, "flow_label", "")
             if not target:
                 target = s.action.split("›")[-1].strip() or s.title.split("(")[0].strip()
-            flow_parts.append(f"[bold bright_yellow]{safe_escape(target)}[/]")
-        lines.append("[bold green]Architectural Traversal Flow:[/]")
-        lines.append("  " + " [bold dim cyan]──▶[/] ".join(flow_parts))
+            flow_parts.append(f"[bright_yellow]{safe_escape(target)}[/]")
+        lines.append(self._rule("Route"))
+        lines.append("")
+        lines.append("  " + " [dim cyan]▶[/] ".join(flow_parts))
         lines.append("")
 
-        lines.append(f"[bold cyan]Tutorial steps & itinerary ({len(steps)} live steps):[/]  [bold bright_yellow]▼ Scroll down (↓ / j / PgDn / mouse wheel) to view all steps[/]")
-        lines.append("  [dim]" + "─" * 72 + "[/dim]")
-        for idx, step in enumerate(steps, start=1):
-            action_field = step.get_action_field() if hasattr(step, "get_action_field") else (step.action_field or step.highlight_field)
-            action_badge = f"[bold bright_cyan]👉 \\[ENTER] {safe_escape(action_field)}[/]" if action_field else "[dim](inspect)[/]"
-            val_fields = step.get_value_fields() if hasattr(step, "get_value_fields") else step.value_fields
-            val_names = ", ".join(val_fields)
-            val_badge = f"   [dim]Value:[/] [bold bright_yellow]💡 {safe_escape(val_names)}[/]" if val_names else ""
-            lines.append(f"  [bold yellow]{idx}. {safe_escape(step.title)}[/]   [dim]›[/]  [cyan]{safe_escape(step.action)}[/]")
-            lines.append(f"     [dim]Action:[/] {action_badge}{val_badge}")
-            if step.userspace:
-                lines.append(f"     [dim]Userspace:[/] [green]{safe_escape(step.userspace)}[/]")
-            insight = step.get_insight() if hasattr(step, "get_insight") else (step.commentary.split(". ")[0].strip() + ".")
-            if insight:
-                lines.append(f"     [dim]Takeaway:[/] [italic white]{safe_escape(insight)}[/]")
-            lines.append("")
-            if idx == 5 and len(steps) > 5:
-                lines.append(f"  [bold bright_yellow]─── ▼ Scroll down (↓ / PgDn) for remaining steps 6 to {len(steps)} ▼ ───[/]")
-                lines.append("")
-        lines.append("  [bold bright_yellow]▲ End of itinerary · Scroll up (↑ / k / PgUp) to return to top[/]")
-        lines.append("  [dim]" + "─" * 72 + "[/dim]")
+        # --------------------------------------------------------- itinerary
+        lines.append(self._rule(f"Itinerary · {len(steps)} live steps"))
+        lines.append("")
         lines.append(
-            "  [bold white on #1e3a8a]  Press \\[Enter] or \\[n] to Begin Step 1  [/]    "
-            "[bold white on #059669]  \\[a] Auto-Play  [/]    "
+            f"  [dim]↓ / j / PgDn / mouse wheel scrolls the {len(steps)} steps."
+            "  \\[r] during the tutorial shows which one you are on.[/dim]"
+        )
+        lines.append("")
+        for idx, step in enumerate(steps, start=1):
+            action_field = (
+                step.get_action_field()
+                if hasattr(step, "get_action_field")
+                else (step.action_field or step.highlight_field)
+            )
+            lines.append(
+                f"  [bold yellow]{str(idx).rjust(2)}[/]  [bold white]{safe_escape(step.title)}[/]"
+            )
+            lines.append(field("path", f"[cyan]{safe_escape(step.action)}[/]"))
+            if action_field:
+                lines.append(field("action", f"[bright_cyan]\\[ENTER] {safe_escape(action_field)}[/]"))
+            val_fields = step.get_value_fields() if hasattr(step, "get_value_fields") else step.value_fields
+            if val_fields:
+                lines.append(field("value", f"[bright_yellow]{safe_escape(', '.join(val_fields))}[/]"))
+            if step.userspace:
+                lines.append(field("userspace", f"[green]{safe_escape(step.userspace)}[/]"))
+            insight = (
+                step.get_insight()
+                if hasattr(step, "get_insight")
+                else (step.commentary.split(". ")[0].strip() + ".")
+            )
+            if insight:
+                lines.append(field("takeaway", f"[italic white]{safe_escape(insight)}[/]"))
+            if idx < len(steps):
+                lines.append("  [dim]" + "·" * 74 + "[/dim]")
+        lines.append("")
+
+        # ------------------------------------------------------------ footer
+        lines.append(self._rule())
+        lines.append(
+            "  [bold white on #1e3a8a]  \\[Enter] Begin Step 1  [/]  "
+            "[bold white on #059669]  \\[a] Auto-Play  [/]  "
             "[bold white on #374151]  \\[c] Copy Link  [/]"
         )
         lines.append(
-            "  [dim]Shortcuts: [bold bright_yellow]\\[m][/] Mouse Select   •   "
-            "[bold bright_yellow]\\[r][/] Review   •   "
-            "[bold bright_yellow]\\[?][/] Shortcuts   •   "
-            "[bold bright_yellow]\\[p][/] Overview   •   "
-            "[bold bright_yellow]\\[Esc][/] Exit[/dim]"
+            "  [dim]\\[r] Review: the step list with your position marked   •   "
+            "\\[m] Mouse select   •   \\[?] Shortcuts   •   "
+            "\\[p] Overview   •   \\[Esc] Exit[/dim]"
         )
         lines.append("")
         lines.append("")
@@ -839,6 +904,7 @@ class Explorer(App):
         # worth a second slot on the footer.
         Binding("O", "sort_reverse", "reverse", show=False),
         Binding("r", "refresh", "refresh"),
+        Binding("R", "reread", "re-read"),
         Binding("r", "review", "review"),
         Binding("u", "userspace", "userspace"),
         Binding("v", "cycle_view", "view", show=False),
@@ -1598,8 +1664,6 @@ class Explorer(App):
             self.refresh_bindings()
             return
 
-        self.query_one("#path", Static).display = False
-
         real_step_idx = step_idx - 1
         if not (0 <= real_step_idx < len(self.active_tutorial.steps)):
             return
@@ -1996,6 +2060,20 @@ class Explorer(App):
             for index, name in enumerate(columns)
         ]
 
+    def _tutorial_subject_label(self) -> str:
+        """The task this walkthrough is about, as the breadcrumb root.
+
+        The first structure frame a walkthrough pushes is its subject; every
+        later step resolves something reached from it.
+        """
+        if self.active_tutorial is None:
+            return ""
+        for frame in self.stack:
+            label = getattr(frame, "label", "")
+            if label and label != "kexplore":
+                return label
+        return ""
+
     def render_frame(self) -> None:
         table: DataTable = self.query_one("#fields", DataTable)
         columns = self.stack[-1].columns if self.stack else FIELD_COLUMNS
@@ -2012,12 +2090,26 @@ class Explorer(App):
             return
 
         frame = self.stack[-1]
-        if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
-            self.query_one("#path", Static).display = False
-        else:
-            self.query_one("#path", Static).display = True
-            breadcrumb = " › ".join(f.label for f in self.stack)
-            self.query_one("#path", Static).update(f"{breadcrumb}{self._type_suffix(frame)}")
+        # The breadcrumb names the object on screen and its type. A walkthrough
+        # step needs it more than free browsing does, since the reader did not
+        # navigate here themselves.
+        self.query_one("#path", Static).display = True
+        labels = [f.label for f in self.stack]
+        # A walkthrough pushes one frame per step and several steps return to
+        # the task_struct and descend again, so the stack is a history of
+        # screens rather than a chain of pointers. Printing it as a path would
+        # claim edges that do not exist, such as sched_statistics to cgroup.
+        # What holds on every step is the subject: each object on screen was
+        # reached from the task the walkthrough is about, so that is the root.
+        # Free browsing keeps the whole path: the reader walked it.
+        in_step = self.active_tutorial is not None and self.active_tutorial.current_idx > 0
+        if in_step:
+            root = self._tutorial_subject_label()
+            current = labels[-1]
+            labels = [root, current] if root and root != current else [current]
+        self.query_one("#path", Static).update(
+            f"{' › '.join(labels)}{self._type_suffix(frame)}"
+        )
 
         self.update_doc()
 
@@ -2621,6 +2713,14 @@ class Explorer(App):
         self.stack[-1].load()
         self.render_frame()
         self.notify("re-read from live kernel")
+
+    def action_reread(self) -> None:
+        """Re-read the current frame, inside a walkthrough step as well as outside.
+
+        A step that asks the viewer to create a condition on the machine is
+        useless without it: the frame was built before the command ran.
+        """
+        self.action_refresh()
 
     def action_copy(self) -> None:
         """Copy the current value, command, link, or item under cursor to clipboard."""
