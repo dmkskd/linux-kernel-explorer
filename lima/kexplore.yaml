@@ -50,6 +50,11 @@ provision:
     # Optional: the "measure" groups need these. Remove if not wanted.
     dnf install -y bpftrace bcc-tools perf || true
 
+    # The userspace counterpart a walkthrough step names has to exist on the
+    # machine reading it, or the step offers a command that cannot be run.
+    # Lab only: a native install leaves the host's packages alone.
+    dnf install -y lsof sysstat procps-ng psmisc iproute util-linux || true
+
     # Use automatic DWARF and matching source downloads for this lab.
     mkdir -p /etc/profile.d
     cat > /etc/profile.d/debuginfod.sh <<'EOF'

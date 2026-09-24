@@ -218,7 +218,8 @@ setup_lima() {
     fi
   fi
   step "Checking the tools inside '$VM'"
-  limactl shell "$VM" sudo env PATH=/opt/kexplore/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -s <<<"$VERIFY"
+  limactl shell "$VM" sudo env PATH=/opt/kexplore/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    KEXPLORE_TEXTUAL_PIN="$KEXPLORE_TEXTUAL_PIN" bash -s <<<"$VERIFY"
 }
 
 confirm_install() {
@@ -402,7 +403,7 @@ setup_native() {
   fi
 
   step "Checking the tools on this machine"
-  sudo bash -s <<<"$VERIFY"
+  sudo env KEXPLORE_TEXTUAL_PIN="$KEXPLORE_TEXTUAL_PIN" bash -s <<<"$VERIFY"
 }
 
 setup_docker() {
@@ -420,7 +421,7 @@ setup_docker() {
   step "Checking the tools inside the image"
   # No kernel and no cache volume here: this container only lists tools.
   # shellcheck disable=SC2086
-  $RUNTIME run --rm -i "$IMAGE" bash -s <<<"$VERIFY"
+  $RUNTIME run --rm -i -e KEXPLORE_TEXTUAL_PIN="$KEXPLORE_TEXTUAL_PIN" "$IMAGE" bash -s <<<"$VERIFY"
 }
 
 echo "Kernel learning lab: disposable VMs or dedicated lab machines only."
@@ -509,6 +510,54 @@ elif [ "$BACKEND" = docker ]; then
 else
   echo "Backend: $BACKEND (your choice above)"
 fi
+
+# What a bare ./setup.sh is about to do, and the variable that changes each
+# part of it. Printed before anything is created: the lima template prompt and
+# several minutes of downloads come next.
+plan_line() { printf '  %-11s%s\n' "$1" "$2"; }
+echo
+echo "This run will:"
+case "$BACKEND" in
+  lima)
+    distro="$(kexplore_lima_distro)"
+    template="$REPO/lima/$(kexplore_lima_template)"
+    # Name the release, not just the distro. The Fedora template pins a cloud
+    # image by URL; the Ubuntu and Debian ones inherit a lima base template,
+    # which names the release instead.
+    image="$(awk -F'/' '/^ *- *location: *"?https/ {
+      gsub(/"/, "", $NF); sub(/\.qcow2$/, "", $NF); print $NF; exit }' "$template")"
+    if [ -z "$image" ]; then
+      image="$(awk -F'_images/' '/^- *template:_images\// {print $2; exit}' "$template")"
+    fi
+    plan_line "distro" "${image:-$distro} (KEXPLORE_DISTRO: fedora, ubuntu, debian)"
+    if limactl list --quiet 2>/dev/null | grep -qx "$VM"; then
+      plan_line "VM" "start the existing '$VM' (KEXPLORE_VM)"
+    else
+      cpus="$(awk '/^cpus:/ {print $2}' "$template")"
+      memory="$(awk '/^memory:/ {print $2}' "$template")"
+      disk="$(awk '/^disk:/ {print $2}' "$template")"
+      plan_line "VM" "create '$VM', ${cpus} CPUs, ${memory} RAM, ${disk} disk (KEXPLORE_VM)"
+      plan_line "template" "${template#"$REPO"/}"
+    fi
+    plan_line "install" "drgn, elfutils, dwarves, binutils, bpftrace and the lab tools, inside the VM"
+    plan_line "venv" "/opt/kexplore with textual $KEXPLORE_TEXTUAL_PIN (KEXPLORE_TEXTUAL_PIN)"
+    plan_line "debuginfo" "$(kexplore_debuginfod_for_backend lima)"
+    plan_line "sysctl" "kernel.sched_schedstats=1 inside the VM"
+    plan_line "host" "nothing is installed on macOS beyond lima itself"
+    ;;
+  native)
+    plan_line "install" "kexplore's packages on this host, after asking"
+    plan_line "venv" "$KEXPLORE_VENV with textual $KEXPLORE_TEXTUAL_PIN (KEXPLORE_TEXTUAL_PIN)"
+    plan_line "debuginfo" "$(kexplore_debuginfod_for_backend native)"
+    plan_line "sysctl" "kernel.sched_schedstats=1 on this host"
+    ;;
+  docker)
+    plan_line "image" "build '$IMAGE' from Containerfile (KEXPLORE_IMAGE)"
+    plan_line "debuginfo" "$(kexplore_debuginfod_for_backend docker)"
+    plan_line "host" "nothing is installed outside the container"
+    ;;
+esac
+echo
 
 case "$BACKEND" in
   lima) setup_lima ;;

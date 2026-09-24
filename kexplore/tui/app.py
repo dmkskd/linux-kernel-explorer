@@ -45,6 +45,7 @@ from ..operations.algorithm import algorithms
 from ..operations.tour import GuidedTour, GuidedTutorial, TourStep, TutorialStep, tours, tutorials
 from ..operations.walkthrough import WALKTHROUGHS
 from ..view import frames
+from ..view import procfile  # experiment: /proc annotation
 from ..view.frames import (
     FIELD_COLUMNS,
     GROUP_DOCS,
@@ -195,6 +196,7 @@ ACTION_SCREENS: dict[str, frozenset[str]] = {
     "itinerary": frozenset({"landing", "step"}),
     "review": frozenset({"landing", "step"}),
     "copy_narration": frozenset({"step"}),
+    "jump_struct": frozenset({"browse"}),  # experiment: /proc annotation
 }
 
 
@@ -219,6 +221,8 @@ KEY_HELP: dict[str, str] = {
     "copy": "copy the value under the cursor",
     "copy_row": "copy the whole row",
     "copy_narration": "copy the narration of this step",
+    # experiment: /proc annotation
+    "jump_struct": "open the structure this line of the file is read from",
     "toggle_mouse": "hand the mouse back to the terminal so you can select text",
     "tutorial_next": "go to the next step",
     "tutorial_prev": "go back a step",
@@ -924,6 +928,7 @@ class Explorer(App):
         Binding("s", "source", "source"),
         Binding("t", "trace_command", "trace command"),
         Binding("g", "graph", "graph"),
+        Binding("j", "jump_struct", "structure"),  # experiment: /proc annotation
         Binding("colon", "repl", "drgn repl", show=False),
         # Escape undoes whatever is most local: the filter box, then the same
         # step backspace takes. Hidden from the footer, which already shows one.
@@ -1141,6 +1146,18 @@ class Explorer(App):
             ):
                 return None
 
+        # experiment: /proc annotation -- a file's text has no struct behind
+        # it, so the keys that act on one are not offered. Jumping is offered
+        # only where a row says which member it came from.
+        if self._showing_proc_file():
+            if action in ("userspace", "trace_command", "graph", "source"):
+                return None
+            if action == "jump_struct":
+                row = self.current_row()
+                return True if procfile.jump_target(self.context, row) else None
+        elif action == "jump_struct":
+            return None
+
         # Source code view context: suppress struct/table manipulations
         if showing_src:
             if action in (
@@ -1325,6 +1342,7 @@ class Explorer(App):
                     Tab("structures", id="view-structures"),
                     Tab("operations", id="view-operations"),
                     Tab("tutorials", id="view-tutorials"),
+                    Tab("files", id="view-files"),  # experiment: /proc annotation
                     id="views",
                     active=initial_tab,
                 )
@@ -1482,6 +1500,8 @@ class Explorer(App):
         if view == "operations":
             tree.root.set_label("operations")
             self._build_operation_tree(tree)
+        elif view == "files":  # experiment: /proc annotation
+            procfile.build_tree(tree)
         elif view in ("tutorials", "tours"):
             tree.root.set_label("tutorials")
             self._build_tutorial_tree(tree)
@@ -1654,6 +1674,7 @@ class Explorer(App):
             doc.display = False
             hint.update("")
             landing.update_tutorial(self.active_tutorial.tutorial, self.active_tutorial.steps, is_active=True)
+            self._hide_callout()
             self.query_one("#path", Static).display = True
             self.query_one("#path", Static).update(
                 f"tutorial › {self.active_tutorial.tutorial.category} › {self.active_tutorial.tutorial.label} (Selected · Press Enter to Begin)"
@@ -2083,6 +2104,9 @@ class Explorer(App):
         table.clear(columns=True)
         table.add_columns(*self._headers(columns))
         source_view = columns == SOURCE_COLUMNS
+        # experiment: /proc annotation -- a file's own text is clipped at
+        # MAX_CELL like a struct value, which cuts off the half worth reading.
+        wide = source_view or columns == procfile.TEXT_COLUMNS
         table.fixed_columns = SOURCE_FIXED_COLUMNS if source_view else 0
 
         if not self.stack:
@@ -2116,7 +2140,7 @@ class Explorer(App):
         # Lexed from every row, not the visible ones, so filtering a source
         # frame does not splice unrelated lines together for the lexer.
         source = _highlight_source(frame.rows) if source_view else {}
-        limit = None if source_view else MAX_CELL
+        limit = None if wide else MAX_CELL
 
         width = len(columns)
         for index, row in enumerate(self.visible_rows()):
@@ -2137,7 +2161,11 @@ class Explorer(App):
             cells = [Text(_clip(v, limit)) for v in values]
             if row.name in source:
                 cells[2] = source[row.name].copy()
-            elif row.cells is None:
+            # experiment: /proc annotation -- a pseudo-filesystem view does
+            # supply its own cells, but its first column is a name like any
+            # other: a directory to open, a file with a line table, a file
+            # without one.
+            elif row.cells is None or self._showing_proc_file():
                 # Only the field/type/value/placement layout is painted. A view
                 # that supplies its own cells is a matrix of unrelated columns,
                 # where colouring by position would mean nothing.
@@ -2218,6 +2246,18 @@ class Explorer(App):
             if target_idx is not None and table.row_count > target_idx:
                 table.move_cursor(row=target_idx, animate=False)
 
+    def _hide_callout(self) -> None:
+        """Take the step narration off the screen.
+
+        It is drawn on its own layer over the table, so nothing that replaces
+        the table underneath removes it: a landing page shown while a step is
+        still the active one leaves last step's narration floating over it.
+        """
+        try:
+            self.query_one("#tutorial-callout", TutorialCallout).hide()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _place_callout(self) -> None:
         """Put the step narration just under the row it is about.
 
@@ -2231,8 +2271,22 @@ class Explorer(App):
             return
         step = None
         if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
-            idx = self.active_tutorial.current_idx - 1
-            if 0 <= idx < len(self.active_tutorial.steps):
+            current = self.active_tutorial.current_idx
+            # The narration is drawn on its own layer over the table, so it
+            # survives anything that replaces what is underneath: a landing
+            # page previewed from the tree, or another structure opened while
+            # the session is still on a step. It belongs to one frame, shown
+            # in the table, and nowhere else.
+            on_step_frame = bool(self.stack) and (
+                self.stack[-1] is self.active_tutorial.step_frames.get(current)
+            )
+            showing_table = ct.safe(
+                lambda: self.query_one("#fields", DataTable).display
+                and not self.query_one(TutorialLanding).display,
+                False,
+            )
+            idx = current - 1
+            if on_step_frame and showing_table and 0 <= idx < len(self.active_tutorial.steps):
                 step = self.active_tutorial.steps[idx]
         if step is None or not step.commentary:
             callout.hide()
@@ -2360,6 +2414,10 @@ class Explorer(App):
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         self.open_node(event.node)
 
+    def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
+        """Walk a pseudo-filesystem directory when its node is opened."""
+        procfile.fill(event.node)  # experiment: /proc annotation
+
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Fill the pane for the entry under the cursor, without enter.
 
@@ -2436,6 +2494,7 @@ class Explorer(App):
                 self.query_one("#hint", Static).update("")
                 landing = self.query_one(TutorialLanding)
                 landing.update_tutorial(data, steps, is_active=False)
+                self._hide_callout()
                 self.query_one("#path", Static).display = True
                 self.query_one("#path", Static).update(
                     f"tutorial › {data.category} › {data.label} (Press Enter to Launch)"
@@ -2545,6 +2604,25 @@ class Explorer(App):
             self.notify("nothing to follow (NULL or unreadable)", severity="warning")
             return
         self.push(frames.object_frame(row.name, target, self.context))
+
+    # experiment: /proc annotation
+    def _showing_proc_file(self) -> bool:
+        """Whether the pane is a pseudo-file rather than a struct."""
+        frame = self.stack[-1] if self.stack else None
+        return frame is not None and frame.columns in (
+            procfile.COLUMNS, procfile.TEXT_COLUMNS, procfile.DIR_COLUMNS
+        )
+
+    # experiment: /proc annotation
+    def action_jump_struct(self) -> None:
+        """Open the structure the line under the cursor is read from."""
+        row = self.current_row()
+        target = procfile.jump_target(self.context, row)
+        if target is None:
+            self.notify("no structure behind this line", severity="warning")
+            return
+        label, obj = target
+        self.push(frames.object_frame(label, obj, self.context, row.doc))
 
     def action_expand(self) -> None:
         """Open the row under the cursor in place, keeping its neighbours visible.
@@ -2672,6 +2750,15 @@ class Explorer(App):
             self._token += 1
             self.render_frame()
             return
+        # experiment: /proc annotation -- a file opened from the sidebar is
+        # the only frame on the stack, and the level above it is its
+        # directory rather than nothing.
+        if self._showing_proc_file():
+            plan = procfile.parent_plan(self.context, self.stack[-1].label)
+            if plan is not None:
+                self.stack.clear()
+                self.open_plan(plan)
+                return
         if self.active_tutorial is not None:
             if self.active_tutorial.current_idx > 0:
                 self.action_tutorial_prev()
@@ -2695,7 +2782,8 @@ class Explorer(App):
     def action_cycle_view(self) -> None:
         """Cycle between structures, operations, and tutorials views."""
         tabs = self.query_one("#views", Tabs)
-        order = ["view-structures", "view-operations", "view-tutorials"]
+        order = ["view-structures", "view-operations", "view-tutorials",
+                 "view-files"]  # experiment: /proc annotation
         current = tabs.active or "view-structures"
         if current == "view-tours":
             current = "view-tutorials"

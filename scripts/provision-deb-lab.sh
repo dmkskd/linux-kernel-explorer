@@ -18,6 +18,9 @@ apt-get update
 apt-get install -y debuginfod elfutils dwarves binutils python3-textual python3-venv \
   python3-dev build-essential pkgconf libelf-dev libdw-dev libdebuginfod-dev \
   libkdumpfile-dev liblzma-dev libpcre2-dev libjson-c-dev zlib1g-dev
+# The userspace counterpart a walkthrough step names has to exist on the machine
+# reading it. Lab only: a native install leaves the host's packages alone.
+apt-get install -y lsof sysstat procps psmisc iproute2 util-linux || true
 # Keep pip packages inside this VM's dedicated environment.
 if [ ! -x /opt/kexplore/bin/python3 ]; then
   python3 -m venv --system-site-packages /opt/kexplore

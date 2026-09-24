@@ -271,8 +271,8 @@ def _build_process_architecture_steps(prog: Program | None) -> list[TourStep]:
             title="Starting screen: kexplore entry points",
             action="kexplore › task relationships",
             commentary=(
-                "kexplore is attached to the running kernel. Every structure in this "
-                "walkthrough is reached by dereferencing a pointer in the one before it."
+                "A process is one task_struct, and its threads are further task_struct "
+                "instances sharing its tgid. task relationships opens the list."
             ),
             userspace=f"cat /proc/{pid}/status | grep -E '(Pid|Tgid|Threads)'",
             structures=_resolve_home,
@@ -461,8 +461,8 @@ def _build_process_lifecycle_steps(prog: Program | None) -> list[TourStep]:
             title="Starting screen: kexplore entry points",
             action="kexplore › task relationships",
             commentary=(
-                "kexplore is attached to the running kernel. Every structure in this "
-                "walkthrough is reached by dereferencing a pointer in the one before it."
+                "init is the first userspace process, and every other process "
+                "descends from it. task relationships opens the list."
             ),
             userspace="cat /proc/1/status",
             structures=_resolve_home,
@@ -1316,8 +1316,8 @@ def _build_eevdf_scheduler_steps(prog: Program | None) -> list[TourStep]:
             title="Starting screen: kexplore entry points",
             action="kexplore › what is running right now",
             commentary=(
-                "kexplore is attached to the running kernel. Every structure in this "
-                "walkthrough is reached by dereferencing a pointer in the one before it."
+                "Each CPU has a runqueue, and the task it is running now is one "
+                "pointer away. what is running right now opens the list."
             ),
             userspace="cat /proc/sched_debug | head -n 25",
             structures=_resolve_home,
