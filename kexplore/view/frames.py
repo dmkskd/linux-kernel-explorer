@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, replace
 
 from drgn import Object, Program, TypeKind
 
+from . import procfile  # experiment: /proc annotation, see procfile.py
 from ..catalog.decoders import decode_field
 from ..catalog.links import Derived, Link, derived_for, links_for, userspace_for
 from ..catalog.registry import Entry, FactEntry, Measurement, Subsystem, children
@@ -305,7 +306,7 @@ def object_frame(label: str, obj: Object, ctx: Context | None = None, doc: str =
             tag = ct.tag_of(obj.type_) or ""
             found = ct.safe(lambda: placeholders(target, tag), {})
             fields = [_with_userspace(target, row, found) for row in fields]
-        return computed + links + fields
+        return computed + procfile.task_rows(target) + links + fields
 
     return Frame(label, make_rows, obj=obj, doc=doc)
 
@@ -886,6 +887,8 @@ def plan_for(item, ctx: Context, subsystem_key: str = "",
     than one the user asked for. It differs only for a measurement, which must
     not attach a tracer until asked.
     """
+    if (plan := procfile.plan_for(item, ctx)) is not None:  # experiment
+        return plan
     if isinstance(item, Listing):
         return Plan(item.label, item.doc, LISTING_COLUMNS,
                     lambda: listing_frame(item.label, item.doc, item.items))
