@@ -107,6 +107,17 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
     ("task_struct", "loginuid"): "cat /proc/<pid>/loginuid",
     ("task_struct", "sessionid"): "cat /proc/<pid>/sessionid",
     ("task_struct", "exit_code"): "no userspace equivalent: only the parent sees it, from wait()",
+    ("task_struct", "ioac"): "cat /proc/<pid>/io",
+    # task_io_accounting: one line of /proc/<pid>/io each. The file sums the
+    # thread group, so it matches these per-thread counters only for a
+    # single-threaded process.
+    ("task_io_accounting", "rchar"): "grep ^rchar /proc/<pid>/io",
+    ("task_io_accounting", "wchar"): "grep ^wchar /proc/<pid>/io",
+    ("task_io_accounting", "syscr"): "grep ^syscr /proc/<pid>/io",
+    ("task_io_accounting", "syscw"): "grep ^syscw /proc/<pid>/io",
+    ("task_io_accounting", "read_bytes"): "grep ^read_bytes /proc/<pid>/io",
+    ("task_io_accounting", "write_bytes"): "grep ^write_bytes /proc/<pid>/io",
+    ("task_io_accounting", "cancelled_write_bytes"): "grep ^cancelled_write_bytes /proc/<pid>/io",
     # sched_info: /proc/<pid>/schedstat is three numbers, in this order:
     # sum_exec_runtime (which lives on the sched_entity, not here), run_delay,
     # pcount. The rest of the struct is kernel-only: checked against
@@ -279,6 +290,10 @@ def placeholders(obj, tag: str) -> dict[str, str]:
             from drgn import container_of
 
             found["<pid>"] = str(container_of(obj, "struct task_struct", "sched_info").pid.value_())
+        elif tag == "task_io_accounting":
+            from drgn import container_of
+
+            found["<pid>"] = str(container_of(obj, "struct task_struct", "ioac").pid.value_())
         elif tag == "task_delay_info":
             pid = _delays_owner(obj)
             if pid is not None:
