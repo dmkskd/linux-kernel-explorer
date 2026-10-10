@@ -58,6 +58,7 @@ from ..view.frames import (
 from ..view.frames import MAX_CELL, matches_field as _matches_field
 from .clipboard import copy_to_system_clipboard
 from .graph import GraphScreen, graph_key
+from .notes import NoteDeck, NoteScreen  # experiment: session notes
 from .navigator import CursorNavigator
 
 # Source frames are exempt. Their wide column is the last one, so a long line
@@ -223,6 +224,9 @@ KEY_HELP: dict[str, str] = {
     "copy_narration": "copy the narration of this step",
     # experiment: /proc annotation
     "jump_struct": "open the structure this line of the file is read from",
+    # experiment: session notes
+    "note_next": "show the next note from --notes, or a blank one to type or paste into",
+    "note_prev": "show the note before the last one shown",
     "toggle_mouse": "hand the mouse back to the terminal so you can select text",
     "tutorial_next": "go to the next step",
     "tutorial_prev": "go back a step",
@@ -930,6 +934,8 @@ class Explorer(App):
         Binding("g", "graph", "graph"),
         Binding("j", "jump_struct", "structure"),  # experiment: /proc annotation
         Binding("colon", "repl", "drgn repl", show=False),
+        Binding("w", "note_next", "note", show=False),  # experiment: session notes
+        Binding("W", "note_prev", "previous note", show=False),  # experiment: session notes
         # Escape undoes whatever is most local: the filter box, then the same
         # step backspace takes. Hidden from the footer, which already shows one.
         Binding("escape", "escape", "back", show=False),
@@ -944,9 +950,11 @@ class Explorer(App):
         live: bool = True,
         initial_tutorial: str | None = None,
         initial_tour: str | None = None,
+        notes: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.prog = prog
+        self.notes = NoteDeck(notes or [])  # experiment: session notes
         self.initial_tutorial = initial_tutorial or initial_tour
         self.active_tutorial: TutorialSession | None = None
         self._tutorial_action_idx: int | None = None
@@ -1060,7 +1068,7 @@ class Explorer(App):
             return False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in ("copy", "copy_row", "toggle_mouse"):
+        if action in ("copy", "copy_row", "toggle_mouse", "note_next", "note_prev"):
             return True
 
         landing_shown = self._landing_displayed()
@@ -3066,6 +3074,19 @@ class Explorer(App):
             self.notify(f"narration copied ({len(text)} chars)")
         else:
             self.notify("could not reach the clipboard", severity="warning")
+
+    # experiment: session notes
+    def action_note_next(self) -> None:
+        self._show_note(*self.notes.next())
+
+    def action_note_prev(self) -> None:
+        self._show_note(*self.notes.previous())
+
+    def _show_note(self, index: int | None, text: str, heading: str) -> None:
+        self.push_screen(
+            NoteScreen(text, heading),
+            lambda closed: self.notes.store(index, closed),
+        )
 
     def action_toggle_mouse(self) -> None:
         """Toggle between TUI mouse capture and native terminal text selection."""

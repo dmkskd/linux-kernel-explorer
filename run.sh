@@ -34,7 +34,7 @@ CACHE_VOLUME=kexplore-debuginfod
 # backend set up, at the cost of keeping the two in step.
 usage() {
   cat <<USAGE
-usage: ./run.sh [--record file.cast] [--test] [options]
+usage: ./run.sh [--record file.cast] [--notes file] [--test] [options]
 
 Learning and experimentation on disposable VMs or dedicated lab machines.
 Not intended for production servers. Runs as root. Where it runs:
@@ -46,6 +46,9 @@ Not intended for production servers. Runs as root. Where it runs:
   --record F     record the whole session to F with asciinema, wrapping
                  whichever backend was resolved, so the file is written on
                  this host; upload it with \`asciinema upload F\`
+  --notes F      notes to show during the session, separated by lines holding
+                 only ---; w shows the next in a popup, W the previous, esc
+                 closes it. Read on this host, so F can be anywhere
   --test         run the test suite instead of the explorer; remaining
                  arguments go to tests/run_all.py
   --tutorial T   open directly into a live guided tutorial (or '--tutorial list'; alias: --tour)
@@ -59,7 +62,7 @@ Not intended for production servers. Runs as root. Where it runs:
   -c, --core F   explore the vmcore F instead of the live kernel
   -h, --help     this message
 
-Everything other than --record and --test is passed through to kexplore.
+Everything other than --record, --notes and --test is passed through to kexplore.
 
 Environment:
 
@@ -83,14 +86,26 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-# --record is consumed here; it wraps the final exec below and never reaches
-# kexplore. The file lands on this host whichever backend runs the explorer.
+# --record and --notes are consumed here and never reach kexplore as flags.
+# --record wraps the final exec below, so the file lands on this host whichever
+# backend runs the explorer.
 RECORD=""
 PASSTHROUGH=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --record)
       RECORD="${2:?--record needs a file to write to}"
+      shift 2
+      ;;
+    --notes)
+      # Read here, on the host: the VM and the container do not see every host
+      # path. kexplore decodes KEXPLORE_NOTES when it has no --notes of its own.
+      NOTES_FILE="${2:?--notes needs a file to read}"
+      if [ ! -r "$NOTES_FILE" ]; then
+        echo "--notes: cannot read $NOTES_FILE" >&2
+        exit 1
+      fi
+      KEXPLORE_NOTES="$(base64 < "$NOTES_FILE" | tr -d '\n')"
       shift 2
       ;;
     *)
@@ -154,6 +169,7 @@ case "$BACKEND" in
       KEXPLORE_SOURCE_ROOT="${KEXPLORE_SOURCE_ROOT:-}"
       KEXPLORE_SOURCE_PREFIX="${KEXPLORE_SOURCE_PREFIX:-}"
       KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
+      KEXPLORE_NOTES="${KEXPLORE_NOTES:-}"
       TERM="${TERM:-xterm-256color}"
       COLORTERM="${COLORTERM:-truecolor}"
       bash "$REPO/scripts/launch-in-lab.sh" "${TARGET[@]}")
@@ -175,6 +191,7 @@ case "$BACKEND" in
       KEXPLORE_SOURCE_ROOT="${KEXPLORE_SOURCE_ROOT:-}"
       KEXPLORE_SOURCE_PREFIX="${KEXPLORE_SOURCE_PREFIX:-}"
       KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
+      KEXPLORE_NOTES="${KEXPLORE_NOTES:-}"
       "${TARGET[@]}")
     ;;
   docker)
@@ -210,6 +227,7 @@ case "$BACKEND" in
       -e KEXPLORE_SOURCE_ROOT="${KEXPLORE_SOURCE_ROOT:-}"
       -e KEXPLORE_SOURCE_PREFIX="${KEXPLORE_SOURCE_PREFIX:-}"
       -e KEXPLORE_OFFLINE="${KEXPLORE_OFFLINE:-}"
+      -e KEXPLORE_NOTES="${KEXPLORE_NOTES:-}"
       -e TERM="${TERM:-xterm-256color}"
       -e COLORTERM="${COLORTERM:-truecolor}"
       "$IMAGE" "${TARGET[@]}")

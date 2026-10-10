@@ -250,6 +250,8 @@ def resolve(prog: "Program", spec: PseudoFile, origin: Origin) -> str:
     A repeating file's columns hang off the object a line stands for, not off
     the task, so they are resolved from ``line_root``.
     """
+    from drgn import TypeKind
+
     from ..core import ctypes as ct
 
     if origin.symbol:
@@ -284,6 +286,14 @@ def resolve(prog: "Program", spec: PseudoFile, origin: Origin) -> str:
             return f"{walked} has no member {hop.lstrip('.')}"
         if ct.struct_type(found) is None:
             return f"{walked}->{hop} is not a struct"
+        # The dot is what jump_target reads to decide whether to test for
+        # NULL, so a wrong one is a crash there, not only a wrong path here.
+        is_pointer = ct.strip(found).kind == TypeKind.POINTER
+        if hop.startswith(".") == is_pointer:
+            name = hop.lstrip(".")
+            return (f"{walked}->{name} is a pointer, spell the hop {name}"
+                    if is_pointer else
+                    f"{walked}->{name} is an embedded struct, spell the hop .{name}")
         current, walked = found, f"{walked}->{hop.lstrip('.')}"
     if not origin.member:
         return ""

@@ -106,6 +106,13 @@ def main() -> int:
         default=None,
     )
     parser.add_argument(
+        "--notes",
+        metavar="FILE",
+        help="notes to show during the session, one popup each, separated by "
+             "lines holding only ---; w shows the next, W the previous",
+        default=None,
+    )
+    parser.add_argument(
         "--source-root", help="matching local kernel source tree (optional)", default=None
     )
     parser.add_argument(
@@ -119,6 +126,15 @@ def main() -> int:
         os.environ["KEXPLORE_SOURCE_ROOT"] = root
     if args.source_prefix:
         os.environ["KEXPLORE_SOURCE_PREFIX"] = args.source_prefix
+
+    # Read before attaching, so a wrong path fails in a second rather than
+    # after the debuginfo download.
+    from . import notes as session_notes
+
+    try:
+        notes = session_notes.load(args.notes)
+    except (OSError, ValueError) as error:
+        parser.error(f"--notes: {error}")
 
     if args.script:
         from .operations.tutorial import tutorials
@@ -281,6 +297,7 @@ def main() -> int:
         source_available=source is not None,
         live=not bool(args.core),
         initial_tutorial=args.tutorial,
+        notes=notes,
     ).run()
     return 0
 

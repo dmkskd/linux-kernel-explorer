@@ -139,9 +139,9 @@ STATUS = PseudoFile(
         Origin("NoNewPrivs", (), "atomic_flags",
                doc="the no_new_privs bit, from prctl(2): "
                    "PFA_NO_NEW_PRIVS in atomic_flags"),
-        Origin("Seccomp", ("seccomp",), "mode",
+        Origin("Seccomp", (".seccomp",), "mode",
                doc="seccomp mode: 0 disabled, 1 strict, 2 filter"),
-        Origin("Seccomp_filters", ("seccomp",), "filter_count", optional=True,
+        Origin("Seccomp_filters", (".seccomp",), "filter_count", optional=True,
                doc="number of seccomp filters attached to the process"),
         Origin("Speculation_Store_Bypass", (), "", optional=True, helper="arch_prctl_spec_ctrl_get",
                doc="speculation flaw mitigation state, from prctl(2)"),

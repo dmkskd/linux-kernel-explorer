@@ -124,6 +124,16 @@ def main() -> int:
     resolved, detail = pseudofs.check(prog, spec)
     check(resolved, f"paths against this kernel: {detail}")
 
+    # task_struct.seccomp is embedded and task_struct.mm is a pointer. Each
+    # spelled the other way must be reported: the seccomp one crashed the
+    # files tab when it was in the table.
+    embedded = pseudofs.resolve(prog, spec, pseudofs.Origin("x", ("seccomp",), "mode"))
+    check("spell the hop .seccomp" in embedded,
+          f"an embedded struct spelled as a pointer is reported: {embedded!r}")
+    pointer = pseudofs.resolve(prog, spec, pseudofs.Origin("x", (".mm",), "map_count"))
+    check("spell the hop mm" in pointer,
+          f"a pointer spelled as an embedded struct is reported: {pointer!r}")
+
     live = pseudofs.read(spec, 1)
     check(bool(live), f"/proc/1/status read: {len(live)} lines")
     strangers = [line.label for line in live if line.origin is None]
