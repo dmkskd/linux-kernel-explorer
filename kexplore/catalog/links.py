@@ -942,6 +942,17 @@ def _sb_mounts(sb: Object):
         yield _sb_mount_label(mount), mount
 
 
+def _sockfs_super(sock: Object) -> Object:
+    """SOCK_INODE(sock)->i_sb: the inode sits next to the socket in socket_alloc.
+
+    ``sock`` arrives as a pointer from SOCKET_I() and as a value from a struct
+    view, so both are accepted.
+    """
+    if ct.strip(sock.type_).kind != TypeKind.POINTER:
+        sock = sock.address_of_()
+    return container_of(sock, "struct socket_alloc", "socket").vfs_inode.i_sb
+
+
 def _fs_type_supers(fs_type: Object):
     """Every live superblock of this filesystem type.
 
@@ -1725,6 +1736,14 @@ LINKS: dict[str, list[Link]] = {
              userspace="ls -l /proc/<pid>/fd"),
         Link("ops", "Protocol-specific struct proto_ops table.", lambda s: s.ops,
              origin="socket->ops"),
+        Link(
+            "sockfs superblock",
+            "The in-memory filesystem holding every socket's inode, mounted "
+            "privately by the kernel (sock_mnt) and so absent from findmnt.",
+            _sockfs_super,
+            origin="SOCK_INODE(socket)->i_sb",
+            userspace="ls -l /proc/<pid>/fd  (socket:[N] is the sockfs inode)",
+        ),
     ],
     "sock": [
         Link("socket (struct socket)", "Associated struct socket; NULL when no file descriptor exists.",

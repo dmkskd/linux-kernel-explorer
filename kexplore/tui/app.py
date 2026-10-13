@@ -215,6 +215,7 @@ KEY_HELP: dict[str, str] = {
     "reread": "read the structure again from the live kernel",
     "userspace": "swap the kernel origins for commands that get the same from userspace",
     "cycle_view": "switch the sidebar between structures, operations and walkthroughs",
+    "fold_tree": "collapse the sidebar to its top-level entries, or open every entry again",
     "source": "open the kernel source this structure is declared in",
     "trace_command": "run the userspace command and record which kernel functions it reaches",
     "graph": "draw this structure and its neighbours",
@@ -916,6 +917,7 @@ class Explorer(App):
         Binding("r", "review", "review"),
         Binding("u", "userspace", "userspace"),
         Binding("v", "cycle_view", "view", show=False),
+        Binding("z", "fold_tree", "fold sidebar", show=False),
         Binding("a", "toggle_auto", "autoplay"),
         Binding("H", "toggle_header_variant", "header variant", show=False),
         Binding("Y", "toggle_highlight_style", "highlight style", show=False),
@@ -1068,7 +1070,7 @@ class Explorer(App):
             return False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in ("copy", "copy_row", "toggle_mouse", "note_next", "note_prev"):
+        if action in ("copy", "copy_row", "toggle_mouse", "note_next", "note_prev", "fold_tree"):
             return True
 
         landing_shown = self._landing_displayed()
@@ -2632,6 +2634,33 @@ class Explorer(App):
         label, obj = target
         self.push(frames.object_frame(label, obj, self.context, row.doc))
 
+    def action_fold_tree(self) -> None:
+        """Collapse the sidebar to its top-level entries, or open them all.
+
+        A press with any top-level entry open collapses every entry; a press
+        with all of them closed opens every entry at every depth. The files
+        tab opens one level only: each /proc directory is listed from the
+        live filesystem when opened, and that tab has hundreds of them.
+        """
+        tree: Tree = self.query_one("#nav", Tree)
+        top = tree.root.children
+        if any(node.is_expanded for node in top):
+            cursor = tree.cursor_node
+            while cursor is not None and cursor.parent not in (None, tree.root):
+                cursor = cursor.parent
+            for node in top:
+                node.collapse_all()
+            # Line numbers are recomputed on the next refresh, so the cursor
+            # can only be placed on its top-level ancestor after it.
+            if cursor is not None:
+                self.call_after_refresh(tree.move_cursor, cursor)
+        elif self.query_one("#views", Tabs).active == "view-files":
+            for node in top:
+                node.expand()
+        else:
+            for node in top:
+                node.expand_all()
+
     def action_expand(self) -> None:
         """Open the row under the cursor in place, keeping its neighbours visible.
 
@@ -2954,7 +2983,7 @@ class Explorer(App):
         ]
 
         SECTIONS: list[tuple[str, list[str]]] = [
-            ("Navigation", ["select_cursor", "expand", "back", "cycle_view"]),
+            ("Navigation", ["select_cursor", "expand", "back", "cycle_view", "fold_tree"]),
             ("Inspection", ["refresh", "source", "userspace", "trace_command", "graph", "repl"]),
             ("Table", ["search", "sort", "sort_reverse", "copy", "copy_row", "toggle_mouse"]),
             (
