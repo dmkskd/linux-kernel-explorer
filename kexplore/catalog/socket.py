@@ -37,20 +37,61 @@ from .walk import socket_files
 UNIX_HASH_SIZE = 256
 
 
+def _family_names(prog: Program) -> list[str]:
+    """Address family names, read from the kernel's pf_family_names.
+
+    "PF_UNIX/PF_LOCAL" becomes "unix": the first spelling, without the prefix.
+    Empty when the array is not in this kernel's debug info.
+    """
+    try:
+        names = prog["pf_family_names"]
+        return [
+            ct.safe(lambda n=name: n.string_().decode(), "")
+            .split("/")[0]
+            .removeprefix("PF_")
+            .lower()
+            for name in names
+        ]
+    except (KeyError, LookupError):
+        return []
+
+
+def _sock_kind(sk, families: list[str]) -> str:
+    """Family and type of a struct sock, as in "inet6 stream"."""
+    family = ct.safe(lambda: sk.__sk_common.skc_family.value_(), None)
+    if family is None:
+        return "?"
+    name = families[family] if family < len(families) and families[family] else ""
+    kind = name or f"family {family}"
+    sock_type = ct.safe(lambda: sk.sk_type.value_(), None)
+    type_name = ct.safe(
+        lambda: next(
+            e.name for e in sk.prog_.type("enum sock_type").enumerators
+            if e.value == sock_type
+        ),
+        None,
+    )
+    if type_name:
+        kind += " " + type_name.removeprefix("SOCK_").lower()
+    return kind
+
+
 def process_sockets(prog: Program):
     """struct socket per open socket fd, labelled with its owner."""
+    families = _family_names(prog)
     for task, fd, file in socket_files(prog):
         sock = SOCKET_I(file.f_inode)
-        family = ct.safe(lambda: sock.sk.__sk_common.skc_family.value_(), "?")
-        yield f"{task_comm(task)}[{task.pid.value_()}] fd {fd}  family {family}", sock
+        kind = _sock_kind(sock.sk, families) if sock.sk.value_() else "no sock"
+        yield f"{task_comm(task)}[{task.pid.value_()}] fd {fd}  {kind}", sock
 
 
 def process_socks(prog: Program):
     """The struct sock behind each socket fd -- the protocol-level object."""
+    families = _family_names(prog)
     for task, fd, file in socket_files(prog):
         sk = SOCKET_I(file.f_inode).sk
         if sk.value_():
-            yield f"{task_comm(task)}[{task.pid.value_()}] fd {fd}", sk
+            yield f"{task_comm(task)}[{task.pid.value_()}] fd {fd}  {_sock_kind(sk, families)}", sk
 
 
 def _hashinfo(prog: Program):
