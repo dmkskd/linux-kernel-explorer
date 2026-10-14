@@ -23,7 +23,7 @@ Click an image to open it at full size.
 
 A recorded session, start to a traced command:
 
-[![asciicast](https://asciinema.org/a/7FUWi1A86IITEUsq.svg)](https://asciinema.org/a/7FUWi1A86IITEUsq)
+[![asciicast](https://asciinema.org/a/7FUWi1A86IITEUsq.png)](https://asciinema.org/a/7FUWi1A86IITEUsq)
 
 ```
 process › 611 auditd › threads › 612 gmain › mm (address space) › VMAs
