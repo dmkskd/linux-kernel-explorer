@@ -21,13 +21,10 @@ and opening what it touches.
 
 Click an image to open it at full size.
 
-A recorded session, start to a traced command:
-
-[![asciicast](docs/overview-walkthrough.png)](https://asciinema.org/a/7FUWi1A86IITEUsq)
-
-```
-process › 611 auditd › threads › 612 gmain › mm (address space) › VMAs
-```
+<p>
+  <a href="https://asciinema.org/a/7FUWi1A86IITEUsq"><img src="docs/overview-walkthrough.png" alt="Overview walkthrough" width="48%"></a>
+  <a href="https://asciinema.org/a/VcqzptRQikJhXV10"><img src="docs/userspace-walkthrough.png" alt="Userspace walkthrough" width="48%"></a>
+</p>
 
 ## Requirements
 
