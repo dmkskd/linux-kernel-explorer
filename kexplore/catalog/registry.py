@@ -1,19 +1,19 @@
-"""The catalog: which structures matter, and where to start looking.
+"""The catalog: the structures each subsystem lists, and where browsing starts.
 
-``core`` knows how to render and navigate any struct but nothing about Linux.
-This package supplies the Linux part: entry points per subsystem, the links
-between structures, and what raw field values mean. Self-contained views of an
-operation live in ``operations`` instead.
+``core`` renders and navigates any struct and contains no Linux-specific code.
+This package supplies the Linux-specific part: entry points per subsystem, the
+links between structures, and the meanings of raw field values. Self-contained
+views of an operation are in ``operations``.
 
-There are three kinds of entry -- objects to browse, computed facts, and
-measurements over time -- and they share one interface: ``check(prog)`` says
-whether this entry works against this kernel and, for the browsable kind, hands
-back what it resolved. That is what lets ``--check`` and the crawl test loop
-over every entry without asking what type each one is.
+There are three kinds of entry (objects to browse, computed facts, and
+measurements over time), and all three share one interface: ``check(prog)``
+reports whether the entry resolves on the running kernel and, for a browsable
+entry, returns what it resolved. ``--check`` and the crawl test therefore iterate over
+every entry without dispatching on its type.
 
-Providers are called lazily and their failures are captured rather than raised,
-because helper availability varies with kernel version and config -- a missing
-``for_each_vmap_area`` should grey out one entry, not break sched.
+Providers are called lazily and their failures are captured, not raised,
+because helper availability varies with kernel version and configuration: a
+missing ``for_each_vmap_area`` disables only the entry that calls it.
 """
 
 from __future__ import annotations
@@ -31,11 +31,11 @@ Provider = Callable[[Program], "Object | Iterator[tuple[str, Object]]"]
 
 @dataclass(frozen=True)
 class CheckResult:
-    """Whether one entry works against this kernel, and what it found.
+    """Whether one entry resolves on this kernel, and what it resolved.
 
-    ``collection`` is set only by entries that resolve to objects, and is what
-    the crawl test navigates into -- so checking and crawling resolve once
-    between them rather than once each.
+    ``collection`` is set only by entries that resolve to objects, and the
+    crawl test navigates into it, so the check and the crawl share one
+    resolution.
     """
 
     ok: bool
@@ -52,9 +52,9 @@ class Entry:
     provider: Provider
     # Optional submenu within the subsystem; entries without one sit at the top.
     group: str = ""
-    # Header for a provider that yields cells rather than one label. Left empty
-    # by an entry whose rows have nothing to say beyond their type and address,
-    # which then get the field/type/value columns.
+    # Header for a provider that yields cells instead of one label. Empty for an
+    # entry whose rows show only type and address; those rows get the field,
+    # type and value columns.
     columns: tuple[str, ...] = ()
     # None means no special requirement. A callback returns None when the
     # kernel supports this view, or a human-readable reason when it cannot.
@@ -89,8 +89,8 @@ class Entry:
 class Fact:
     """One answer on an info page.
 
-    ``evidence`` records how the value was determined, so the claim can be
-    checked against the kernel rather than taken on trust.
+    ``evidence`` records how the value was determined, so that it can be
+    checked against the kernel.
     """
 
     label: str
@@ -133,7 +133,7 @@ class Measurement:
     """An entry that measures behaviour rather than reading state.
 
     Runs a tracer in the foreground for a few seconds and returns the result.
-    Nothing runs in the background and nothing is accumulated between runs.
+    It leaves no tracer running and keeps no data between runs.
     """
 
     key: str
@@ -156,9 +156,9 @@ class Measurement:
     def check(self, prog: Program) -> CheckResult:
         """Report whether the tracer is present, without running it.
 
-        Probes measure over time; running every one of them to check the
-        catalog would take minutes and tell you nothing about this kernel that
-        the backend's presence does not.
+        Probes measure over an interval, so running every probe to check the
+        catalog would take minutes, and would show only that the tracer runs,
+        which its presence already indicates.
         """
         from ..core.probe import tool_available
 
@@ -191,10 +191,10 @@ def register(subsystem: Subsystem) -> Subsystem:
 def attach(subsystem_key: str, *entries) -> None:
     """Add entries to a subsystem defined elsewhere.
 
-    Measurements are written together, because they share bpftrace idiom, but
-    belong under the subsystem they describe. This is how they get there --
-    once, at import, rather than by mutating the subsystem every time someone
-    asks for the list.
+    Measurements are defined in one module, because they share bpftrace
+    idioms, and are listed under the subsystem they describe. This attaches
+    them once, at import, instead of modifying the subsystem each time the list
+    is requested.
     """
     _ATTACHED.setdefault(subsystem_key, []).extend(entries)
 
@@ -202,22 +202,21 @@ def attach(subsystem_key: str, *entries) -> None:
 def subsystems() -> list[Subsystem]:
     """Every subsystem, in the order the modules are imported below.
 
-    A pure accessor: the subsystems as registered, plus whatever was attached
-    to them. Importing is the side effect, and Python's module cache makes it
-    happen exactly once however often this is called.
+    An accessor with no side effects: it returns the subsystems as registered,
+    with the entries attached to them. Registration happens when the modules are
+    imported, which Python does once per process.
     """
-    # I001 is off for this block on purpose: this is the order the subsystems
-    # appear in the sidebar, and sorting it alphabetically would open the tool
-    # on "device" instead of "system". A parent is imported before the
-    # subsystems listed under it, or the sidebar has no branch to put them in.
+    # I001 is disabled for this block because the import order is the order of
+    # the subsystems in the sidebar, and sorting it alphabetically would place
+    # "device" first instead of "system". A parent is imported before the
+    # subsystems listed under it, so that the sidebar branch exists for them.
     #
-    # The order reads as: what exists and when it runs (system, process,
-    # sched), the two things that take the CPU away from it (irq, timers),
-    # then the memory it runs in and the I/O paths out of it, ending at the
-    # hardware they all reach. block sits between vfs and net because a write
-    # leaves a filesystem as a bio and reaches a driver as a request, and ipc
-    # follows sync because both answer what one task is waiting for another to
-    # do -- sync inside the kernel, ipc through objects userspace names.
+    # The order: the system and its tasks (system, process, sched), what
+    # interrupts a task (irq, timers), then memory and the I/O paths, ending at
+    # the hardware. block is between vfs and net because a write leaves a
+    # filesystem as a bio and reaches a driver as a request. ipc follows sync
+    # because both list what one task waits on another for: sync through
+    # kernel locks, ipc through objects userspace names.
     from . import (  # noqa: F401,I001
         system, process, sched, sync, ipc, irq, timers, mm, page, slab, vfs,
         block, net, socket, skb, device, measure,

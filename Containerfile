@@ -1,10 +1,10 @@
-# The docker backend's image: the kexplore tools, and nothing host-specific.
+# The docker backend's image: the kexplore tools, with no host-specific files.
 #
 # The container explores the *host* kernel. run.sh starts it with
 # --cap-add SYS_RAWIO plus an unmask flag (see detect.sh) so drgn can read
 # /proc/kcore, with the repo mounted read-only at the same path, and with
-# the debuginfod cache as a volume so the kernel DWARF (hundreds of MB, no
-# resume) survives across runs.
+# the debuginfod cache as a volume so the kernel DWARF (hundreds of MB,
+# downloaded without resume) is kept between runs.
 #
 #   docker build -t kexplore -f Containerfile .
 #
@@ -20,6 +20,6 @@ RUN dnf install -y \
       python3-textual \
     && dnf clean all
 
-# bpftrace is deliberately absent: tracing from a container needs
-# --privileged and tracefs mounts, so measurements stay a lima/native
-# feature and the tool already treats them as optional.
+# bpftrace is not installed: tracing from a container needs --privileged and
+# tracefs mounts, so measurements are available only on the lima and native
+# backends, and kexplore treats them as optional.

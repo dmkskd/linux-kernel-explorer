@@ -1,4 +1,4 @@
-"""Scheduler: runqueues, tasks, and what is actually running."""
+"""Scheduler: runqueues, tasks, and the task running on each CPU."""
 
 from __future__ import annotations
 

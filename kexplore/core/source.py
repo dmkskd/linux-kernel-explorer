@@ -1,21 +1,18 @@
-"""Pull real documentation out of the kernel's own source.
+"""Struct member documentation from the running kernel's source comments.
 
-The DWARF we already load records where every struct was declared, and
-debuginfod serves the exactly-matching source for this build. Together that
-means field documentation can be the kernel's real comments for *this* kernel
-version -- not a hand-written gloss that drifts, and not a guess.
+The DWARF records where each struct is declared, and debuginfod serves the
+source of the exact build, so member documentation is taken from the comments
+in that source. The lookup has three steps:
 
-Three steps:
   1. ``pahole --show_decl_info`` gives ``kernel/sched/sched.h:1131`` for a tag.
-     (drgn 0.2.0 doesn't expose DW_AT_decl_file/decl_line on Type, or this
-     would be a direct attribute read.)
+     drgn 0.2.0 does not expose DW_AT_decl_file or DW_AT_decl_line on Type.
   2. ``debuginfod-find source`` fetches that file, keyed by build-id.
   3. A small scanner walks the struct body attaching comments to members.
 
-The scanner is loose, and validated against the member names drgn
-already knows: anything it extracts that isn't a real member is discarded. That
-makes ``#ifdef`` blocks, anonymous unions, attribute macros and function-pointer
-declarations safe to get wrong.
+The scanner is approximate. Everything it extracts is checked against the
+member names drgn reports, and anything that is not a member is discarded, so
+a misparsed ``#ifdef`` block, anonymous union, attribute macro or
+function-pointer declaration cannot attach a comment to the wrong member.
 """
 
 from __future__ import annotations
@@ -145,8 +142,8 @@ class KernelSource:
     def source_prefix(self) -> str | None:
         """The absolute source root recorded in DWARF, e.g. /usr/src/debug/...
 
-        Distro-specific, so it's probed once against a file that always exists
-        rather than assumed.
+        The path differs between distributions, so it is probed once against
+        a file that every kernel source tree contains.
         """
         if self.local_root is not None:
             return self.local_prefix or str(self.local_root) + "/"
@@ -299,8 +296,8 @@ class KernelSource:
         """Recover the summary comment and per-member comments for ``tag``.
 
         ``progress`` is called with a one-line description of each slow step
-        (the pahole scan, the source fetch), so the UI can show what it is
-        doing instead of looking hung.
+        (the pahole scan, the source fetch), so the UI can display the
+        current step.
         """
         doc = StructDoc(tag)
 
@@ -361,8 +358,8 @@ def _member_comments(
 ) -> tuple[dict[str, str], dict[str, int]]:
     """Walk a struct body, attaching leading and trailing comments to members.
 
-    Only names drgn already reported as members are kept, so a mis-parse costs
-    a missing comment rather than a wrong one.
+    Only names drgn reports as members are kept, so a misparse omits a comment
+    instead of attaching it to the wrong member.
     """
     comments: dict[str, str] = {}
     member_lines: dict[str, int] = {}

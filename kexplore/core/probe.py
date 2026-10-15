@@ -1,13 +1,10 @@
 """Run short foreground measurements and parse their output.
 
-drgn reads state: what the kernel looks like right now. It cannot answer "how
-long did tasks wait to be scheduled in the last second", because that is a
-property of events over an interval, not of memory at an instant.
-
-A Probe fills that gap by running a real tracer for a couple of seconds and
-returning the result. Deliberately synchronous and short-lived: nothing is
-accumulated in the background, nothing keeps running after the answer is on
-screen.
+drgn reads kernel state at one instant. A question about events over an
+interval, such as how long tasks waited to be scheduled during the last second,
+needs a tracer: a Probe runs one for a few seconds and returns its output.
+Probes are synchronous: they record no data in the background and leave no
+tracer running after the result is displayed.
 """
 
 from __future__ import annotations
@@ -43,8 +40,8 @@ class ProbeResult:
     sections: list[Section] = field(default_factory=list)
     error: str = ""
     raw: str = ""
-    # True when the traced command had to be killed because it does not exit on
-    # its own. The maps still hold what it did in the seconds it ran.
+    # True when the traced command was killed because it did not exit. The
+    # maps still hold the events recorded while it ran.
     stopped: bool = False
 
 
@@ -55,9 +52,8 @@ def tool_available(name: str) -> bool:
 def run_bpftrace(script: str, duration: int) -> ProbeResult:
     """Run a bpftrace program for ``duration`` seconds and parse its output.
 
-    The script must terminate itself; the timeout is only a backstop for a
-    program that fails to. bpftrace prints all maps at exit, which is what gets
-    parsed.
+    The script must exit by itself; the timeout applies only to a script that
+    does not. bpftrace prints all maps at exit, and that output is parsed.
     """
     if not tool_available("bpftrace"):
         return ProbeResult(error="bpftrace is not installed (dnf install bpftrace)")
@@ -287,8 +283,8 @@ def trace_command(
 def _run_briefly(path: str, seconds: int) -> bool:
     """Run a shell script, killing its whole process group after ``seconds``.
 
-    True if it had to be killed, which is how a command that never exits on its
-    own is reported rather than waited on.
+    Returns True if the process group was killed, so that a command that does
+    not exit is reported instead of waited for.
     """
     child = subprocess.Popen(
         ["/bin/sh", path],

@@ -321,9 +321,9 @@ async def main() -> int:
             f"s on a stack row opens its source: {app.stack[-1].label}",
         )
 
-        # A struct file records no holder, so its commands can only be
-        # completed by finding the task that has it open. Same resolver as the
-        # task and mm rows above, which is the point of it being one resolver.
+        # A struct file records no holder, so its commands are completed by
+        # finding the task that has it open, with the same resolver as the
+        # task and mm rows above.
         while len(app.stack) > 1:
             app.action_back()
         await settle(app, pilot)
@@ -339,8 +339,8 @@ async def main() -> int:
             f"a struct file fills both placeholders: {commands[:2]}",
         )
 
-        # A command reaching the kernel through something other than a file
-        # read still resolves: ss goes over netlink and reads nothing.
+        # A command that reaches the kernel without a file read still
+        # resolves: ss uses netlink and reads no file.
         from kexplore.operations.command_trace import command_trace
 
         rows = list(command_trace(app.prog, "ss -tanH"))
@@ -390,8 +390,8 @@ async def main() -> int:
         )
 
         # An empty stage 4 states why it is empty. vfs_statx reads a local
-        # struct path, and a local says nothing about what the caller passed in,
-        # so the scan reports none.
+        # struct path, and a local variable does not identify what the caller
+        # passed in, so the scan reports no reference.
         rows = list(command_trace(app.prog, "ls -l /proc/1/ns"))
         reads = next(
             (
@@ -464,8 +464,9 @@ async def main() -> int:
             "the trace does not claim ps output proves an on_cpu field access",
         )
 
-        # A command that never exits is capped rather than waited on, and says
-        # so: vmstat -n 1 prints a line a second forever.
+        # A command that does not exit is stopped after a time limit, and the
+        # result reports it: vmstat -n 1 prints one line per second until
+        # killed.
         trace_module = importlib.import_module("kexplore.operations.command_trace")
         run_command = trace_module.trace_command
         run_times = []

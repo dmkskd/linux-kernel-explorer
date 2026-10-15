@@ -1,11 +1,12 @@
 """Userspace equivalents for the subsystem entry points.
 
-The link table in ``links.py`` covers edges out of a struct. This covers the
-entries themselves: the lists you start from. Same purpose -- carry the mental
-model to a box that has none of this installed.
+``links.py`` gives the userspace command for each link out of a struct. This
+module gives it for the entries, the lists that browsing starts from, so the
+same information can be found on a machine without kexplore installed.
 
-An empty string means there is genuinely no userspace equivalent, which is
-worth stating rather than leaving blank: it marks what only a debugger reaches.
+An empty string means there is no userspace equivalent. It is displayed as
+such instead of being left blank, because it marks information that only a
+debugger can read.
 """
 
 from __future__ import annotations
@@ -86,9 +87,9 @@ ENTRY_COMMANDS: dict[tuple[str, str], str] = {
 }
 
 
-# Individual fields that userspace exposes. Most do not: the kernel keeps far
-# more state than it publishes, and that asymmetry is worth seeing. Only fields
-# with a genuine equivalent are listed.
+# Individual fields that userspace exposes. The kernel holds far more state
+# than it publishes, so most fields have no entry; only fields with an exact
+# userspace equivalent are listed.
 FIELD_COMMANDS: dict[tuple[str, str], str] = {
     # task_struct
     ("task_struct", "comm"): "cat /proc/<pid>/comm",
@@ -174,8 +175,8 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
     # also reaches /proc/<pid>/stat, as field 42 in clock ticks.
     #
     # The accounting is off unless kernel.task_delayacct is set. It is 0 on
-    # this VM, and then task->delays is NULL for every task, so these rows are
-    # not reachable at all rather than reading zero.
+    # the lab VM, and then task->delays is NULL for every task, so these rows
+    # cannot be reached, and are not shown as zero.
     ("task_delay_info", "blkio_delay"): "getdelays -d -p <pid>  # or field 42 of /proc/<pid>/stat, in ticks",
     ("task_delay_info", "blkio_count"): "getdelays -d -p <pid>",
     ("task_delay_info", "swapin_delay"): "getdelays -d -p <pid>",
@@ -229,10 +230,10 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
     ("sock", "sk_write_queue"): f"{SS_LINE} | awk '{{print $3}}'  # Send-Q: unacknowledged bytes",
     ("sock", "sk_ack_backlog"): f"{SS_LINE} | awk '{{print $2}}'  # Recv-Q on a listener",
     ("sock", "sk_max_ack_backlog"): f"{SS_LINE} | awk '{{print $3}}'  # Send-Q on a listener",
-    # The socket's inode: sk_ino and sk_uid are copied from it, so stat
-    # answers for every family, ss or not.
-    # ss prints sk_wmem_alloc_get(), which leaves out the reference the
-    # socket holds on itself: the field reads 1 where ss prints t0.
+    # sk_ino and sk_uid are copied from the socket's inode, so stat reports
+    # them for every socket family, including families ss does not list.
+    # ss prints sk_wmem_alloc_get(), which subtracts SK_WMEM_ALLOC_BIAS (1):
+    # the field reads 1 where ss prints t0.
     ("sock", "sk_wmem_alloc"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f3  # minus 1",
     ("sock", "sk_cgrp_data"): f"{SS_LINE} | grep -o 'cgroup:[^ ]*'",
     ("sock", "sk_pacing_rate"): "ss -<ss>anmeiOH | awk <inet> | grep -o ' pacing_rate [^ ]*'  # bits/s, the field times 8; none on a listener",
@@ -287,25 +288,24 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
 }
 
 
-# One place decides what a placeholder can be filled from. Every command in
-# this file, in ``links.py`` and in the kernel-side trace goes through it, so a
-# struct
-# either supplies a value for every command it shows or for none of them.
+# placeholders() decides how each placeholder is filled. Every command in this
+# file and in ``links.py``, and the kernel-side trace, uses it, so a struct
+# supplies a value for all the commands it shows or for none of them.
 #
-# Each rule reads the answer out of the kernel rather than out of the path the
-# user took to get here: an mm_struct names its owner, and a struct file, which
-# records no holder at all, is found by the task holding it. What no rule can
-# answer keeps its placeholder, because a command with <pid> still in it is
-# correct and one with a made-up pid is not.
+# Each rule reads the value from the kernel, not from the navigation path: an
+# mm_struct names its owner, and a struct file, which records no holder, is
+# found through the task that holds it. A placeholder no rule can fill is left
+# in place, because a command containing <pid> is correct and a command with
+# an invented pid is not.
 
 
 def _holder_of(obj):
     """The task holding this file, and at which descriptor.
 
-    struct file has no back-pointer to a task: several tasks can hold the same
-    file, and a file in flight over a unix socket is held by none. The index
-    that does know is the fd table, so this searches them. Measured at about
-    2000 descriptors across the machine, which is a hundredth of a second.
+    struct file has no pointer to a task: several tasks can hold the same file,
+    and a file in flight over a unix socket is held by no task. The fd tables
+    record the holders, so this searches them. With about 2000 descriptors on
+    the lab VM, the search took about 10 ms.
     """
     from drgn.helpers.linux.fs import for_each_file
     from drgn.helpers.linux.pid import for_each_task
@@ -324,10 +324,9 @@ def _holder_of(obj):
 def _delays_owner(obj):
     """The task whose delay accounting this is.
 
-    ``task->delays`` is a pointer to a separately allocated struct with no way
-    back, so the only way to the pid is to search the tasks. There are a few
-    hundred, which is cheaper than the fd search this file already does for a
-    struct file.
+    ``task->delays`` points to a separately allocated struct with no pointer
+    back to the task, so the tasks are searched. There are a few hundred, fewer
+    than the descriptors searched for a struct file.
     """
     from drgn.helpers.linux.pid import for_each_task
 
@@ -342,7 +341,7 @@ def _delays_owner(obj):
 
 
 def _ss_selector(sk) -> dict[str, str]:
-    """<ss> and <pick> for one struct sock, or nothing where ss cannot show it.
+    """<ss> and <pick> for one struct sock, or {} for a family ss cannot list by inode.
 
     TCP, UDP and raw print the socket inode as "ino:N" (with -e). Unix prints
     "ino:" too, but for the inode of the bound path; the socket's own inode is
@@ -382,8 +381,8 @@ def placeholders(obj, tag: str) -> dict[str, str]:
         if tag == "task_struct":
             found["<pid>"] = str(obj.pid.value_())
         elif tag == "sched_info":
-            # Embedded in the task, so the task is one container_of back. The
-            # schedstat commands are useless without the pid.
+            # Embedded in the task, so container_of recovers the task. The
+            # schedstat commands require the pid.
             from drgn import container_of
 
             found["<pid>"] = str(container_of(obj, "struct task_struct", "sched_info").pid.value_())
@@ -431,9 +430,8 @@ def placeholders(obj, tag: str) -> dict[str, str]:
     return found
 
 
-# What to say when a placeholder cannot be filled. An unfilled one is not a
-# command waiting to be completed: if no task owns this object, no /proc
-# directory publishes it, and there is nothing to run anywhere.
+# The text displayed when a placeholder cannot be filled. If no task owns the
+# object, no /proc directory publishes it, so there is no command to run.
 UNFILLED = {
     "<pid>": "no owning task, so no /proc path",
     "<n>": "no owning task, so no /proc path",
@@ -447,14 +445,13 @@ _PLACEHOLDER = re.compile(r"<\w+>")
 
 
 def fill(command: str, found: dict[str, str]) -> str:
-    """Substitute what the struct knows, and say why where it knows nothing.
+    """Fill the placeholders the struct supplies, or return why one cannot be.
 
-    Values are quoted before they go in. Most are pids and fds, which are
-    digits and come back from shlex.quote unchanged, so the command reads the
-    same as it always did. ``<name>`` is the exception: an interface name is a
-    string read out of kernel memory, and the "t" key hands the filled-in
-    command to /bin/sh as root. Quoting keeps a name with a shell character in
-    it an argument rather than the start of a second command.
+    Values are quoted before substitution. Most are pids and fds, which are
+    digits and are returned unchanged by shlex.quote. ``<name>`` is an
+    interface name read from kernel memory, and the "t" key passes the filled
+    command to /bin/sh as root, so quoting keeps a name containing a shell
+    metacharacter a single argument.
     """
     for placeholder, value in found.items():
         command = command.replace(placeholder, shlex.quote(value))
@@ -465,7 +462,7 @@ def fill(command: str, found: dict[str, str]) -> str:
 
 
 def runnable(command: str) -> str:
-    """The part of a displayed command a shell can actually take.
+    """The part of a displayed command that is valid shell input.
 
     A cell may offer alternatives separated by ", or " and may carry a trailing
     "# …" note. Both are for the reader: the alternatives are equivalents, not
@@ -476,9 +473,9 @@ def runnable(command: str) -> str:
 
 
 # A per-namespace sysctl is a field of a netns struct, and the file under
-# /proc/sys is the same field by another name. Writing out all 133 of them
-# would be a table that drifts; the name is derived instead, with the
-# exceptions listed. Both halves were checked against /proc/sys on a running
+# /proc/sys is the same field under another name. A table of all 133 would
+# go out of date, so the name is derived, with the exceptions listed. Both the
+# rule and the exceptions were checked against /proc/sys on a running
 # kernel: of 133 sysctl_ fields in these structs, 117 match after dropping the
 # prefix, 15 are named below, and one (netns_core.sysctl_txq_reselection) has
 # no file at all.

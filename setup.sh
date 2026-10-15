@@ -76,13 +76,13 @@ step() {
 # Check the tools are installed, inside the VM (lima), with sudo (native) or
 # in the container (docker).
 #
-# Deliberately stops at the tools. Whether drgn can resolve kernel types
-# depends on the vmlinux DWARF, and everything that manages that download
-# lives in kexplore itself: clearing the zero-length cache entries
-# libdebuginfod writes for a 404, discarding partial transfers, pinning the
-# retention, --prefetch and --offline. Resolving types here would run that
-# fetch with none of it, and failed on exactly those poisoned entries. The
-# Fedora downloads belong to run.sh; the Debian/Ubuntu recipe installs DWARF.
+# The check covers the tools only. Whether drgn can resolve kernel types
+# depends on the vmlinux DWARF, and the handling of that download is in
+# kexplore: removing the zero-length cache entries libdebuginfod writes for a
+# 404, discarding partial transfers, setting the retention, --prefetch and
+# --offline. Resolving types here would start the download without that
+# handling, and did fail on the zero-length entries. On Fedora, run.sh
+# downloads the DWARF; the Debian/Ubuntu recipe installs it as a package.
 read -r -d '' VERIFY <<'EOF' || true
 set -u
 fail=0
@@ -258,9 +258,9 @@ repair_ubuntu_ddebs() {
 
 install_native_deb() {
   local id codename dbgsym
-  # pip falls back to a source build when no compatible wheel is available
-  # (for example, on a newly released Python). Include development headers,
-  # not just the runtime tools, for that path.
+  # pip builds drgn from source when no compatible wheel exists (for example,
+  # for a newly released Python), so the list includes the compiler and the
+  # development headers that build needs.
   local -a packages=(
     debuginfod elfutils dwarves binutils python3-textual python3-pip
     build-essential pkgconf python3-dev python3-setuptools
@@ -294,8 +294,8 @@ install_native_deb() {
   echo
   confirm_install
 
-  # A malformed entry from an earlier run blocks even the first update,
-  # before we get a chance to install the keyring and write ddebs.sources.
+  # A malformed entry from an earlier run makes the first apt-get update
+  # fail, before the keyring is installed and ddebs.sources is written.
   if [ "$id" = ubuntu ]; then
     repair_ubuntu_ddebs "$codename"
   fi
@@ -432,9 +432,10 @@ if [ -n "${KEXPLORE_BACKEND:-}" ]; then
   # A pinned backend that fails to resolve already printed why.
   BACKEND="$(kexplore_backend)" || exit 1
 elif ! BACKEND="$(kexplore_backend 2>/dev/null)"; then
-  # Nothing to run against. Offer only what this script can drive to
-  # completion on this machine; no option here is homework. run.sh never
-  # prompts; it reports this state and exits.
+  # No backend is installed. Offer only the backends this script can install
+  # completely on this machine, without manual steps. In the same state,
+  # run.sh asks nothing: it prints "run ./setup.sh to set up a backend" and
+  # exits with status 1.
   echo
   if PKGCMD="$(kexplore_package_command)"; then
     # Fedora: a clean native install is available.
@@ -521,9 +522,9 @@ case "$BACKEND" in
   lima)
     distro="$(kexplore_lima_distro)"
     template="$REPO/lima/$(kexplore_lima_template)"
-    # Name the release, not just the distro. The Fedora template pins a cloud
-    # image by URL; the Ubuntu and Debian ones inherit a lima base template,
-    # which names the release instead.
+    # Name the release, not only the distribution. The Fedora template pins a
+    # cloud image by URL; the Ubuntu and Debian templates inherit a lima base
+    # template, which names the release.
     image="$(awk -F'/' '/^ *- *location: *"?https/ {
       gsub(/"/, "", $NF); sub(/\.qcow2$/, "", $NF); print $NF; exit }' "$template")"
     if [ -z "$image" ]; then

@@ -1,16 +1,16 @@
-"""Run the test scripts, and say which ones this machine can run.
+"""Run the test scripts, and report which ones this machine can run.
 
-Two kinds live here:
+There are two kinds of test:
 
-* **host tests** need nothing but Python. They cover the parts deliberately
-  written to be checkable without a kernel -- graph layout, bpftrace output
-  parsing -- and run on a laptop or in CI.
+* **host tests** need only Python. They cover the code written to be testable
+  without a kernel, such as graph layout and bpftrace output parsing, and run
+  on a laptop or in CI.
 * **kernel tests** attach to the live kernel through drgn, so they need root
-  wherever the backend (lima VM, native host or container) runs. Skipped,
-  loudly, when drgn cannot attach.
+  where the backend (lima VM, native host or container) runs. They are skipped,
+  with a message, when drgn cannot attach.
 
-    python3 tests/run_all.py            # everything this machine can do
-    python3 tests/run_all.py --host     # only the ones needing no kernel
+    python3 tests/run_all.py            # every test this machine can run
+    python3 tests/run_all.py --host     # only the tests needing no kernel
 """
 
 from __future__ import annotations

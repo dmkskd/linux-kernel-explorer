@@ -80,7 +80,7 @@ async def main() -> int:
         ok &= check("nr_running" in fields, "struct rq has nr_running")
         ok &= check("curr" in fields, "struct rq has curr")
 
-        # curr is a task_struct pointer: follow it and confirm we land on a task.
+        # curr is a task_struct pointer: follow it and check that it opens a task.
         index = fields.index("curr")
         table.move_cursor(row=index)
         app.action_follow()

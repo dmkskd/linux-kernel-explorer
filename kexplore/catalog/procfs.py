@@ -1,13 +1,12 @@
-"""Which kernel function publishes a /proc file.
+"""The kernel function that writes each /proc file.
 
-``userspace.py`` says a struct field is "field 9 of /proc/<pid>/stat". That
-answers where to read the value without a debugger, and stops there. This says
-who puts it in the file: the function the kernel runs when something reads that
-path, and the struct it formats.
+``userspace.py`` maps a struct field to its location in a file, such as "field
+9 of /proc/<pid>/stat". This module names the function the kernel runs when the
+file is read, and the struct it formats.
 
-Only the leaf is named here. The rest of the path from the read syscall down to
-that function is measured, not listed, because a stack recorded on this kernel
-is evidence and a stack written into a table is a claim about every kernel.
+Only that function is listed. The call path from the read syscall to it is
+measured at runtime instead, because a stack recorded on the running kernel is
+evidence, and a stack written into a table is a claim about every kernel.
 """
 
 from __future__ import annotations
@@ -124,11 +123,11 @@ def _ends_at(path: str) -> re.Pattern[str]:
 
 
 def served_by(command: str) -> ProcFile | None:
-    """The /proc file a userspace command reads, if this catalog knows it.
+    """The /proc file a userspace command reads, if the catalog lists it.
 
-    The command may carry a real pid, because the field rows substitute the one
-    being browsed. Put the placeholder back before looking it up, so the same
-    table answers for the row on screen and for the string it came from.
+    The command may contain a numeric pid, substituted by the field row being
+    browsed. The pid is replaced with ``<pid>`` before the lookup, so the same
+    table entry matches both the displayed command and its template.
     """
     generic = _CONCRETE_PID.sub("/proc/<pid>/", command)
     for path, entry in SERVED_BY.items():
@@ -141,8 +140,8 @@ def fields_from(path: str) -> list[tuple[str, str]]:
     """The struct fields whose userspace command reads this file.
 
     The path has to end where the match ends: /proc/<pid>/stat is a prefix of
-    /proc/<pid>/status, and a plain substring test hands the stat file every
-    field that is really published by status.
+    /proc/<pid>/status, and a substring test would assign to the stat file
+    every field that status publishes.
     """
     from .userspace import FIELD_COMMANDS
 
@@ -166,10 +165,9 @@ def path_from_dentry(grandparent: str, parent: str, name: str) -> str:
     """Rebuild a /proc path from the dentry names measured during a read.
 
     ps and pgrep open the task directory and then read the files inside it by
-    name, so the path is never on the command line and cannot be recovered from
-    it. The dentry chain has it. Only procfs is rebuilt here: everything else in
-    the tables names its own path in the command, so there is nothing to
-    recover.
+    name, so the path does not appear on the command line. The dentry chain
+    records it. Only procfs paths are rebuilt here, because every other table
+    entry has its path in the command.
     """
     if parent.isdigit():
         return f"/proc/<pid>/{name}"

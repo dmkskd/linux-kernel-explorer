@@ -28,9 +28,9 @@ def super_blocks(prog: Program):
 
 
 def init_files(prog: Program):
-    """Open files of pid 1 itself -- just that one task's fd table.
+    """Open files of pid 1: its fd table only, as /proc/1/fd shows it.
 
-    Not its descendants: pid 1's own fd table, the way /proc/1/fd shows it.
+    The fd tables of its descendants are not included.
     """
     task = find_task(prog, 1)
     for fd, file in files_of(task):
@@ -42,7 +42,7 @@ def all_files(prog: Program):
 
     One struct file can appear many times: fork() shares the fd table, and
     dup() adds descriptors to the same file. Each row is one (task, fd) pair,
-    so repeats are real rather than a bug.
+    so a file appears once per descriptor.
     """
     for task, fd, file in open_files(prog):
         yield (

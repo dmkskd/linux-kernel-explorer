@@ -19,8 +19,8 @@
 # debug format of the kernel in that VM, and the others have no PyPI
 # equivalent.
 #
-# Raising this is a deliberate, tested change: Textual breaks API between
-# major versions, and the suite is what says whether a new one works.
+# Raise this only after running the test suite on the new version: Textual
+# changes its API between major versions.
 KEXPLORE_TEXTUAL_PIN="${KEXPLORE_TEXTUAL_PIN:-4.0.0}"
 
 # Where a lab keeps the Python that runs kexplore. A venv with
@@ -53,9 +53,10 @@ kexplore_native_ready() {
 }
 
 # Echoes the container runtime command ("docker", "podman", "sudo podman")
-# when one can run a kcore-capable container, and fails otherwise. Rootless
-# podman is excluded on purpose: /proc/kcore needs CAP_SYS_RAWIO in the
-# initial user namespace, which a rootless container never has.
+# when one can run a container that can read /proc/kcore, and fails
+# otherwise. Rootless podman is excluded, because /proc/kcore requires
+# CAP_SYS_RAWIO in the initial user namespace, which a rootless container
+# does not have.
 kexplore_container_runtime() {
   if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
     echo docker
@@ -72,9 +73,8 @@ kexplore_container_runtime() {
   fi
 }
 
-# Echoes the resolved backend: lima, native or docker. Fails when this
-# machine has no way to run kexplore; the message already says so, callers
-# just propagate the exit.
+# Echoes the resolved backend: lima, native or docker. Fails, with a message,
+# when no backend can run on this machine; callers propagate the exit status.
 kexplore_backend() {
   case "${KEXPLORE_BACKEND:-}" in
     lima|docker)
@@ -117,8 +117,9 @@ kexplore_backend() {
 }
 
 # The extra flags a container needs so drgn can read the host kernel. Both
-# runtimes mount /proc/kcore as /dev/null by default, and the read then
-# succeeds returning nothing, so drgn fails only later and confusingly.
+# runtimes mount /dev/null over /proc/kcore by default, and a read then
+# returns zero bytes without an error, so drgn fails later, at the first
+# memory read.
 # $1 is the runtime string from kexplore_container_runtime.
 kexplore_container_kernel_flags() {
   case "$1" in

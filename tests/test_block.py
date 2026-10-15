@@ -30,10 +30,10 @@ from kexplore.tui.app import Explorer
 
 ok = True
 
-# Concurrent direct reads, restarted until the test kills them: the sampling
-# below takes longer than any fixed amount of I/O would, and an empty queue
-# tells us nothing. Direct I/O is required, since a cached read never reaches
-# the device at all.
+# Concurrent direct reads, restarted until the test kills them, because the
+# sampling below takes longer than a fixed amount of I/O, and an empty queue
+# would leave the request checks untested. Direct I/O is required, because a
+# read served from the page cache does not reach the device.
 LOAD = (
     "for i in $(seq 8); do "
     "while :; do dd if=/dev/vda of=/dev/null bs=1M count=64 "
@@ -50,7 +50,7 @@ def check(condition: bool, message: str) -> None:
 
 
 def _resolve(obj, label):
-    """The items one named link yields, or nothing if it is gone or faults."""
+    """The items one named link yields, or an empty list if it is absent or faults."""
     link = next((lk for lk in links_for(obj) if lk.label == label), None)
     if link is None or not link.visible(obj):
         return []
@@ -244,10 +244,9 @@ async def main() -> int:
                     check(len(pages) >= 1 and "error" not in {r.kind for r in pages},
                           f"and hands over {len(pages)} page(s) to mm")
             # --- the same edges, resolved without the UI in between ------
-            # Nothing here is redundant with the descent above: that one checks
-            # what the frames show, this one checks that the links resolve at
-            # all, and it is fast enough to land on a request that is still in
-            # flight. Both need the load, so it stays running until here.
+            # The descent above checks what the frames show; this checks that
+            # the links resolve, and runs fast enough to find a request still in
+            # flight. Both need the load, so it keeps running until here.
             edges = None
             seen = 0
             for _ in range(SAMPLES):
@@ -265,10 +264,10 @@ async def main() -> int:
                 edges = (label, bios, pages)
                 break
             if edges is None:
-                # Seeing none at all means the load never reached the device,
-                # which is a broken test rather than a busy one. Seeing them
-                # come and go without a bio surviving the read is the disk
-                # being faster than this loop, and says nothing about the link.
+                # No request seen means the load did not reach the device, a
+                # fault in the test. Requests completing before their bios are
+                # read means the disk is faster than this loop, which does not
+                # indicate a fault in the link.
                 check(seen > 0, f"the load put requests on the queue: {seen} seen "
                                 f"in {SAMPLES} tries, none held a bio long enough")
             else:

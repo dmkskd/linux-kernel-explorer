@@ -1,17 +1,14 @@
-"""Focus mode: the neighbourhood of one object, as a picture.
+"""Focus mode: the neighbourhood of one object, drawn as a graph.
 
-The field table answers "what is in this struct". This answers the other
-question you have while staring at a ``task_struct``: *what does it depend on,
-and how do you get there*. Boxes are structs; the line between two boxes is
-labelled with the edge's name and, underneath, the traversal itself --
-``task->mm``, ``task_rq() = cpu_rq(task_cpu(task))``, ``walks task->mm->mm_mt``.
-That second line is the point. A kernel is data structures plus the operations
-that move between them, and the operation is the half a struct browser
-normally throws away.
+The field table lists the members of a struct. This view shows the objects a
+struct leads to and the operations that reach them. Each box is a struct, and
+the line between two boxes is labelled with the link's name and, below it, the
+operation that traverses it, for example ``task->mm``,
+``task_rq() = cpu_rq(task_cpu(task))`` or ``walks task->mm->mm_mt``.
 
-Edges come from the curated ``LINKS`` table, the same ones the ``→`` rows in
-the table view follow, so the picture never claims a relationship the rest of
-the tool does not.
+Edges come from the curated ``LINKS`` table that the ``→`` rows in the table
+view also follow, so the graph shows the same relationships as the table
+view.
 """
 
 from __future__ import annotations
@@ -43,23 +40,23 @@ from ..core.graph import (
 from ..core.nav import collect, collection_rows
 from .clipboard import copy_to_system_clipboard
 
-# How many members of a collection to count before giving up and saying "many".
-# Counting is the cheap part for most links, but a VMA's resident pages is a
-# page table walk, so there has to be a stop.
+# Members of a collection counted before the count is shown as "many".
+# Counting is fast for most links, but counting a VMA's resident pages walks
+# the page tables, so the count is bounded.
 COUNT_LIMIT = 500
 
-# How many members of an expanded collection get their own box. A task's 156
-# open files would bury the branch you were following; the rest stay behind a
-# "… n more" box that opens as a list.
+# Members of an expanded collection drawn as boxes. A task's 156 open files
+# would push the selected branch off screen, so the remaining members are
+# grouped in a "… n more" box that opens as a list.
 MEMBER_LIMIT = 12
 
 def _palette(app) -> dict[str, str]:
     """Concrete colours for the canvas, from the active theme.
 
     The canvas is a rich ``Text``, not a styled widget tree, so it cannot use
-    the ``$text-muted`` design tokens the stylesheet uses -- rich parses a
-    style string itself and has never heard of them. Resolve them here instead
-    of hardcoding colours, so the view still follows the user's theme.
+    the ``$text-muted`` design tokens the stylesheet uses: rich parses style
+    strings itself and does not recognise them. The colours are resolved here
+    from the theme instead of being hardcoded, so the view follows the theme.
     """
     theme = app.current_theme
     foreground = theme.foreground or "#e0e0e0"
@@ -83,15 +80,16 @@ def _palette(app) -> dict[str, str]:
 
 
 def _identity(obj: Object) -> tuple[str, str, str]:
-    """A box's label: the type, something to tell this one apart, and detail.
+    """A box's label: the type, an identifier, and detail.
 
-    Addresses are the honest default -- for most structs there is nothing
-    shorter that is still unambiguous -- but a task is worth naming, because
-    "611 auditd" is the whole reason you opened it.
+    The identifier is the address by default, because most structs have no
+    shorter unambiguous identifier. A task is identified by pid and command
+    instead, for example "611 auditd".
 
-    Kernel addresses are shown by their tail. Every one on screen shares the
-    same ``0xffff...`` prefix, so the leading half distinguishes nothing while
-    costing a third of the box's width; the full value goes to the info line.
+    Kernel addresses are shown by their low digits. Every address on screen
+    shares the ``0xffff...`` prefix, which distinguishes none of them and would
+    take a third of the box's width; the full value is shown in the info
+    line.
     """
     tag = ct.tag_of(obj.type_) or ct.type_name(obj.type_)
     address = ct.safe(lambda: obj.value_(), 0)
@@ -127,9 +125,9 @@ def _key(obj: Object) -> str:
 def graph_key(obj: Object) -> str:
     """The key of the box ``obj`` would occupy, however it is spelled.
 
-    A struct and a pointer to it are the same box, so callers outside this
-    module -- asking "is this the graph I left?" -- go through here rather than
-    having to know that a value has to be turned into a pointer first.
+    A struct and a pointer to it map to the same box. Callers outside this
+    module that compare graphs use this function, so they do not convert a
+    value to a pointer themselves.
     """
     return _key(_as_pointer(obj))
 
@@ -139,8 +137,7 @@ def _resolve(link, obj: Object, sample: int = 4):
 
     Returns ``(single, items, count)``: exactly one of ``single`` and ``items``
     is set. A collection that turns out to hold one member is treated as a
-    single object, because drawing "children ×1" instead of the child would be
-    hiding the answer behind a count.
+    single object, so the member is drawn instead of a "children ×1" box.
 
     ``sample`` is how many members to keep. A collapsed collection needs only
     enough to name its element type; an expanded one needs a box each.
@@ -168,9 +165,9 @@ def _resolve(link, obj: Object, sample: int = 4):
 def _link_count(obj: Object) -> int:
     """How many curated edges leave ``obj``.
 
-    Deliberately does not resolve any of them: the table lookup and the
-    predicates are cheap, while resolving is what walks maple trees and page
-    tables. This is what lets a collapsed box say "+7" for free.
+    Does not resolve the edges: the table lookup and the predicates are cheap,
+    whereas resolving walks maple trees and page tables. A collapsed box can
+    therefore show "+7" without reading kernel memory.
     """
     return sum(1 for link in links_for(obj) if link.visible(obj))
 
@@ -179,10 +176,9 @@ def build(obj: Object, expanded: frozenset[str]) -> Graph:
     """Walk curated links out of ``obj``, breadth first, into ``expanded``.
 
     Only nodes whose key is in ``expanded`` have their links resolved; the
-    rest become collapsed boxes advertising an edge count. Expansion is per
-    node rather than a global depth because a useful picture is one branch
-    followed a long way with everything else shut, which a depth number cannot
-    express.
+    rest become collapsed boxes showing their edge count. Expansion is per
+    node, not a global depth, so that one branch can be followed several
+    levels deep while every other branch stays collapsed.
 
     Breadth first rather than depth first so the tree edge into a node is the
     shortest path to it, which is what makes the picture's columns mean
@@ -190,8 +186,9 @@ def build(obj: Object, expanded: frozenset[str]) -> Graph:
     """
     root = _as_pointer(obj)
     root_key = _key(root)
-    # Built like any other box, not by hand: a root without link_count reports
-    # no edges and refuses to expand, so collapsing it would be a dead end.
+    # Built like any other box, so that it has a link_count: a root without one
+    # reports no edges, cannot be expanded, and so could not be reopened after
+    # being collapsed.
     nodes = {root_key: _object_node(root, 0, expanded, "", kind="root")}
     edges: list[Edge] = []
 
@@ -225,8 +222,8 @@ def build(obj: Object, expanded: frozenset[str]) -> Graph:
                     continue  # a NULL edge is not a dependency
                 child = _key(target)
                 if child in nodes:
-                    # Already drawn. Record it on the source as a return edge
-                    # rather than routing a line back across the canvas.
+                    # Already drawn. Recorded on the source as a return edge
+                    # instead of drawing a line back across the canvas.
                     nodes[key].returns.append(f"{link.label} → {nodes[child].subtitle}")
                     edges.append(Edge(key, child, link.label, link.origin, back=True))
                     continue
@@ -235,13 +232,13 @@ def build(obj: Object, expanded: frozenset[str]) -> Graph:
                 frontier.append((child, target, level + 1))
                 continue
 
-            # A collection is one box carrying its size, until it is opened.
-            # Drawing all of it unasked would bury the branch you are on under
-            # a task's 156 open files.
+            # A collection is drawn as one box showing its size until it is
+            # opened, so that a task's 156 open files do not push the selected
+            # branch off screen.
             size = "many" if count < 0 else f"×{count}"
-            # The box says what is in the collection; the edge already says
-            # what the collection is called, so repeating the link label here
-            # would spend the widest line in the picture on nothing.
+            # The box shows the type of the collection's members; the edge
+            # already shows the collection's name, so the link label is not
+            # repeated in the box.
             tags = {ct.tag_of(member.type_) for _, member in items}
             title = tags.pop() if len(tags) == 1 else link.label
             nodes[fan] = Node(
@@ -260,9 +257,9 @@ def build(obj: Object, expanded: frozenset[str]) -> Graph:
             if fan not in expanded:
                 continue
 
-            # Opened: each member gets its own box, and stays expandable in
-            # turn, so following one file into its inode is the same two
-            # keystrokes as anything else.
+            # Opened: each member is drawn as its own box and can be expanded
+            # in turn, so following one file to its inode takes the same two
+            # keystrokes as any other edge.
             for item_label, member in items[:MEMBER_LIMIT]:
                 target = _as_pointer(member)
                 if not ct.safe(lambda: target.value_(), 0):
@@ -325,10 +322,9 @@ def _expander(link, obj: Object) -> Callable[[], list]:
 class GraphScroll(ScrollableContainer):
     """The viewport.
 
-    Deliberately not focusable: a focused scroll container binds the arrow
-    keys to scrolling, which would swallow them before the screen could move
-    the selection. Scrolling here follows the selection instead of competing
-    with it.
+    Not focusable, because a focused scroll container binds the arrow keys to
+    scrolling, and the screen would not receive them to move the selection.
+    The view scrolls to follow the selection.
     """
 
     can_focus = False
@@ -376,16 +372,17 @@ class GraphScreen(Screen):
     ) -> None:
         super().__init__()
         self.explorer = explorer
-        # Each re-centring pushes here, so backspace walks back out.
+        # The roots in re-centring order, the current root last; backspace pops it.
         self.history: list[tuple[Object, str]] = [(obj, label)]
         self.graph: Graph | None = None
         self.placed: dict = {}
         self.selected: str | None = None
-        # Keys whose links have been walked. Only the root starts open, so the
-        # first picture is one level and everything after that is asked for.
+        # Keys whose links have been walked. Only the root starts expanded, so
+        # the first graph is one level deep and each further level is expanded
+        # on request.
         self.expanded: frozenset[str] = frozenset()
-        # Reopening after a trip to the table restores the boxes that were
-        # open: expansions are work the user did, not a cache.
+        # Reopening the graph after visiting the table restores the boxes that
+        # were expanded, because the user expanded them.
         self.restoring = state["selected"] if state else None
         if state is not None:
             self.history = list(state["history"])
@@ -427,8 +424,8 @@ class GraphScreen(Screen):
     def _built(self, graph: Graph, keep: str | None = None) -> None:
         self.graph = graph
         self.placed = layout(graph)
-        # Expanding must not move the cursor: the box you opened is the one
-        # you are still looking at.
+        # Expanding does not move the selection, which stays on the expanded
+        # box.
         self.selected = keep if keep in graph.nodes else graph.root
         self.refresh_canvas()
 
@@ -444,9 +441,8 @@ class GraphScreen(Screen):
     def update_breadcrumb(self) -> None:
         """The trail from the centre to the selected box, in edge names.
 
-        The graph's own navigation is the interesting one -- which edges you
-        followed to get here -- so the path line tracks the selection, not
-        just the re-centres.
+        The path line shows the edges followed within the graph to reach the
+        selection, not only the re-centrings.
         """
         trail = [label for _, label in self.history]
         if self.graph is not None and self.selected is not None:
@@ -472,13 +468,12 @@ class GraphScreen(Screen):
     def scroll_to_selected(self) -> None:
         """Bring the selected box into view, with its incoming edge if it fits.
 
-        Computed rather than handed to ``scroll_to_region``: the region worth
-        showing is the edge label plus the box, which is wider than the
-        viewport on a narrow terminal. Asked to fit a region it cannot,
-        ``scroll_to_region`` settles for the left of it, which is the label --
-        leaving the box itself off the right edge, exactly when expanding
-        outward matters most. So the box is placed first and the label is a
-        preference applied only if there is room left over.
+        Computed here instead of with ``scroll_to_region``. The region to show
+        is the edge label and the box, which is wider than the viewport on a
+        narrow terminal, and given a region wider than the viewport,
+        ``scroll_to_region`` shows its left part: the label, with the box off
+        the right edge. So the box is brought into view first, and the label
+        only if there is room.
         """
         spot = self.placed.get(self.selected) if self.selected else None
         if spot is None:
@@ -494,13 +489,13 @@ class GraphScreen(Screen):
         x1, y1 = x0 + spot.w, y0 + BOX_HEIGHT
 
         scroll_x, scroll_y = container.scroll_offset
-        # The box itself is non-negotiable: right edge first, then left, so a
-        # box wider than the viewport still shows its start.
+        # The box is always brought into view: right edge first, then left, so
+        # a box wider than the viewport shows its start.
         if x1 > scroll_x + width:
             scroll_x = x1 - width
         if x0 < scroll_x:
             scroll_x = x0
-        # Then reveal the edge that reaches it, but never at the box's expense.
+        # Then the incoming edge, only if the box stays in view.
         lead = max(0, x0 - COL_GAP - 2)
         if lead < scroll_x and x1 - lead <= width:
             scroll_x = lead
@@ -524,8 +519,7 @@ class GraphScreen(Screen):
                 origin = f"  [{edge.op}]" if edge.op else ""
                 parts.append(f"{self.graph.nodes[parent].title}: {edge.label}{origin}")
         else:
-            # The root has no incoming edge, so say what it is instead of
-            # leaving the line blank.
+            # The root has no incoming edge, so the line names the root.
             parts.append(f"{node.title} {node.subtitle}  (centre of this graph)")
         if node.detail:
             parts.append(node.detail)
@@ -558,9 +552,9 @@ class GraphScreen(Screen):
             return
         node = self.graph.nodes[self.selected]
 
-        # Right opens a shut box and then walks into it; left shuts an open one
-        # and then walks back out. That is the flow a tree gives you, and it
-        # means expanding never needs a second key.
+        # Right expands a collapsed box, then moves into it; left collapses an
+        # expanded box, then moves back out, as in a tree widget. Expanding
+        # needs no separate key.
         if (
             direction == "right"
             and self._expandable(node)
@@ -597,8 +591,8 @@ class GraphScreen(Screen):
             if not kids:
                 self.app.bell()
                 return
-            # Land on the child nearest this box's own row, so moving outward
-            # follows the line you are looking at.
+            # Select the child nearest this box's row, so that moving right
+            # follows the edge drawn from it.
             here = self.placed[self.selected].port
             self.selected = min(kids, key=lambda k: abs(self.placed[k].port - here))
 
@@ -607,8 +601,8 @@ class GraphScreen(Screen):
     def action_toggle(self) -> None:
         """Open the selected box's edges, or shut them again.
 
-        Everything happens on the canvas: a collection opens into a box per
-        member here, rather than dropping out of the picture into a list.
+        The result is drawn on the canvas: a collection opens into one box per
+        member instead of switching to a list.
         """
         if self.graph is None or self.selected is None:
             return
@@ -624,9 +618,8 @@ class GraphScreen(Screen):
     def _collapse(self, key: str) -> None:
         """Shut a box and everything under it.
 
-        The whole subtree, not just one level: leaving orphaned expansions
-        behind would make reopening the box bring back branches that were
-        already dismissed.
+        The whole subtree is collapsed, not one level, so that reopening the
+        box does not restore branches below it that were collapsed with it.
         """
         self.expanded = frozenset(
             k for k in self.expanded if not self._under(k, key)
@@ -655,9 +648,9 @@ class GraphScreen(Screen):
             return
         node = self.graph.nodes[self.selected]
         if node.kind == "fanout" and node.expand is not None:
-            # Name the list after the edge, not after the box: the box says
-            # "task_struct", the edge says "threads", and "threads" is the
-            # breadcrumb you want.
+            # The list is named after the edge, not the box: the box shows
+            # "task_struct", the edge "threads", and the breadcrumb shows
+            # "threads".
             parent = self.graph.parent(self.selected)
             edge = self.graph.edge(parent, self.selected) if parent else None
             self.explorer.open_rows(edge.label if edge else node.title, node.expand, node.doc)
@@ -667,8 +660,8 @@ class GraphScreen(Screen):
             self.app.bell()
             return
         self.history.append((node.obj, f"{node.title} {node.subtitle}"))
-        # Keys are addresses, so an old expansion could accidentally match a
-        # box in the new picture. Start it shut.
+        # Keys are addresses, so an expansion from the old graph could match a
+        # box in the new one. The new graph starts collapsed.
         self.expanded = frozenset({graph_key(node.obj)})
         self.rebuild()
 
@@ -683,8 +676,8 @@ class GraphScreen(Screen):
     def action_fields(self) -> None:
         """Leave the picture for the table: fields for a struct, rows for a set.
 
-        This is the only key that leaves the graph. Expanding stays here, so
-        the two are never confused with each other.
+        This is the only key that leaves the graph; expanding stays in it, so
+        the two actions use different keys.
         """
         if self.graph is None or self.selected is None:
             return
@@ -708,11 +701,10 @@ class GraphScreen(Screen):
         self.explorer.open_object(f"{node.title} {node.subtitle}", node.obj, node.doc)
 
     def save_state(self, handoff: str | None = None) -> None:
-        """Remember the picture so reopening it does not start from scratch.
+        """Save the graph, so that reopening it restores its state.
 
-        ``handoff`` is the box whose detail view we are leaving for; coming
-        back from that view is what should restore this graph, as opposed to
-        pressing g somewhere unrelated.
+        ``handoff`` is the box whose detail view is being opened. Returning from
+        that view restores this graph; pressing g on another object does not.
         """
         root = graph_key(self.history[-1][0])
         returns = {root}

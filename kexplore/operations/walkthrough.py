@@ -1,16 +1,16 @@
 """Walkthroughs: an operation described as an ordered sequence of steps.
 
-The structure browser answers "what is in this struct". A walkthrough answers
-"what happens during this operation, and which structures take part". The two
-are separate views over the same kernel, not replacements for each other.
+The structure browser shows the contents of a struct. A walkthrough shows the
+steps of an operation and the structures each step uses. Both are views of
+the same kernel.
 
 Each step names a kernel function, which is resolved to file and line at
-display time, and optionally supplies the structures involved so they can be
-opened in the structure browser.
+display time, and can supply the structures involved so they can be opened in
+the structure browser.
 
-These sequences are hand-written. They describe the common path and skip error
-handling and special cases, so a step may correspond to several functions in
-the source.
+The sequences are written by hand. They describe the common path and omit
+error handling and special cases, so one step can correspond to several
+functions in the source.
 """
 
 from __future__ import annotations

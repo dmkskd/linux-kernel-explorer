@@ -1,19 +1,16 @@
 """Run a controlled program, then inspect the kernel state it produced.
 
-Observation alone cannot attribute cause. A pthread_create passes five CLONE_*
-flags at once, so watching an arbitrary process shows five structures differing
-and no way to say which flag did what. The only way to isolate a flag is to
-pass it ourselves.
+Observing an arbitrary process cannot attribute a structure to one clone
+flag, because pthread_create passes five CLONE_* flags in a single call. An
+experiment therefore compiles and runs a small helper that passes only the
+flags under test, keeps it alive while drgn reads the tasks it created, and
+kills it before returning.
 
-An experiment therefore compiles and runs a small helper, holds it alive while
-drgn reads the tasks it created, and then kills it. Nothing survives the call.
-
-``perf_stat`` is the other half: run any command under perf and get its
-counters back as numbers. Note that hardware counters are unavailable inside
-this VM -- the hypervisor does not pass through the PMU, so ``cycles`` and
-``instructions`` report "<not supported>". Software events (task-clock,
-context-switches, page-faults, minor-faults, major-faults) and tracepoints do
-work, and those are the ones worth counting for kernel behaviour anyway.
+``perf_stat`` runs a command under perf and returns its counters as numbers.
+Hardware counters are unavailable in the lab VM, because the hypervisor does
+not expose the PMU, and ``cycles`` and ``instructions`` report
+"<not supported>". Software events (task-clock, context-switches, page-faults,
+minor-faults, major-faults) and tracepoints are available.
 """
 
 from __future__ import annotations
@@ -31,9 +28,9 @@ from pathlib import Path
 class Running:
     """A helper process that is alive and holding kernel state in place."""
 
-    # None when the helper could not be started at all; ``error`` says why.
-    # Every other field still reads normally, so a caller reports the failure
-    # the same way it reports one the helper announced itself.
+    # None when the helper could not be started; ``error`` holds the reason.
+    # The other fields keep their defaults, so a caller reports a start
+    # failure the same way as a failure the helper printed.
     process: subprocess.Popen | None
     lines: list[str] = field(default_factory=list)
     error: str = ""
@@ -81,11 +78,10 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
     is still there when drgn looks.
     """
     try:
-        # Unbuffered bytes, not text: the lines are split here, from a buffer
-        # this function owns. A TextIOWrapper would hold the decoded tail of
-        # each read in a buffer of its own, which select() cannot see into,
-        # and the loop below would then wait out its whole deadline with
-        # "READY" already sitting in memory.
+        # Unbuffered bytes, split into lines by this function. A TextIOWrapper
+        # keeps the decoded tail of each read in an internal buffer that
+        # select() does not report, so the loop below would wait until the
+        # deadline with "READY" already read.
         process = subprocess.Popen(
             [str(binary), *args],
             stdout=subprocess.PIPE,
@@ -98,11 +94,9 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
 
     running = Running(process=process)
     deadline = time.monotonic() + timeout
-    # read() blocks, so the deadline has to be enforced from outside the read
-    # rather than between reads: a helper that starts, prints nothing and never
-    # exits would otherwise hold this call open forever, and it is called from
-    # a UI worker thread that has already put "running the experiment…" on
-    # screen. select() gives the read a bounded wait.
+    # read() blocks, so a helper that writes no output and does not exit would
+    # block this call, and the UI worker thread that made it, indefinitely.
+    # select() bounds each wait by the remaining time to the deadline.
     pending = b""
     while process.stdout is not None:
         remaining = deadline - time.monotonic()
@@ -112,9 +106,10 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
             continue
         chunk = process.stdout.read(4096)
         if not chunk:
-            # select said readable and the read came back empty, so this is
-            # EOF, not a short read. Either way the helper can no longer say it
-            # is ready; poll only decides which of the two to report.
+            # select() reported the pipe readable and read() returned zero
+            # bytes: the write end is closed (EOF), so the helper cannot
+            # report that it is ready. poll() shows whether it has also exited,
+            # which selects the error message.
             running.error = (
                 "helper exited before it was ready"
                 if process.poll() is not None
@@ -123,9 +118,9 @@ def start(binary: Path, args: list[str], ready: str, timeout: float = 30.0) -> R
             running.stop()
             return running
         pending += chunk
-        # One read can carry several lines, or end mid-line. Complete lines are
-        # reported now; whatever follows the last newline waits for the read
-        # that finishes it.
+        # One read can return several lines or end inside a line. Complete
+        # lines are processed now; the text after the last newline is kept
+        # until a later read completes it.
         while b"\n" in pending:
             raw, pending = pending.split(b"\n", 1)
             line = raw.decode("utf-8", "replace").rstrip()
@@ -168,7 +163,7 @@ def perf_stat(
 ) -> Counters:
     """Run a command under perf stat and return its counters.
 
-    Uses CSV output (``-x,``) rather than the human format, which changes
+    Uses CSV output (``-x,``), because the default output format changes
     between perf versions and is padded for display.
     """
     if not Path("/usr/bin/perf").exists() and not _which("perf"):

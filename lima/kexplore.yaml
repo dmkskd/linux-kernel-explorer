@@ -20,9 +20,9 @@ cpus: 4
 memory: 8GiB
 disk: 40GiB
 
-# The repo is read from the host at the same path, so there is nothing to sync.
-# Read-only is enough: the tool never writes here, which is also why run.sh sets
-# PYTHONDONTWRITEBYTECODE.
+# The repo is read from the host at the same path, so no files are copied.
+# The mount is read-only because kexplore does not write to the repository;
+# run.sh sets PYTHONDONTWRITEBYTECODE for the same reason.
 mounts:
 - location: "~"
 

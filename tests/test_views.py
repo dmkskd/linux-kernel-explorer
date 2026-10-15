@@ -1,7 +1,7 @@
-"""Two views over the same kernel: the structure browser and walkthroughs.
+"""Two views of the same kernel: the structure browser and walkthroughs.
 
-The structure browser must keep working exactly as before when the walkthrough
-view is added, so this checks both and the switch between them.
+Adding the walkthrough view must not change the structure browser, so this
+checks both views and the switch between them.
 """
 
 from __future__ import annotations
@@ -178,7 +178,7 @@ async def main() -> int:
         # A source line reaches the screen whole. MAX_CELL exists to stop a long
         # value pushing later columns off a field view; here the wide column is
         # last, so the table scrolls sideways instead, with the line number and
-        # the marker pinned so they survive that scroll.
+        # the marker fixed so they stay visible during that scroll.
         source_rows = app.stack[-1].rows
         longest = max(source_rows, key=lambda r: len(r.value))
         on_screen = table.get_row_at(source_rows.index(longest))[2].plain
@@ -264,7 +264,7 @@ async def main() -> int:
         check("measures" in names and any("enter" in n for n in names),
               f"a highlighted measurement is described, not run: {names[:3]}")
 
-        # Headings are not dead ends: a branch opens what it contains, and an
+        # Headings can be opened: a branch opens a list of its contents, and an
         # index row opens the item it names.
         app.stack.clear()
         tree.cursor_line = 0

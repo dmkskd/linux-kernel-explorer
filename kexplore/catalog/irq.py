@@ -1,21 +1,22 @@
-"""Hardware interrupts and the work the kernel defers out of them.
+"""Hardware interrupts and the work the kernel defers from them.
 
-A handler runs with interrupts of its line masked, so it does as little as
-possible and hands the rest on. Three destinations take that work, and they
-differ in what may run there:
+A handler runs with its interrupt line masked, so it acknowledges the device
+and defers further processing to one of three mechanisms, which differ in what
+the deferred code may do:
 
-* a softirq vector, run on the same CPU after the handler returns (or in
-  ksoftirqd when they pile up). It cannot sleep.
-* a tasklet, which is one softirq vector (TASKLET, HI) running a list of
-  callbacks. It cannot sleep either.
-* a workqueue item, run by a worker thread out of a worker pool. This one is
-  in process context and may sleep, which is why a driver that needs to
-  allocate or take a mutex ends up here.
+* a softirq vector, run on the same CPU after the handler returns, or in
+  ksoftirqd when softirqs are raised faster than they are processed. It cannot
+  sleep.
+* a tasklet, a callback run from one of two softirq vectors (TASKLET, HI). It
+  cannot sleep.
+* a workqueue item, run by a worker thread from a worker pool. It runs in
+  process context and can sleep, so a driver that needs to allocate memory or
+  take a mutex uses a workqueue.
 
-``struct irq_desc`` holds the per-line state: the actions bound to it, the
-chip that masks and acks it, and a per-CPU count of how often it has fired.
-The counts come from the same place ``/proc/interrupts`` reads, summed over
-online CPUs here, so a line that fires on one CPU only is still one row.
+``struct irq_desc`` holds the per-line state: the actions bound to the line,
+the chip that masks and acknowledges it, and a per-CPU count of how often it
+has fired. The counts are those ``/proc/interrupts`` reads, summed here over
+online CPUs, so each line is one row.
 """
 
 from __future__ import annotations
@@ -54,9 +55,8 @@ def _action_names(desc) -> str:
 def irq_descs(prog: Program):
     """Every allocated IRQ line, busiest first.
 
-    Ordering by count puts the timer and the virtio queues at the top, which
-    is where a question about interrupt load starts. A line with no action has
-    a descriptor but nothing bound to it.
+    Ordering by count places the timer and the virtio queues first. A line
+    whose ``action`` is NULL has a descriptor and no registered handler.
     """
     cpus = list(for_each_online_cpu(prog))
     rows = []

@@ -64,9 +64,9 @@ async def main() -> int:
         sock_names = [r.name for r in app.stack[-1].rows]
         check("sk_prot" in sock_names or "proto" in sock_names, "landed on struct sock")
 
-        # The proto link must resolve, not just be listed: sk->sk_prot moved
+        # The proto link must resolve, not only be listed: sk->sk_prot moved
         # to sk->__sk_common.skc_prot on newer kernels, and a hardcoded member
-        # read only fails when the edge is actually followed.
+        # read fails only when the link is followed.
         follow_named(app, table, "proto")
         await pilot.pause()
         proto_rows = app.stack[-1].rows

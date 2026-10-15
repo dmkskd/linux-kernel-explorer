@@ -29,9 +29,9 @@ VM="$(kexplore_lima_vm)" || exit 1
 IMAGE=kexplore
 CACHE_VOLUME=kexplore-debuginfod
 
-# The option list mirrors kexplore/__main__.py, which is what actually parses
-# everything except --test. Printing it here means --help works with no
-# backend set up, at the cost of keeping the two in step.
+# The option list duplicates the one in kexplore/__main__.py, which parses
+# every option except --test. It is printed here so that --help works before
+# any backend is set up; the two lists must be kept consistent.
 usage() {
   cat <<USAGE
 usage: ./run.sh [--record file.cast] [--notes file] [--test] [options]
@@ -159,9 +159,9 @@ case "$BACKEND" in
     # scripts/launch-in-lab.sh: every lab now has a /opt/kexplore venv holding
     # the pinned Textual, but a VM provisioned before that does not, and only
     # the guest can tell.
-    # The repo is virtiofs-mounted into the VM read-only at the same path, so
-    # there is nothing to sync. PYTHONDONTWRITEBYTECODE is required because
-    # that mount is read-only.
+    # The repo is mounted into the VM read-only with virtiofs at the same
+    # path, so no files are copied. PYTHONDONTWRITEBYTECODE is required
+    # because that mount is read-only.
     LAUNCH=(limactl shell "$VM" sudo env
       PYTHONDONTWRITEBYTECODE=1
       PYTHONPATH="$REPO"
@@ -213,8 +213,8 @@ case "$BACKEND" in
     if [ -t 0 ] && [ -t 1 ]; then TTY=(-it); fi
     # The repo is mounted read-only at the same path, so paths in TARGET need
     # no translation and PYTHONDONTWRITEBYTECODE is back. The kernel flags
-    # matter: both runtimes mask /proc/kcore to /dev/null by default, and
-    # the read then succeeds returning nothing.
+    # are required: both runtimes mount /dev/null over /proc/kcore by
+    # default, and a read then returns zero bytes without an error.
     # shellcheck disable=SC2206,SC2207
     LAUNCH=($RUNTIME run --rm "${TTY[@]}"
       $(kexplore_container_kernel_flags "$RUNTIME")

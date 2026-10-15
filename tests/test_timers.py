@@ -1,11 +1,10 @@
-"""The time branch: the two timer machines, and what their timers point at.
+"""The time branch: the two timer mechanisms, and the objects their timers serve.
 
-A timer is only interesting if you can tell what it will do when it fires.
-These are the two cases the kernel makes recoverable: an hrtimer whose
-callback is ``hrtimer_wakeup`` belongs to a sleeping task, and a wheel timer
-whose callback is ``delayed_work_timer_fn`` belongs to a delayed work item and
-so to a workqueue. Both are container_of hops with no field pointing back, so
-they are worth a test.
+A timer's owner can be recovered in two cases: an hrtimer whose callback is
+``hrtimer_wakeup`` belongs to a sleeping task, and a wheel timer whose callback
+is ``delayed_work_timer_fn`` belongs to a delayed work item and so to a
+workqueue. Both recoveries are container_of computations with no member
+pointing back, so they are tested here.
 """
 
 from __future__ import annotations

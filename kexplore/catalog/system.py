@@ -1,12 +1,12 @@
 """System configuration facts.
 
-Answers questions like "CFS or EEVDF" for the running kernel rather than for a
-version in the documentation.
+Facts are determined for the running kernel, for example whether the scheduler
+is CFS or EEVDF, not taken from the documentation for a kernel version.
 
-This kernel has no ``CONFIG_IKCONFIG``, so there is no embedded .config to
-read. Facts are instead derived from structural evidence: which symbols exist,
-which fields a struct has, and at what offset. Each Fact carries the evidence
-that produced it.
+The lab kernel is built without ``CONFIG_IKCONFIG``, so there is no embedded
+.config to read. Facts are derived from structural evidence instead: which
+symbols exist, which members a struct has, and at what offset. Each Fact
+carries the evidence that produced it.
 """
 
 from __future__ import annotations
@@ -105,9 +105,9 @@ def overview(prog: Program):
 
 
 def scheduler(prog: Program):
-    # Which fair-class algorithm. EEVDF replaced CFS inside the fair class in
-    # 6.6 and brought new sched_entity fields with it; the struct is the
-    # evidence, not the version number.
+    # The fair-class algorithm. EEVDF replaced CFS in the fair class in 6.6 and
+    # added sched_entity fields; their presence is the evidence used, not the
+    # version number.
     entity = ct.member_names(prog.type("struct sched_entity"))
     eevdf_fields = [f for f in ("deadline", "vlag", "slice") if f in entity]
     if eevdf_fields:
@@ -149,7 +149,8 @@ def scheduler(prog: Program):
         "sched_class instances sorted by address (linker section order)",
     )
 
-    # sched_ext: compiled in is not the same as in use.
+    # sched_ext: whether it is compiled in and whether it is enabled are
+    # reported separately.
     if _has_symbol(prog, "ext_sched_class"):
         root = prog["scx_root"] if _has_symbol(prog, "scx_root") else None
         if root is not None and root.value_():
@@ -179,8 +180,8 @@ def scheduler(prog: Program):
         "on" if prog.type("struct task_group") else "off",
         "struct task_group exists (CONFIG_FAIR_GROUP_SCHED)",
     )
-    # rq.donor exists either way: without proxy exec it's a union alias of
-    # curr, so presence proves nothing and the offsets have to be compared.
+    # rq.donor exists in both cases: without proxy execution it is a union
+    # alias of curr, so the offsets of donor and curr are compared.
     rq = prog.type("struct rq")
     if rq.has_member("donor") and rq.has_member("curr"):
         donor = drgn.offsetof(rq, "donor")
@@ -201,8 +202,8 @@ def memory(prog: Program):
     page_size = _page_size(prog)
     yield Fact("page size", f"{page_size} bytes", "PFN_PHYS(1)")
 
-    # SLAB is gone since 6.8, but don't infer from the version -- SLUB's own
-    # fields are the evidence, and struct array_cache would mean SLAB.
+    # SLAB was removed in 6.8. The evidence used is SLUB's fields, not the
+    # version; struct array_cache would indicate SLAB.
     cache = prog.type("struct kmem_cache")
     if cache.has_member("oo") and cache.has_member("min_partial"):
         yield Fact(
@@ -213,7 +214,7 @@ def memory(prog: Program):
     else:
         yield Fact("slab allocator", "unrecognised", "no SLUB marker fields on kmem_cache")
 
-    # The percpu fast path was reworked: kmem_cache_cpu gave way to sheaves.
+    # The percpu fast path was reworked: sheaves replaced kmem_cache_cpu.
     if cache.has_member("cpu_sheaves"):
         yield Fact(
             "slab percpu caching",

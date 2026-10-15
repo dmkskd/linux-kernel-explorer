@@ -1,14 +1,13 @@
-"""What the catalog registers, without attaching to anything.
+"""What the catalog registers, checked without attaching to a kernel.
 
-Registration, the link tables and plan dispatch are all decided at import time
-from static data, so they can be checked anywhere -- which is the point. The
-mistakes this catches are the quiet ones: a subsystem that stops registering, a
-measurement that lands under the wrong subsystem or twice, a link that forgets
-to say where it comes from, an entry kind nothing knows how to open.
+Registration, the link tables and plan dispatch are determined at import time
+from static data, so they can be checked on any machine. The test detects
+errors that produce no visible failure: a subsystem that is no longer
+registered, a measurement registered under the wrong subsystem or twice, a link
+without an origin, and an entry kind that no plan opens.
 
-drgn is only needed here to satisfy imports; nothing calls into it. Where it is
-installed the real thing is used, and where it is not -- a laptop, CI -- a stub
-stands in, because refusing to check any of this without a VM is how it rots.
+drgn is imported but not called. Where it is installed it is used; where it is
+not (a laptop, CI) a stub replaces it, so these checks run without a VM.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ def install_stubs() -> None:
             if name.startswith("__"):
                 raise AttributeError(name)
             # A class, so it can be subclassed (App, Screen, Static),
-            # called, or used as a value -- and it swallows its arguments.
+            # called, or used as a value; it accepts and ignores any arguments.
             value = type(name, (object,), {
                 "__module__": self.__name__,
                 "__init__": lambda self, *a, **k: None,

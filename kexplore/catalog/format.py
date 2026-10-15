@@ -1,8 +1,7 @@
-"""Small formatting helpers shared by the subsystem modules.
+"""Formatting helpers shared by the subsystem modules.
 
-drgn helpers return ``bytes`` for kernel strings, and nearly every provider
-needs the same two conversions, so they live here rather than being redefined
-per module.
+drgn helpers return ``bytes`` for kernel strings, and most providers need the
+same two conversions, which are defined here once.
 """
 
 from __future__ import annotations

@@ -166,8 +166,8 @@ STATUS = PseudoFile(
 # ---------------------------------------------------------------------- stat
 
 # One line, fields separated by spaces, named by procfs(5) and numbered from
-# one. The order is do_task_stat()'s and nothing else: a field is where it is
-# because that is where it has always been printed.
+# one. The order is the order do_task_stat() prints, which is fixed for
+# compatibility.
 STAT = PseudoFile(
     path="/proc/<pid>/stat",
     root="task_struct",
@@ -760,9 +760,9 @@ MEMINFO = PseudoFile(
 
 # ------------------------------------------------------- one value per file
 
-# Files holding a single number or word. The table is still worth having: the
-# value alone does not say which member it came from, and several of these
-# are written as well as read.
+# Files holding a single number or word. The table records the member each
+# value comes from, which the value does not show; several of these files are
+# also writable.
 COMM = PseudoFile(
     path="/proc/<pid>/comm",
     root="task_struct",

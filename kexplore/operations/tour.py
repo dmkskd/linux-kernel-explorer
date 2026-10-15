@@ -1,13 +1,13 @@
-"""Live guided tours: interactive walkthroughs through live kernel structures.
+"""Live guided tours through kernel structures.
 
-While structure entries show what is in a struct and operations trace code paths,
-guided tours drive an end-to-end investigation across the running kernel.
-Tours dynamically inspect current running processes, threads, address spaces,
-and per-CPU queues, presenting live commentary, invariants, and userspace
-counterparts.
+Structure entries show the contents of a struct, and operations trace code
+paths. A guided tour is a sequence of steps across the running kernel: it
+selects running processes, threads, address spaces and per-CPU queues on this
+machine, and shows commentary, invariants and the corresponding userspace
+commands.
 
-Each step provides an action path, live commentary, userspace commands, and
-followable links that open the real data structures in live memory.
+Each step has an action path, commentary, userspace commands, and links that
+open the structures in live memory.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ class TourStep:
     action: str
     commentary: str
     userspace: str = ""
-    # A command the viewer runs themselves to create what the step describes.
-    # Nothing in kexplore runs it: a walkthrough that changed the machine it is
-    # describing would be measuring its own work.
+    # A command the viewer runs to create the state the step describes.
+    # kexplore does not run it, so the walkthrough does not alter the state it
+    # inspects.
     condition: str = ""
     structures: Resolver | None = None
     doc: str = ""
@@ -76,7 +76,7 @@ TutorialStep = TourStep
 
 @dataclass(frozen=True)
 class GuidedTour:
-    """A live guided tour / tutorial through real kernel structures with commentary."""
+    """A guided tour or tutorial through live kernel structures, with commentary."""
 
     key: str
     label: str
@@ -822,8 +822,8 @@ def _build_user_memory_steps(prog: Program | None) -> list[TourStep]:
         for vma in for_each_vma(mm):
             name = vma_name(vma)
             label = name.decode("utf-8", "replace") if name else "anon"
-            # The permissions are what separate the three mappings one binary
-            # contributes, and the step asks for the executable one by name.
+            # The permissions distinguish the three mappings of one binary, and
+            # the step selects the executable mapping by name.
             yield f"{vma.vm_start.value_():#x}  {vma_perms(vma)}  {label}", vma
 
     return [
@@ -1001,8 +1001,8 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
     comm = task.comm.string_().decode() if task else "systemd"
     pid = task.pid.value_() if task else 1
 
-    # The register holding the user page table root is architecture specific,
-    # and naming both of them on a machine that has one is noise.
+    # The register holding the user page table root is architecture-specific,
+    # so only the running architecture's register is named.
     ttbr = "CR3"
     if prog is not None:
         try:
@@ -1111,8 +1111,8 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
         for addr in range(start, min(end, start + 64 * 4096), 4096):
             page = ct.safe(lambda a=addr: follow_page(mm, a), None)
             if page is not None and page.value_():
-                # Same resolver the catalog's "zone" link uses, so following
-                # that link by hand lands on exactly this object.
+                # The resolver the catalog's "zone" link uses, so following that
+                # link manually reaches the same object.
                 zone = ct.safe(lambda pg=page: _page_zone(pg), None)
                 if zone is not None:
                     name = ct.safe(lambda z=zone: z.name.string_().decode(), "zone")
@@ -1461,8 +1461,9 @@ def _build_eevdf_scheduler_steps(prog: Program | None) -> list[TourStep]:
 def _is_explorer(task) -> bool:
     """Whether this task belongs to a kexplore process.
 
-    Another instance of the explorer is still the explorer, so the pid of this
-    one is not enough. The argv of the thread group leader names it.
+    Tasks of other kexplore instances also match, so comparing with this
+    process's pid is not sufficient. The thread group leader's argv identifies
+    kexplore.
     """
     from drgn.helpers.linux.mm import cmdline
 
@@ -1472,11 +1473,11 @@ def _is_explorer(task) -> bool:
 
 
 def _find_accounting_task(prog: Program | None):
-    """A task whose scheduler counters are worth reading.
+    """A task with non-trivial scheduler counters.
 
-    The helper in tests/helpers/cpu_contention.py renames its children, so
-    prefer one of those. Without it, take the userspace task with the largest
-    run_delay, which is the best this machine has to offer.
+    The helper in tests/helpers/cpu_contention.py renames its children, and
+    one of those is preferred. Without the helper, the userspace task with the
+    largest run_delay is selected.
     """
     if prog is None:
         return None
@@ -1485,9 +1486,9 @@ def _find_accounting_task(prog: Program | None):
 
         from drgn.helpers.linux.pid import find_task, for_each_task
 
-        # kexplore's own threads are the busiest userspace tasks on an idle
-        # machine, and a walkthrough of the explorer inspecting itself explains
-        # nothing about the machine it is attached to.
+        # kexplore's threads are the busiest userspace tasks on an idle
+        # machine, and are excluded so that the walkthrough describes the
+        # machine, not kexplore itself.
         self_tgid = os.getpid()
         best = None
         best_delay = -1
@@ -1500,7 +1501,7 @@ def _find_accounting_task(prog: Program | None):
             if _is_explorer(task):
                 continue
             if not ct.safe(lambda: task.mm.value_(), 0):
-                continue  # kernel threads: their blocked time is idling
+                continue  # kernel threads: their blocked time is idle time
             delay = ct.safe(lambda: task.sched_info.run_delay.value_(), 0)
             if delay > best_delay:
                 best, best_delay = task, delay

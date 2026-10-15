@@ -61,7 +61,8 @@ def copy_to_system_clipboard(text: str, app: object | None = None) -> bool:
         elif in_screen:
             sequences = [f"\x1bP{osc_bel}\x1b\\"]
         else:
-            # Both BEL and ST (String Terminator: ESC \) for maximum terminal compatibility
+            # Both BEL and ST (String Terminator: ESC \), because terminals
+            # differ in which terminator they accept
             osc_st = f"\x1b]52;c;{b64_str}\x1b\\"
             sequences = [osc_bel, osc_st]
 

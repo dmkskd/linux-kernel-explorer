@@ -1,21 +1,19 @@
-"""Where each line of a pseudo-file is picked up from.
+"""The struct member behind each line of a pseudo-file.
 
-``procfs.py`` names the function that writes a whole /proc file. This goes one
-level finer: for every line the file prints, the member the kernel read to
-produce it, and the pointers it followed from the root struct to get to that
-member.
+``procfs.py`` names the function that writes a whole /proc file. This module
+maps each line the file prints to the member the kernel read to produce it,
+and the pointers followed from the root struct to that member.
 
-The values on screen are the ones in the file. Nothing here reads memory to
-recompute them, because the question this view answers is where a number is
-picked up from, not whether the kernel would still report the same number. The
-hops are checked against the running kernel's type information instead, so a
-table that has drifted from this kernel says so rather than printing a path
-that no longer exists.
+The values displayed are the ones in the file. This module does not read
+memory to recompute them, because the view shows where a value is read from,
+not whether the kernel would report the same value again. Each path is checked against the
+running kernel's type information, so a table that no longer matches the kernel
+is reported as such instead of displaying a path that does not exist.
 
-Lines the table does not claim are listed too, with an empty origin. A kernel
-prints lines this file has never heard of (a new arch line, a config this
-table was not written against), and hiding them would make the annotation look
-complete when it is not.
+Lines that no table describes are listed with an empty origin. A kernel can
+print lines a table does not cover (a new architecture line, a configuration
+the table was not written for), and omitting them would make the annotation
+appear complete.
 """
 
 from __future__ import annotations
@@ -44,12 +42,12 @@ class Origin:
     hops: tuple[str, ...] = ()
     member: str = ""
     doc: str = ""
-    # Other spellings of ``member``. task_struct.state became __state in 5.14,
-    # and a table with one spelling in it would report a miss on half the
-    # kernels this runs against.
+    # Other names of ``member``. task_struct.state was renamed __state in 5.14,
+    # so a table with one name would fail to resolve on kernels on one side of
+    # that release.
     alternates: tuple[str, ...] = ()
-    # Present only under some configurations. Absence is reported as absence
-    # rather than as a table that is wrong.
+    # Present only under some configurations. When it is absent, the line is
+    # reported as unavailable on this kernel, not as a table error.
     optional: bool = False
     # A global variable the value is read from, for a file that is about the
     # system rather than about one task. The hops then start here.
@@ -58,11 +56,11 @@ class Origin:
     # memory statistics live in: vm_node_stat[NR_FILE_DIRTY].
     index: str = ""
     # The function that produces the value, for a line with no member to
-    # name. The column then shows a call rather than nothing.
+    # name. The column then shows the function call.
     helper: str = ""
 
     def path(self, root: str = "task") -> str:
-        """The member read, written the way you would write it in C.
+        """The member read, as a C expression.
 
         A hop spelled with a leading dot is an embedded struct rather than a
         pointer, so it keeps the dot: task->se.exec_start, not task->se->.
@@ -73,9 +71,8 @@ class Origin:
         if self.symbol and self.index:
             chain += f"[{self.index}]"
         if not chain:
-            # Nothing to walk: either a helper produces the value, or the
-            # printing function computes it inline and there is no expression
-            # to show.
+            # No path to walk: a helper produces the value, or the printing
+            # function computes it inline, so there is no expression to show.
             return f"{self.helper}()" if self.helper else ""
         for hop in self.hops:
             chain += ("." if parent_is_value else "->") + hop.lstrip(".")
@@ -83,9 +80,9 @@ class Origin:
         if not self.member:
             if self.helper:
                 return chain if self.symbol else f"{self.helper}({chain})"
-            # A value with no expression behind it: a constant, or a field the
-            # kernel no longer maintains. The column stays empty and the line
-            # under the cursor says why.
+            # A value with no source expression: a constant, or a field the
+            # kernel no longer maintains. The column is empty, and the line
+            # below the table gives the reason when the row is selected.
             return chain if self.symbol else ""
         return f"{chain}{'.' if parent_is_value else '->'}{self.member}"
 
@@ -112,9 +109,9 @@ class PseudoFile:
     # One line per object rather than one line per field. The origins are the
     # columns of every line.
     repeating: bool = False
-    # For a repeating file, the object one line stands for, and how the kernel
-    # gets from ``root`` to it. The columns resolve against this, the path to
-    # it starts at the task like every other file here.
+    # For a repeating file, the object one line represents, and the path from
+    # ``root`` to it. The columns are resolved against this object, and the
+    # path starts at the task, as for every other file here.
     line_root: str = ""
     line_hops: tuple[str, ...] = ()
     line_walk: str = ""
@@ -136,7 +133,7 @@ def files() -> tuple[PseudoFile, ...]:
 
 
 def __getattr__(name: str):
-    """Let the tables be reached through this module, where they used to live."""
+    """Expose the tables as attributes of this module, where they were defined before."""
     from . import proc_tables
 
     try:
@@ -198,8 +195,8 @@ def parse(spec: PseudoFile, text: str) -> list[Line]:
         label, separator, value = raw.partition(":")
         if not separator:
             continue
-        # sched pads its labels out to a column, so the name in the file is
-        # not the name in the table until it is stripped.
+        # sched pads its labels to a column width, so a label is stripped
+        # before it is compared with the table.
         label = label.strip()
         lines.append(Line(label, " ".join(value.split()), table.get(label)))
     return lines
@@ -208,8 +205,8 @@ def parse(spec: PseudoFile, text: str) -> list[Line]:
 def read_file(spec: PseudoFile, path: str) -> list[Line]:
     """The same, read from a live file at ``path``.
 
-    Raises OSError when the file cannot be read, which is the honest outcome
-    when the task exited between being listed and being opened.
+    Raises OSError when the file cannot be read, for example when the task
+    exited between being listed and being opened.
     """
     return parse(spec, Path(path).read_text())
 
@@ -220,7 +217,7 @@ def read(spec: PseudoFile, pid: int) -> list[Line]:
 
 
 def unclaimed(spec: PseudoFile, text: str) -> list[str]:
-    """Labels in this text that the table says nothing about."""
+    """Labels in this text that the table does not describe."""
     return [line.label for line in parse(spec, text) if line.origin is None]
 
 
@@ -247,8 +244,8 @@ def _member_type(type_: "Type", name: str) -> "Type | None":
 def resolve(prog: "Program", spec: PseudoFile, origin: Origin) -> str:
     """Empty when this kernel has the path, or what is missing from it.
 
-    A repeating file's columns hang off the object a line stands for, not off
-    the task, so they are resolved from ``line_root``.
+    A repeating file's columns are reached from the object a line represents,
+    not from the task, so they are resolved from ``line_root``.
     """
     from drgn import TypeKind
 
@@ -272,8 +269,8 @@ def resolve(prog: "Program", spec: PseudoFile, origin: Origin) -> str:
     else:
         root = spec.line_root or spec.root
         if not root:
-            # A system-wide line with no global named: computed from a clock,
-            # a helper or a sum, with nothing to resolve.
+            # A system-wide line with no global named is computed from a clock,
+            # a helper or a sum, so there is no path to resolve.
             return ""
         try:
             current = prog.type(f"struct {root}")
@@ -286,8 +283,9 @@ def resolve(prog: "Program", spec: PseudoFile, origin: Origin) -> str:
             return f"{walked} has no member {hop.lstrip('.')}"
         if ct.struct_type(found) is None:
             return f"{walked}->{hop} is not a struct"
-        # The dot is what jump_target reads to decide whether to test for
-        # NULL, so a wrong one is a crash there, not only a wrong path here.
+        # jump_target reads the separator to decide whether to test for NULL,
+        # so a wrong separator causes a fault there as well as a wrong path
+        # here.
         is_pointer = ct.strip(found).kind == TypeKind.POINTER
         if hop.startswith(".") == is_pointer:
             name = hop.lstrip(".")
@@ -339,9 +337,9 @@ def line_path(spec: PseudoFile) -> list[tuple[str, str]]:
 def hop_types(prog: "Program", spec: PseudoFile, origin: Origin) -> list[tuple[str, str]]:
     """Each step of the path, with the type this kernel gives it.
 
-    The names come from the table; the types come from the kernel's own debug
-    information, so an expanded row shows what is there rather than what was
-    written down.
+    The names come from the table and the types from the running kernel's
+    debug information, so an expanded row shows the kernel's types, not the
+    ones the table assumed.
     """
     from ..core import ctypes as ct
 
@@ -396,9 +394,8 @@ UNREADABLE = {
     "/proc/self/mem": "the address space itself, read through a seek",
 }
 
-# A file is read this far and no further. Nothing under /proc is meant to be
-# larger, so hitting the cap says something is not the text file it looked
-# like rather than that the reader is too small.
+# Maximum number of bytes read from a file. No text file under /proc is this
+# large, so reaching the limit indicates a file that is not text.
 MAX_BYTES = 256 * 1024
 
 
@@ -460,8 +457,8 @@ def holds_annotated(path: str) -> bool:
 def listing(path: str) -> list[Node]:
     """What the directory holds, directories first and pids in numeric order.
 
-    Reading /proc is the point, so the entries are the real ones rather than a
-    table: a pid appears here because that task exists right now.
+    The entries are read from /proc, not from a table, so a pid is listed
+    because that task exists when the directory is read.
     """
     nodes: list[Node] = []
     with os.scandir(path) as entries:
@@ -476,11 +473,11 @@ def listing(path: str) -> list[Node]:
 
 
 def _order(node: Node) -> tuple[int, int, str]:
-    """The system first, the tasks last, each in the order worth reading.
+    """Sort key: system entries first, task directories last.
 
-    A task directory is listed after everything else because there are
-    hundreds of them: put them first and meminfo is a screen and a half down,
-    which is where the answer to most questions about /proc is.
+    Task directories are listed after every other entry because there are
+    hundreds of them, and listed first they would push meminfo below the first
+    screen.
     """
     if node.is_dir and node.name.isdigit():
         return (2, int(node.name), "")
@@ -490,8 +487,8 @@ def _order(node: Node) -> tuple[int, int, str]:
 def comm_of(path: str) -> str:
     """The command of the task whose directory this is, or an empty string.
 
-    One small read per task directory listed. A task that exits between the
-    listing and this read simply has no name to show.
+    One read per task directory listed. A task that exits between the listing
+    and this read is listed with an empty name.
     """
     try:
         with open(f"{path}/comm") as handle:
@@ -503,9 +500,8 @@ def comm_of(path: str) -> str:
 def contents(path: str) -> str:
     """The file as text, or a reason it is not being read.
 
-    Raises OSError, which the caller turns into a row. A file this refuses to
-    open is still worth listing: what it holds is the answer, and the reason
-    it cannot be printed here is part of that answer.
+    Raises OSError, which the caller turns into a row. A file this function
+    does not read is still listed, with the reason it is not read.
     """
     refusal = UNREADABLE.get(path) or UNREADABLE.get(_generic(path))
     if refusal is not None:
@@ -513,9 +509,8 @@ def contents(path: str) -> str:
     with open(path, "rb") as handle:
         raw = handle.read(MAX_BYTES)
     if b"\0" in raw:
-        # cmdline and environ separate their entries with NUL rather than a
-        # newline, and are the files most worth reading here. One entry per
-        # line is that file printed, not reformatted.
+        # cmdline and environ separate their entries with NUL instead of a
+        # newline; each entry is printed on a line of its own.
         stripped = raw.rstrip(b"\0")
         if b"\0\0" not in stripped and _printable(stripped):
             return stripped.replace(b"\0", b"\n").decode("utf-8", "replace")
@@ -533,7 +528,7 @@ def _printable(raw: bytes) -> bool:
 
 @dataclass(frozen=True)
 class FileItem:
-    """One pseudo-file to open: annotated when the table knows it, raw when not."""
+    """One pseudo-file to open: annotated when a table describes it, raw otherwise."""
 
     path: str
 

@@ -1,14 +1,13 @@
-"""Navigation model: turn a drgn Object into rows you can walk into.
+"""Navigation model: rows built from drgn Objects, and the frames between them.
 
-This is the layer that makes the explorer more than a pretty-printer. drgn
-already formats a struct beautifully; what it doesn't give you is "put the
-cursor on ``.mm`` and press enter", plus a breadcrumb trail you can back out
-of. That's all this module is.
+drgn formats a struct but provides no way to select a member, follow it to the
+object it refers to, and return along the same path. This module provides the
+rows, the operation that follows a member to its object, and the stack of
+frames behind the breadcrumb.
 
-It holds real ``drgn.Object`` values rather than a serialized
-form -- the TUI runs in the same process as drgn, so there is no wire format
-to design. When a second frontend needs JSON, it serializes ``Row`` here
-rather than reaching into drgn itself.
+Rows hold ``drgn.Object`` values, not a serialized form, because the TUI runs
+in the same process as drgn. A frontend that needs JSON would serialize
+``Row`` here instead of reading drgn objects directly.
 """
 
 from __future__ import annotations
@@ -21,17 +20,18 @@ from drgn import Object, TypeKind
 
 from . import ctypes as ct
 
-# Arrays and collections are truncated so that walking into `page[]` or a
-# few hundred thousand tasks doesn't hang the UI.
+# Arrays and collections are truncated, so that opening `page[]` or a few
+# hundred thousand tasks does not block the UI.
 MAX_ROWS = 512
 
-# What every provider in the catalog looks like once its argument is bound:
-# either one object, or labelled objects to list. Entries, links and
-# walkthrough steps all look like this, and all resolve through ``collect``.
+# The type of a catalog provider once its argument is bound: it returns one
+# object, or labelled objects to list. Entries, links and walkthrough steps all
+# have this type and all resolve through ``collect``.
 Produce = Callable[[], "Object | Iterable[tuple[str, Object]]"]
 
-# Set once at startup from arch.cache_line_size(), because a Row has no program
-# to ask and the answer is a property of the machine, not of the field.
+# Module-level, set once at startup from arch.cache_line_size():
+# Row.placement needs the cache line size, and Row has no drgn Program to read
+# it from.
 CACHE_LINE = 64
 
 
@@ -44,9 +44,9 @@ def set_cache_line(size: int) -> None:
 class Row:
     """One line in the detail pane.
 
-    ``kind`` says what the row *is*, and is the only place that is recorded:
+    ``kind`` records what the row represents; no other field records it:
 
-    * ``field``    -- a real struct member
+    * ``field``    -- a struct member
     * ``link``     -- a curated relationship; supplies ``expand``, because
       traversing it may mean walking a list rather than dereferencing a pointer
     * ``derived``  -- a computed value, a heading, or an informational line
@@ -70,8 +70,8 @@ class Row:
     # Views that are a matrix rather than field/type/value supply their own
     # cells; when set these replace the three default columns.
     cells: tuple[str, ...] | None = None
-    # Whether those cells still stand for a kernel object, and so want the
-    # follow marker in front of them. A measurement's cells do not.
+    # Whether those cells represent a kernel object and are therefore preceded
+    # by the follow marker. A measurement's cells are not.
     marked: bool = False
     # Columns the expanded view wants, when they differ from this frame's.
     expand_columns: tuple[str, ...] | None = None
@@ -81,12 +81,12 @@ class Row:
     item: object | None = None
     # The C type, kept when the type column is showing something else.
     original_type: str = ""
-    # Byte offset and size within the containing struct. C lays members out in
-    # declaration order, so these show where a field physically sits.
+    # Byte offset and size within the containing struct. C places members in
+    # declaration order, so these give the field's position in memory.
     offset: int | None = None
     size: int | None = None
     # In-place expansion: how far this row is nested under the one that opened
-    # it, and whether its own children are currently spliced in below it.
+    # it, and whether its children are currently inserted below it.
     depth: int = 0
     expanded: bool = False
 
@@ -94,9 +94,9 @@ class Row:
     def placement(self) -> str:
         """Offset and size, with the cache line the field starts in.
 
-        Line numbers are relative to the start of the struct, so they are real
-        cache lines only when the allocation is line-aligned -- which it is for
-        slab objects, the ones worth looking at this way.
+        Line numbers count from the start of the struct, so they correspond to
+        hardware cache lines only when the allocation is line-aligned, as slab
+        objects are.
         """
         if self.offset is None:
             return ""
@@ -132,7 +132,7 @@ class Row:
 
 @dataclass
 class Node:
-    """A position in the exploration: a labelled object plus how we got here."""
+    """A position in the exploration: a labelled object and the path to it."""
 
     label: str
     obj: Object
@@ -150,8 +150,8 @@ class Node:
 class Collection:
     """A labelled set of objects -- per-CPU runqueues, every mount, etc.
 
-    Providers yield lazily so an expensive walk can be truncated without
-    paying for the whole thing.
+    Providers yield lazily, so an expensive walk can be truncated before it
+    completes.
     """
 
     label: str
@@ -164,12 +164,11 @@ class Collection:
 def collect(label: str, produce: Produce, limit: int = MAX_ROWS) -> Collection:
     """Run a provider, truncating at ``limit`` and trapping its failures.
 
-    Every catalog concept that yields objects -- a subsystem entry, a curated
-    link, a walkthrough step -- goes through here, so all three truncate at the
-    same size and report a failure the same way. Helper availability shifts
-    with kernel version and config, and a walk can fault half way through
-    because the task it was walking exited, so an error is a value rather than
-    an exception: one bad edge greys out one row.
+    Subsystem entries, curated links and walkthrough steps all resolve here,
+    so they truncate at the same limit and report failures the same way.
+    Helper availability varies with kernel version and configuration, and a
+    walk can fault when the task it reads exits, so a failure is returned as a
+    value: it disables one row instead of raising.
     """
     try:
         result = produce()
@@ -204,15 +203,14 @@ def _address(obj: Object) -> str:
 def _item_row(label: str | tuple[str, ...], obj: Object | None) -> Row:
     """One item of a collection.
 
-    A provider that yields a tuple is describing columns of its own -- pid,
-    state, command -- rather than one label. Those become the row's cells, and
-    the frame supplies the header to match. A provider that yields a string
-    gets the field/type/value layout, which is what a list of structures with
-    nothing in particular to say about them wants.
+    A provider that yields a tuple supplies its own columns, such as pid,
+    state and command; they become the row's cells, and the frame supplies the
+    matching header. A provider that yields a string gets the field, type and
+    value columns.
 
-    An item with no object is something the provider can report but not open:
-    a list that changed while it was being read, say. It gets a row so the
-    gap is visible, and nothing to follow.
+    An item with no object is one the provider can report but not open, for
+    example a list that changed while it was read. It is shown as an error row
+    that cannot be followed.
     """
     if obj is None:
         text = label if not isinstance(label, tuple) else " ".join(
@@ -228,11 +226,9 @@ def _item_row(label: str | tuple[str, ...], obj: Object | None) -> Row:
             followable=can_follow(obj),
         )
     cells = tuple(str(cell) for cell in label)
-    # The name is never displayed as a cell, but it is what the filter matches
-    # and what names the frame once the row is followed. The type and the
-    # address are dropped from it because the path line above the table already
-    # carries both, and a breadcrumb reading "1 S systemd struct task_struct *
-    # 0xffff0000c086ca00" is unreadable.
+    # The name is not displayed as a cell; the filter matches it, and it names
+    # the frame when the row is followed. The type and the address are left
+    # out of it because the path line above the table already shows both.
     noise = {ct.type_name(obj.type_), _address(obj)}
     return Row(
         name=" ".join(
@@ -250,9 +246,8 @@ def _item_row(label: str | tuple[str, ...], obj: Object | None) -> Row:
 def collection_rows(collection: Collection) -> list[Row]:
     """A resolved collection as rows: its items, or why there are none.
 
-    The empty and truncated cases get a row of their own rather than an empty
-    table, because "this really is empty" and "the walk failed" look identical
-    otherwise.
+    An empty or truncated collection gets an explanatory row, because an empty
+    table cannot distinguish an empty result from a failed walk.
     """
     if collection.unavailable:
         return [Row("Unavailable on this kernel", None, "", collection.unavailable,
@@ -271,9 +266,8 @@ def collection_rows(collection: Collection) -> list[Row]:
 def _member_rows(obj: Object, type_: drgn.Type, base: int = 0) -> Iterator[Row]:
     """Rows for a struct/union, flattening anonymous members.
 
-    drgn lets you reach members of an anonymous struct/union directly from the
-    parent, so flattening avoids needing a synthetic object for the anonymous
-    container.
+    drgn resolves members of an anonymous struct or union on the parent, so
+    flattening requires no synthetic object for the anonymous container.
 
     ``base`` is the bit offset of ``type_`` within the struct the rows are
     being shown for. drgn reports ``bit_offset`` relative to the immediately
@@ -335,8 +329,8 @@ def rows_for(obj: Object) -> list[Row]:
     """Expand ``obj`` one level into displayable rows."""
     type_ = ct.strip(obj.type_)
 
-    # A pointer to an aggregate is shown as its target: nobody wants an
-    # intermediate screen containing a single "*" row.
+    # A pointer to an aggregate is shown as its target, instead of a frame
+    # that contains only the dereferenced row.
     if type_.kind == TypeKind.POINTER:
         target = follow(obj)
         if target is None:
@@ -358,7 +352,7 @@ def can_follow(obj: Object) -> bool:
         target = ct.strip(type_.type)
         if target.kind in (TypeKind.VOID, TypeKind.FUNCTION):
             return False
-        # A null or unreadable pointer is a dead end, not a destination.
+        # A null or unreadable pointer cannot be followed.
         address = ct.safe(obj.value_, 0)
         return bool(address)
     if type_.kind in ct.AGGREGATE_KINDS:
@@ -369,7 +363,7 @@ def can_follow(obj: Object) -> bool:
 
 
 def follow(obj: Object) -> Object | None:
-    """Dereference one level, or return the object itself if it's already there."""
+    """Dereference one pointer level, or return the object if it is not a pointer."""
     type_ = ct.strip(obj.type_)
     if type_.kind != TypeKind.POINTER:
         return obj if type_.kind in ct.AGGREGATE_KINDS or type_.kind == TypeKind.ARRAY else None

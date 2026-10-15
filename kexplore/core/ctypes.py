@@ -1,9 +1,8 @@
 """Type inspection and one-line value rendering for drgn objects.
 
-Everything here is defensive: reading live kernel memory can fault at any
-moment (a task exits, a pointer is stale, RCU frees something under us). A
-fault must never take down the explorer, so reads are wrapped and rendered as
-``<fault>`` instead of raising.
+A read of live kernel memory can fault at any time: a task exits, a pointer
+is stale, or RCU frees an object during the read. Every read here is wrapped,
+and a fault is rendered as ``<fault>`` instead of raising an exception.
 """
 
 from __future__ import annotations
@@ -16,7 +15,8 @@ from drgn import Object, Type, TypeKind
 
 AGGREGATE_KINDS = frozenset({TypeKind.STRUCT, TypeKind.UNION, TypeKind.CLASS})
 
-# Errors that mean "this memory isn't readable right now", not "bug in the tool".
+# Errors raised when memory is not readable at the time of the read, as opposed
+# to errors in kexplore.
 READ_ERRORS = (
     drgn.FaultError,
     drgn.OutOfBoundsError,
@@ -44,7 +44,7 @@ def safe(fn: Callable[[], Any], default: Any = "<fault>") -> Any:
 
 
 def type_name(type_: Type) -> str:
-    """Short type name, keeping the typedef spelling the kernel actually uses."""
+    """Short type name, keeping the kernel's typedef spelling."""
     return str(type_.type_name())
 
 
@@ -60,8 +60,8 @@ def is_aggregate(type_: Type) -> bool:
 def struct_type(type_: Type) -> Type | None:
     """The aggregate behind ``type_``, seeing through typedefs and pointers.
 
-    Returns None if there's no tagged struct/union there -- ``.tag`` raises on
-    pointer and scalar types, so callers must not reach for it blindly.
+    Returns None if there is no tagged struct or union. ``.tag`` raises on
+    pointer and scalar types, so callers must check the result first.
     """
     stripped = strip(type_)
     if stripped.kind == TypeKind.POINTER:
@@ -77,9 +77,9 @@ def tag_of(type_: Type) -> str | None:
 def member_names(type_: Type) -> frozenset[str]:
     """Every member name reachable on ``type_``, flattening anonymous members.
 
-    drgn lets you read members of an anonymous struct/union straight off the
-    parent, so these are all names that ``obj.member_()`` accepts -- and the
-    set the source scanner validates its parse against.
+    drgn resolves members of an anonymous struct or union on the parent, so
+    every name here is accepted by ``obj.member_()``. The source scanner
+    validates its parse against this set.
     """
     names: set[str] = set()
 
@@ -116,8 +116,8 @@ def _symbol_for(prog: drgn.Program, address: int) -> str | None:
 
 def _render_int(obj: Object, type_: Type) -> str:
     value = obj.value_()
-    # Small numbers read better in decimal; anything large is almost always an
-    # address, mask, or flag word, so show hex alongside.
+    # Small values are shown in decimal. Large values are usually addresses,
+    # masks or flag words, so hexadecimal is shown as well.
     if abs(value) >= 0x1000:
         return f"{value} ({value:#x})"
     return str(value)
@@ -156,8 +156,8 @@ def _render_aggregate(type_: Type) -> str:
 
     A zero-sized struct with no members is the kernel's idiom for a feature
     compiled out -- ``typedef struct { } netns_tracker;`` when
-    CONFIG_NET_NS_REFCNT_TRACKER is off. Showing "{…}" for those would promise
-    contents that don't exist and can't be followed, so they say so instead.
+    CONFIG_NET_NS_REFCNT_TRACKER is off. Such a struct is rendered as compiled
+    out, because "{…}" would indicate members that can be followed.
     """
     members = type_.members or ()
     if not members:

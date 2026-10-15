@@ -39,8 +39,8 @@ from .compat import futex_support, has_member, mutex_wait_support, type_has_memb
 from .format import task_comm
 from .registry import Entry, Fact, FactEntry, Subsystem, register
 
-# Every list here is a list of waiting, so each says who is waiting first and
-# what it is a structure of last, the way the task lists do.
+# Every list here lists waiting tasks, so, as in the task lists, the waiting
+# task is the first column and the structure's type and address the last.
 WAITER_COLUMNS = ("pid", "command")
 OBJECT_COLUMNS = ("type", "address")
 
@@ -150,7 +150,7 @@ def mutex_blocked(prog: Program):
 
 
 def rt_mutex_blocked(prog: Program):
-    """Tasks blocked on an rt_mutex, which is where priority inheritance runs.
+    """Tasks blocked on an rt_mutex, the lock type that implements priority inheritance.
 
     ``pi_blocked_on`` is the waiter a task is queued as. Outside PREEMPT_RT
     this is mostly futex PI, so an empty list is the normal state.
@@ -167,11 +167,11 @@ def rt_mutex_blocked(prog: Program):
 
 
 def _gp_state_name(prog: Program, state: int) -> str:
-    """The kernel's own name for a grace-period state.
+    """The kernel's name for a grace-period state.
 
     ``gp_state_names`` is an array of strings in the kernel, so the names come
-    from the build being inspected rather than from a table here that a
-    renumbering upstream would quietly invalidate.
+    from the build being inspected, and an upstream renumbering cannot make
+    them wrong.
     """
     names = ct.safe(lambda: prog["gp_state_names"], None)
     if names is None:
@@ -194,8 +194,8 @@ def rcu_grace_period(prog: Program):
     gp_seq = int(state.gp_seq)
     # include/linux/rcupdate.h: RCU_SEQ_CTR_SHIFT is 2 and RCU_SEQ_STATE_MASK
     # is (1 << it) - 1, so the count is gp_seq >> 2 and the phase the low two
-    # bits. These are macros, so there is nothing in the debug info to read
-    # them from; they are checked against that header, not assumed.
+    # bits. These are macros, which the debug info does not record, so the
+    # values are taken from that header.
     yield Fact("flavour", flavour, "rcu_state.name")
     # The bottom two bits of gp_seq are the phase; the rest is the count, which
     # is why the number jumps by four per grace period rather than by one.
@@ -233,7 +233,7 @@ def rcu_grace_period(prog: Program):
 
 
 def rcu_cpus(prog: Program):
-    """Per-CPU RCU state: how far behind this CPU is, and what it owes.
+    """Per-CPU RCU state: grace-period progress and queued callbacks.
 
     A callback queued here runs when the grace period it was registered in
     completes, so the queue length is the freeing this CPU has deferred.

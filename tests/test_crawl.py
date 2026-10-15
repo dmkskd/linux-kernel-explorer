@@ -1,15 +1,15 @@
-"""Breadth-first crash hunt across every subsystem.
+"""Breadth-first crash search across every subsystem.
 
-The bugs that reached the user all had one cause: some type reached by
-navigation violated an assumption held elsewhere (a struct has no truth value;
-a pointer has no tag; an array has no tag). None were caught by targeted
-tests, because the targeted tests only visited types we'd thought about.
+The crashes reported so far had one cause: a type reached by navigation broke
+an assumption made elsewhere (a struct has no truth value; a pointer has no
+tag; an array has no tag). Targeted tests did not catch them, because they
+visited only the types they were written for.
 
-So this visits everything reachable in two hops from every map entry and
-reports anything that raises. It's a net, not an assertion.
+This visits every object reachable in two hops from every entry and reports
+any exception. It asserts no specific behaviour.
 
-It drives ``view.frames`` rather than the TUI: the frames are what the bugs
-live in, and building them needs no terminal.
+It drives ``view.frames`` instead of the TUI, because the crashes occur while
+building frames, which needs no terminal.
 """
 
 from __future__ import annotations
@@ -50,9 +50,9 @@ def visit(label, obj, ctx, failures, depth):
             failures.append((f"{label} › {row.name}", "link raised"))
 
     # The same frame in userspace mode: substituting a pid and looking up a
-    # field's command must work for every type, not just tasks -- obj.pid
-    # raises AttributeError on a struct file or mount, and ct.safe
-    # deliberately does not catch that.
+    # field's command must succeed for every type, not only tasks: obj.pid
+    # raises AttributeError on a struct file or mount, and ct.safe does not
+    # catch AttributeError.
     try:
         userspace = Context(ctx.prog, ctx.source, userspace=True)
         object_frame(label, obj, userspace).load()
@@ -93,9 +93,9 @@ def main() -> int:
 
     for subsystem in subsystems():
         for entry in subsystem.entries:
-            # Every kind of entry answers check(); the browsable ones hand back
-            # what they resolved, and the rest (facts, measurements) report
-            # themselves and have nothing to navigate into.
+            # Every kind of entry implements check(). Browsable entries return
+            # what they resolved; facts and measurements return a status and no
+            # objects to navigate into.
             result = entry.check(prog)
             where = f"{subsystem.label}/{entry.label}"
             if not result.supported:

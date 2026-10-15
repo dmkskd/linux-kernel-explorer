@@ -63,14 +63,15 @@ from .run_command import CommandScreen  # experiment: run a userspace command
 from .navigator import CursorNavigator
 
 # Source frames are exempt. Their wide column is the last one, so a long line
-# pushes nothing off screen: it makes the table scroll sideways instead, which
-# is the right answer for code. The line number and the current-line marker are
-# pinned so they survive that scroll.
+# moves no other column off screen; the table scrolls horizontally instead,
+# which keeps code lines whole. The line number and the current-line marker are
+# fixed columns, so they stay visible during that scroll.
 SOURCE_FIXED_COLUMNS = 2
 
 # How long the tree cursor must rest on an entry before it is built. Every
-# entry resolves by walking kernel memory, so without this, holding an arrow
-# key queues one walk per keystroke and the last one wins anyway.
+# entry resolves by walking kernel memory, so without this delay, holding an
+# arrow key would queue one walk per keystroke, of which only the last is
+# displayed.
 PREVIEW_DELAY = 0.2
 
 
@@ -103,8 +104,8 @@ def _highlight_source(rows: list[Row]) -> dict[str, Text]:
 
 
 # One colour per row kind, applied to the name cell. Links and derived rows are
-# things the explorer added; fields are what the struct actually declares, so
-# fields keep the default colour and the added rows are the ones that stand out.
+# added by the explorer; fields are the members the struct declares. Fields
+# keep the default colour, so the added rows are distinguished by colour.
 KIND_STYLES = {
     "link": "bold blue",
     "derived": "cyan",
@@ -203,9 +204,9 @@ ACTION_SCREENS: dict[str, frozenset[str]] = {
 }
 
 
-# What each key is for, in a sentence rather than the footer's one or two
-# words. The footer has room for a label; the key list has room for a reason,
-# and several of these keys are not guessable from their label.
+# What each key does, in one sentence instead of the footer's one or two
+# words. The footer shows a label; the key list shows this description,
+# because several keys cannot be understood from their label alone.
 KEY_HELP: dict[str, str] = {
     "select_cursor": "follow the row into whatever it points at",
     "expand": "open the row in place, keeping its neighbours on screen",
@@ -250,8 +251,8 @@ class ContextFooter(Footer):
     """Only the keys this screen can act on.
 
     Textual's Footer lists every binding and greys out the ones check_action
-    withholds, which leaves the reader the same number of keys to read past.
-    This drops them instead, so the footer says what is possible here.
+    disables. This footer omits them, so it lists only the keys that act on
+    the current screen.
     """
 
     def compose(self) -> ComposeResult:
@@ -270,10 +271,10 @@ class FieldsTable(DataTable):
     """The detail pane, with enter named.
 
     DataTable and Tree both bind enter themselves, with show=False, and the
-    focused widget's binding is the one the footer prints. An App-level
-    "enter follow" is therefore invisible exactly when it applies. Declaring it
-    on the widget keeps it on the footer, and keeps it accurate: enter means
-    follow in the table and open in the sidebar.
+    focused widget's binding is the one the footer prints, so an App-level
+    "enter follow" binding would not appear while the table has focus.
+    Declaring the binding on each widget shows it in the footer with the
+    correct label: follow in the table, open in the sidebar.
     """
 
     BINDINGS = [
@@ -348,14 +349,14 @@ class TutorialBanner(Static):
             f"[bold yellow]Step {step_num} of {total_steps}:[/] [bold white]{safe_escape(step.title)}[/]   {auto_badge}"
         )
 
-        # 2. Compact, single-line Flow roadmap showing progression through data
-        # structures. Variant 1 drops it, leaving the title alone: the step
-        # narration is no longer part of this banner, so the roadmap is the only
-        # thing left for the variants to differ over.
+        # 2. Single-line roadmap of the structures the tutorial passes through.
+        # Variant 1 omits it and shows the title only; the step narration is
+        # not part of this banner, so the roadmap is the only difference
+        # between the variants.
         if steps and self.header_variant >= 2:
-            # Consecutive steps that stand on the same structure are one stop on
-            # the route: three "task_struct" nodes in a row read as three
-            # different structures.
+            # Consecutive steps on the same structure are one node of the
+            # roadmap, because three "task_struct" nodes in a row would suggest
+            # three different structures.
             groups: list[tuple[str, list[int]]] = []
             for i, s in enumerate(steps, start=1):
                 name = s.get_flow_label() if hasattr(s, "get_flow_label") else getattr(s, "flow_label", "")
@@ -369,8 +370,9 @@ class TutorialBanner(Static):
             for name, indices in groups:
                 label = safe_escape(name)
                 if step_num in indices:
-                    # The one place on this screen that says where the reader is,
-                    # so it is painted rather than marked with a character.
+                    # The only indication of the current step on this screen, so
+                    # it is highlighted with a background colour, not a
+                    # character.
                     flow_nodes.append(f"[bold black on bright_yellow] {label} [/]")
                 elif indices[-1] < step_num:
                     flow_nodes.append(f"[dim green]✓ {label}[/]")
@@ -378,9 +380,9 @@ class TutorialBanner(Static):
                     flow_nodes.append(f"[dim]{label}[/]")
             lines.append("   [dim]Flow:[/] " + " [bold dim cyan]──▶[/] ".join(flow_nodes))
 
-        # A step that needs a condition on the machine says which command makes
-        # it, and how to read the frame again afterwards. The viewer runs it:
-        # nothing here does.
+        # A step that needs a condition on the machine names the command that
+        # creates it, and how to reload the frame afterwards. The viewer runs
+        # the command; kexplore does not.
         condition = getattr(step, "condition", "")
         if condition:
             lines.append(
@@ -400,11 +402,11 @@ class TutorialBanner(Static):
 TourBanner = TutorialBanner
 
 
-# Tokens the narration is worth colouring. One alternation, so each character is
-# claimed by exactly one group and nothing is painted twice. The point is to
-# make the flag and permission names stand out from the prose around them: the
-# difference between a private and a shared mapping is carried entirely by those
-# words, and in running text they read like every other word.
+# Tokens coloured in the narration. One alternation, so each character matches
+# exactly one group and is coloured once. Flag and permission names are
+# coloured because the distinction between, for example, a private and a
+# shared mapping is stated only by those names, which plain text does not set
+# apart from the surrounding prose.
 _NARRATION_TOKENS = re.compile(
     r"(?P<struct>\bstruct\s+[a-z_][a-z0-9_]*)"
     r"|(?P<const>\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b)"
@@ -449,17 +451,18 @@ class TutorialCallout(Static):
     """The step narration, floated over the table beneath the row it explains.
 
     It is not a table row. The field column is clipped to ``MAX_CELL`` so that
-    one wide cell cannot push the type and value columns off screen, and prose
-    wrapped to that width is unreadable. This sits on its own layer instead, so
-    it takes the width of the pane and stays next to what it is describing.
+    one wide cell cannot move the type and value columns off screen, and prose
+    wrapped to that width is too narrow to read. The narration is drawn on its
+    own layer instead, with the width of the pane, next to the row it
+    describes.
     """
 
     def prepare(self, text: str, width: int) -> int:
         """Lay the narration out for ``width`` and report the height it needs.
 
-        The caller decides where to put it, and cannot do that without knowing
-        how tall it is: near the bottom of the pane there is no room below the
-        row and the block has to go above it instead.
+        The caller places the block, which requires its height: near the
+        bottom of the pane there is no room below the row, and the block is
+        placed above it.
         """
         body = " ".join(str(text).split())
         if not body:
@@ -485,10 +488,9 @@ class TutorialCallout(Static):
 def step_table(steps: list, current: int = 0) -> list[str]:
     """The walkthrough as one row per step: screen, highlighted row, takeaway.
 
-    Everything here is already on the step: ``flow_label`` names the structure
-    the step stands on, ``action_field`` the row it asks for, and ``insight``
-    what that row is there to show. Read together they are the route, which no
-    single step can give.
+    All the data comes from the steps: ``flow_label`` names the step's
+    structure, ``action_field`` the row it selects, and ``insight`` what that
+    row shows. Listed together, they show the tutorial's whole route.
     """
     rows = []
     for idx, step in enumerate(steps, start=1):
@@ -543,8 +545,8 @@ def step_table(steps: list, current: int = 0) -> list[str]:
 class RouteModal(Static):
     """An overlay laid over whatever is on screen, for the route or the keys.
 
-    Summoned and dismissed without moving anything underneath: the step keeps
-    its position, so reading either costs the reader nothing.
+    Opening and closing it does not change the view underneath, so the step
+    keeps its position.
     """
 
     kind: str = ""
@@ -854,7 +856,7 @@ def style_action_row(
     variant: int = 1,
     blink_phase: bool = True,
 ) -> None:
-    """Style the action row that user navigates to advance the tutorial."""
+    """Style the row the user selects to advance the tutorial."""
     if variant == 1:
         # Variant 1: Interactive coach-mark badge with alternating high-contrast blink
         if not is_final:
@@ -887,15 +889,15 @@ def style_value_row(
     cells: list[Text],
     variant: int = 1,
 ) -> None:
-    """Style the value row displaying key data payoff for current step."""
+    """Style the row whose value the current step highlights."""
     clean_val = values[2].strip() if len(values) > 2 else ""
     if variant == 1:
-        # Variant 1: Insight bulb icon + golden star payoff
+        # Variant 1: bulb icon before the name and a star before the value
         cells[0] = Text(f"💡 {clean_name}", style="bold bright_cyan")
         if len(cells) > 2 and clean_val:
             cells[2] = Text(f"★ {clean_val}", style="bold bright_yellow")
     else:
-        # Variant 2: Tag pill + highlighted value block
+        # Variant 2: tag before the name and a highlighted value
         cells[0] = Text(f"• {clean_name}", style="bold white on #0369a1")
         if len(cells) > 2 and clean_val:
             cells[2] = Text(f" {clean_val} ", style="bold bright_yellow on #374151")
@@ -913,8 +915,7 @@ class Explorer(App):
         Binding("backspace", "back", "back"),
         Binding("slash", "search", "search"),
         Binding("o", "sort", "sort"),
-        # Shift reverses whatever o settled on, which is worth having but not
-        # worth a second slot on the footer.
+        # Shift+o reverses the order o selected. The footer lists o only.
         Binding("O", "sort_reverse", "reverse", show=False),
         Binding("r", "refresh", "refresh"),
         Binding("R", "reread", "re-read"),
@@ -1006,8 +1007,8 @@ class Explorer(App):
         # the token it started with, so a result that arrives after the user
         # moved on is dropped instead of overwriting whatever is on screen now.
         self._token = 0
-        # The last graph's layout, so returning to it from a detail view does
-        # not throw away the branches the user opened.
+        # The last graph's layout, so that returning to it from a detail view
+        # restores the branches the user expanded.
         self.graph_state: dict | None = None
         # Pending sidebar preview, cancelled by the next cursor move and by any
         # navigation that would otherwise be overwritten when it fires.
@@ -1246,8 +1247,8 @@ class Explorer(App):
     def struct_doc(self, obj: Object | None) -> StructDoc | None:
         """Kernel source comments for ``obj``'s type, fetched once per tag.
 
-        Never blocks: recovering these runs pahole over a ~700MB vmlinux and
-        then pulls the source file through debuginfod, so the first request for
+        Does not block. Recovering the comments runs pahole over the vmlinux
+        and fetches the source file through debuginfod, so the first request for
         a tag starts a worker and returns ``None``. The doc and hint lines are
         rewritten when the worker returns.
         """
@@ -1299,8 +1300,8 @@ class Explorer(App):
         # rather than on every repaint.
         self._docs[tag] = doc if doc is not None else StructDoc(tag, error="unavailable")
         if not self.is_running:
-            # The app closed while the worker was still reading, so there is
-            # nothing left to refresh and no screen to open source on.
+            # The app closed while the worker was reading, so no screen remains
+            # to refresh or to open source on.
             return
         self.set_activity("")
         self.update_doc()
@@ -1320,7 +1321,7 @@ class Explorer(App):
             self.open_source(doc.decl_file, line, title)
 
     def update_doc(self) -> None:
-        """Prefer the kernel's own words for this struct over the map's blurb.
+        """Show the struct's source comment in the doc line, else the frame's doc.
 
         Reached from a worker as well as from navigation, so the line is
         addressed through ``panel``: the graph or the source view may be on
@@ -1402,14 +1403,14 @@ class Explorer(App):
     # ------------------------------------------------------------- background
 
     def panel(self, selector: str) -> Static | None:
-        """A Static on the main screen, wherever the user currently is.
+        """A Static on the main screen, whichever screen is active.
 
         Workers write to the doc, hint and activity lines when they finish, and
-        by then the user may have opened the graph or the source view. Textual
-        2 resolves ``App.query_one`` against the active screen alone, so those
-        writes raise NoMatches there while working on Textual 4, which searches
-        every mounted screen. Addressing the main screen directly behaves the
-        same on both.
+        by then the graph or the source view may be active. Textual 2 resolves
+        ``App.query_one`` against the active screen only, so those writes raise
+        NoMatches on Textual 2 and succeed on Textual 4, which searches every
+        mounted screen. Querying the main screen directly behaves the same on
+        both.
 
         None means there is no main screen to write to: the app has closed
         while a worker was still reading, or has not finished mounting.
@@ -1423,10 +1424,11 @@ class Explorer(App):
             return None
 
     def set_activity(self, text: str) -> None:
-        """One line saying what is happening off the UI thread, if anything.
+        """One line describing the work running off the UI thread, if any.
 
-        Everything that goes through debuginfod can block for as long as a
-        download, so silence here reads as a hang.
+        Any operation that goes through debuginfod can block for the duration
+        of a download, so the line reports it instead of leaving the UI
+        apparently frozen.
         """
         widget = self.panel("#activity")
         if widget is None:
@@ -1437,9 +1439,9 @@ class Explorer(App):
     def open_plan(self, plan: Plan | None) -> None:
         """Show what a plan describes, building it off the UI thread if slow.
 
-        The one path into every view. A deferred build reaches for pahole,
-        addr2line, debuginfod or bpftrace, any of which can take seconds on a
-        warm cache and minutes on a cold one, so a placeholder goes up first.
+        Every view is opened through this method. A deferred build runs pahole,
+        addr2line, debuginfod or bpftrace, any of which can take seconds with a
+        warm cache and minutes with a cold one, so a placeholder is shown first.
         """
         if plan is None:
             return
@@ -1661,7 +1663,7 @@ class Explorer(App):
     start_tour = start_tutorial
 
     def _show_tutorial_step(self, step_idx: int) -> None:
-        """Render the landing page (step 0) or real Frame for the tutorial step (steps 1..N)."""
+        """Render the landing page (step 0) or the step's live frame (steps 1..N)."""
         if self.active_tutorial is None:
             return
 
@@ -1792,7 +1794,7 @@ class Explorer(App):
 
     def _on_nav_settled(self, row_idx: int) -> None:
         self.update_hint()
-        # When the cursor arrives at its place, wait a full 3 seconds
+        # After the cursor reaches the target row, wait 3 seconds
         self._auto_seconds_remaining = self.auto_dwell_travel_settled
         self._ensure_blink_timer()
         if self.auto_play and self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
@@ -2075,10 +2077,9 @@ class Explorer(App):
         """The C type this screen is made of, for the path line.
 
         A struct view takes it from the object it opened. A listing has no
-        object of its own, so it takes it from the rows, which is what stops a
-        table of pid/state/command reading as ps output: every row of it is a
-        task_struct. Reported only when the rows agree, since a list of mixed
-        types has no single answer.
+        object of its own, so it takes the type from the rows; the path line
+        then shows that a table of pid, state and command lists task_structs.
+        Reported only when all rows have the same type.
         """
         if frame.obj is not None:
             return f"   {frame.obj.type_.type_name()}"
@@ -2119,8 +2120,8 @@ class Explorer(App):
         table.clear(columns=True)
         table.add_columns(*self._headers(columns))
         source_view = columns == SOURCE_COLUMNS
-        # experiment: /proc annotation -- a file's own text is clipped at
-        # MAX_CELL like a struct value, which cuts off the half worth reading.
+        # experiment: /proc annotation -- a file's text is not clipped at
+        # MAX_CELL, which would cut off the value part of each line.
         wide = source_view or columns == procfile.TEXT_COLUMNS
         table.fixed_columns = SOURCE_FIXED_COLUMNS if source_view else 0
 
@@ -2138,9 +2139,9 @@ class Explorer(App):
         # the task_struct and descend again, so the stack is a history of
         # screens rather than a chain of pointers. Printing it as a path would
         # claim edges that do not exist, such as sched_statistics to cgroup.
-        # What holds on every step is the subject: each object on screen was
-        # reached from the task the walkthrough is about, so that is the root.
-        # Free browsing keeps the whole path: the reader walked it.
+        # Every object on screen during a walkthrough was reached from the
+        # walkthrough's task, so the path line shows that task as its root.
+        # Free browsing shows the whole path, which the user followed.
         in_step = self.active_tutorial is not None and self.active_tutorial.current_idx > 0
         if in_step:
             root = self._tutorial_subject_label()
@@ -2171,8 +2172,9 @@ class Explorer(App):
                     row.placement,
                 ][:width]
             values += [""] * (width - len(values))
-            # Text, not str: a str cell is parsed as console markup, which eats
-            # anything in square brackets ("[leader]", a "grep '\['" command).
+            # Text, not str: a str cell is parsed as console markup, which
+            # removes text in square brackets ("[leader]", a "grep '\['"
+            # command).
             cells = [Text(_clip(v, limit)) for v in values]
             if row.name in source:
                 cells[2] = source[row.name].copy()
@@ -2181,30 +2183,30 @@ class Explorer(App):
             # other: a directory to open, a file with a line table, a file
             # without one.
             elif row.cells is None or self._showing_proc_file():
-                # Only the field/type/value/placement layout is painted. A view
-                # that supplies its own cells is a matrix of unrelated columns,
-                # where colouring by position would mean nothing.
+                # Only the field/type/value/placement layout is coloured. A view
+                # that supplies its own cells has columns of unrelated meaning,
+                # so colouring by column position would be arbitrary.
                 style = KIND_STYLES.get(row.kind)
                 if style:
                     cells[0].stylize(style)
-                # The C type and the placement are reference detail. Dimming
-                # them lets the name and the value carry the line.
+                # The C type and the placement are dimmed, so the name and the
+                # value are the most visible cells.
                 if row.kind == "field" and len(cells) > 1:
                     cells[1].stylize("dim")
                 if len(cells) > 2:
                     _paint_value(cells[2])
                 if len(cells) > 3:
                     cells[3].stylize("dim")
-            # Colour the userspace command so it is obviously not a kernel path.
+            # Colour the userspace command, to distinguish it from a kernel path.
             if (
                 self.userspace
                 and len(cells) > 1
                 and row.kind in ("link", "field")
                 and row.type_name != _type_of(row)
             ):
-                # Only colour cells that actually became a command: a field or
-                # link with no equivalent keeps its type or its origin, and
-                # should look normal.
+                # Only cells that hold a command are coloured: a field or link
+                # with no equivalent keeps its type or origin and the default
+                # colour.
                 cells[1].stylize("cyan")
             # In an active tutorial step, apply dual highlighting: Action ⚡ vs Value 💡
             if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
@@ -2264,9 +2266,9 @@ class Explorer(App):
     def _hide_callout(self) -> None:
         """Take the step narration off the screen.
 
-        It is drawn on its own layer over the table, so nothing that replaces
-        the table underneath removes it: a landing page shown while a step is
-        still the active one leaves last step's narration floating over it.
+        It is drawn on its own layer over the table, so replacing the table
+        does not remove it: a landing page shown while a step is active would
+        otherwise keep the previous step's narration over it.
         """
         try:
             self.query_one("#tutorial-callout", TutorialCallout).hide()
@@ -2277,8 +2279,8 @@ class Explorer(App):
         """Put the step narration just under the row it is about.
 
         The anchor is the action row's position on screen, so the block follows
-        the cursor when the table scrolls. Any failure hides it rather than
-        leaving it stranded over unrelated rows.
+        the row when the table scrolls. On any failure the block is hidden, so
+        it is never drawn over unrelated rows.
         """
         try:
             callout = self.query_one("#tutorial-callout", TutorialCallout)
@@ -2288,10 +2290,9 @@ class Explorer(App):
         if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
             current = self.active_tutorial.current_idx
             # The narration is drawn on its own layer over the table, so it
-            # survives anything that replaces what is underneath: a landing
-            # page previewed from the tree, or another structure opened while
-            # the session is still on a step. It belongs to one frame, shown
-            # in the table, and nowhere else.
+            # stays when the table is replaced: by a landing page previewed
+            # from the tree, or by another structure opened while a step is
+            # active. It is shown only over its own step's frame.
             on_step_frame = bool(self.stack) and (
                 self.stack[-1] is self.active_tutorial.step_frames.get(current)
             )
@@ -2329,8 +2330,8 @@ class Explorer(App):
             if below + height <= available:
                 y = below
             else:
-                # No room under the row: sit above it instead, which keeps the
-                # block against the row it describes rather than off screen.
+                # No room below the row, so the block is placed above it, next
+                # to the row it describes.
                 y = row_y - height
             if y < 0 or y >= available:
                 callout.hide()
@@ -2436,14 +2437,15 @@ class Explorer(App):
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Fill the pane for the entry under the cursor, without enter.
 
-        Scrolling the tree is how the catalog gets read, so the values belong
-        on screen while it happens. Deferred by ``PREVIEW_DELAY`` so passing
-        over an entry costs nothing; only the one the cursor stops on is built.
+        The catalog is browsed by moving through the tree, so the entry under
+        the cursor is shown in the pane without pressing Enter. The build is
+        delayed by ``PREVIEW_DELAY``, so only the entry the cursor stops on is
+        built.
         """
         self.cancel_preview()
         node = event.node
-        # This highlight is the sidebar catching up with the pane, not a
-        # request to open anything.
+        # This highlight was set to match the pane, not by the user, so no
+        # frame is opened for it.
         if node is self._synced_node:
             self._synced_node = None
             return
@@ -2457,10 +2459,10 @@ class Explorer(App):
     def sync_tree(self, item) -> None:
         """Move the sidebar cursor onto the item the pane just opened.
 
-        Following an index row is the same navigation as picking that item in
-        the tree, so the two should not disagree about where the user is. Any
-        collapsed branch above the item is opened, since a node inside one
-        occupies no line for the cursor to reach.
+        Following an index row opens the same item as selecting it in the tree,
+        so the sidebar cursor is moved to match. Any collapsed branch above the
+        item is expanded, because a node in a collapsed branch has no line for
+        the cursor.
         """
         tree: Tree = self.query_one("#nav", Tree)
         node = next(
@@ -2490,8 +2492,8 @@ class Explorer(App):
 
     def preview_node(self, node) -> None:
         # During the delay the tree may have lost focus, or the graph screen may
-        # have gone up and taken the sidebar with it. A frame arriving under
-        # someone reading the pane is worse than no preview at all.
+        # have replaced the main screen. The preview is then not shown, so that
+        # it does not replace a frame the user is reading.
         nav = self.screen.query("#nav")
         if len(nav) == 1 and nav.first().has_focus:
             self.open_node(node, preview=True)
@@ -2596,7 +2598,7 @@ class Explorer(App):
                 # ("cannot convert 'struct foo' to bool").
                 target = follow(rows[0].obj)
                 if target is None:
-                    # Legitimately empty -- e.g. a kernel thread's mm is NULL.
+                    # NULL by design, for example a kernel thread's mm.
                     self.notify(f"{row.name} is NULL here", severity="warning")
                     return
                 self.push(frames.object_frame(row.name, target, self.context, row.doc))
@@ -2669,11 +2671,11 @@ class Explorer(App):
     def action_expand(self) -> None:
         """Open the row under the cursor in place, keeping its neighbours visible.
 
-        ``enter`` replaces the screen with what it followed, which is right for
-        going somewhere and wrong for a one-field refcount. This splices the
-        children in below the row instead, indented, and takes them out again
-        on a second press. The expansion lives in the frame's row list, so a
-        refresh or a re-entry rebuilds the frame closed.
+        ``enter`` replaces the screen with the followed object, which suits a
+        large struct but not a refcount with one member. This inserts the
+        children below the row instead, indented, and removes them on a second
+        press. The expansion is stored in the frame's row list, so a refresh or
+        a re-entry rebuilds the frame collapsed.
         """
         if self.active_tutorial is not None and self.active_tutorial.current_idx == 0:
             if self.auto_play:
@@ -2742,10 +2744,8 @@ class Explorer(App):
     def action_sort(self) -> None:
         """Order the rows by the next column, and eventually by none of them.
 
-        Cycling rather than pointing at a column, because the table's cursor
-        selects a row: there is nothing on screen that says which column the
-        user means. The header carries the arrow, so the state is visible even
-        though the key that set it is not.
+        The key cycles through the columns because the table's cursor selects
+        a row, not a column. The header shows an arrow on the sort column.
         """
         frame = self.stack[-1] if self.stack else None
         if frame is None or not any(
@@ -2793,8 +2793,7 @@ class Explorer(App):
             self.render_frame()
             return
         # experiment: /proc annotation -- a file opened from the sidebar is
-        # the only frame on the stack, and the level above it is its
-        # directory rather than nothing.
+        # the only frame on the stack, and going back opens its directory.
         if self._showing_proc_file():
             plan = procfile.parent_plan(self.context, self.stack[-1].label)
             if plan is not None:
@@ -2809,7 +2808,7 @@ class Explorer(App):
             return
 
     def action_userspace(self) -> None:
-        """Swap the origin column for how to get the same thing from userspace."""
+        """Toggle the type and origin columns between kernel paths and userspace commands."""
         if not self.context.live:
             self.notify("userspace commands are unavailable for a vmcore", severity="warning")
             return
@@ -2847,8 +2846,8 @@ class Explorer(App):
     def action_reread(self) -> None:
         """Re-read the current frame, inside a walkthrough step as well as outside.
 
-        A step that asks the viewer to create a condition on the machine is
-        useless without it: the frame was built before the command ran.
+        A step that asks the viewer to create a condition on the machine needs
+        a reload, because the frame was built before the command ran.
         """
         self.action_refresh()
 
@@ -2945,13 +2944,12 @@ class Explorer(App):
         self.notify(f"Copied row: {preview}", title="Clipboard", timeout=2.5, markup=False)
 
     def action_keys(self) -> None:
-        """Every key, with the ones this screen cannot act on kept out of the way.
+        """Every key, with the keys that do not act on this screen listed last.
 
-        The footer carries only what is possible here, so the rest need
-        somewhere to be found. Keys sharing an action share a row, and the ones
-        that do nothing here are named on one line rather than given a row
-        each: a list of thirty greyed entries costs as much to read past as the
-        footer did.
+        The footer lists only the keys that act on the current screen, so this
+        list includes the others. Keys bound to the same action share a row, and
+        the keys that do not act on this screen are named on one line instead
+        of one row each.
         """
         modal = self.query_one("#route-modal", RouteModal)
         if modal.display and modal.kind == "keys":
@@ -3072,9 +3070,9 @@ class Explorer(App):
     def action_itinerary(self) -> None:
         """Lay the route over the current step, or take it away again.
 
-        A step shows one screen and says why one row on it matters. The route is
-        what no step can show, and reading it must not cost the reader their
-        place, so this leaves the walkthrough exactly where it was.
+        A step shows one screen and explains one row on it. The route shows all
+        steps together, and opening it leaves the walkthrough at its current
+        step.
         """
         if self.active_tutorial is None:
             return
@@ -3096,8 +3094,8 @@ class Explorer(App):
         """Copy the current step's narration to the system clipboard.
 
         ``c`` and ``C`` copy the row under the cursor. The narration is drawn by
-        TutorialCallout on its own layer rather than as rows, so neither of them
-        reaches it, and terminal selection is otherwise the only route to it.
+        TutorialCallout on its own layer, not as rows, so neither key copies it;
+        without this key, only terminal selection can copy it.
         """
         step = None
         if self.active_tutorial is not None and self.active_tutorial.current_idx > 0:
@@ -3201,17 +3199,15 @@ class Explorer(App):
         doc = self.struct_doc(frame_obj)
         if doc is None:
             # The worker that reads this struct's source is still running.
-            # Record what was asked for, so _struct_doc_done opens it once the
-            # worker returns. Without this the notification is all that
-            # happens and the user has to press s again.
+            # The request is recorded, so _struct_doc_done opens the source
+            # when the worker returns, without a second press of s.
             aggregate = ct.struct_type(frame_obj.type_) if frame_obj is not None else None
             tag = aggregate.tag if aggregate is not None else None
             if tag:
                 self._pending_source = (tag, row.name if row is not None else "")
-                # Say nothing yet. A cached lookup returns in well under a
-                # second and opens the view itself, and a notification about
-                # fetching would still be on screen underneath it. Only a
-                # fetch that is actually slow is worth reporting.
+                # No notification yet. A cached lookup returns in well under a
+                # second and opens the view, and a notification would remain on
+                # screen under it. Only a slow fetch is reported.
                 self.set_timer(0.4, lambda: self._still_fetching(tag))
             else:
                 self.notify("no structure here to show source for",
@@ -3252,9 +3248,9 @@ class Explorer(App):
     def action_trace_command(self) -> None:
         """Trace the command under the cursor into the kernel that serves it.
 
-        A pushed frame rather than a dialog: the result is a table of rows, its
-        stack frames carry file:line, and "s" opens the source of any of them.
-        A modal would end that chain at the first screen.
+        The result is a pushed frame, not a dialog: it is a table of rows whose
+        stack frames carry file:line, and "s" opens the source of any of them,
+        which a modal dialog would not allow.
         """
         if not self.context.live:
             self.notify("command tracing is unavailable for a vmcore", severity="warning")
@@ -3272,8 +3268,8 @@ class Explorer(App):
         if command in UNFILLED.values():
             self.notify(f"nothing to run here: {command}", severity="warning")
             return
-        # A command that names no file is not a dead end: the trace measures
-        # which one it read. Only it can say, so nothing is refused here.
+        # A command that names no file is still traced, because the trace
+        # measures which file the command reads.
         row = self.current_row()
         parent = self.stack[-1].obj if self.stack else None
         tag = ct.tag_of(parent.type_) if parent is not None else None
@@ -3329,10 +3325,9 @@ class Explorer(App):
     def action_graph(self) -> None:
         """Focus mode: this entity's neighbourhood as a picture.
 
-        Prefers the frame's own object -- pressing g while looking at a task
-        graphs that task -- and falls back to the row under the cursor, which
-        is what you want in a list frame, where the frame itself is not one
-        struct.
+        Uses the frame's object, so pressing g on a task's frame graphs that
+        task. In a list frame, which has no single object, it uses the row under
+        the cursor.
         """
         frame = self.stack[-1] if self.stack else None
         obj = frame.obj if frame is not None else None
@@ -3346,9 +3341,9 @@ class Explorer(App):
             return
         target = follow(obj)
 
-        # Reopen the graph you left, rather than a fresh one, when this is the
-        # struct you stepped out of it to look at -- or its centre. Anywhere
-        # else, g means "graph this", which is a new picture.
+        # Reopen the previous graph, not a new one, when this struct is the one
+        # opened from the graph, or the graph's root. On any other struct, g
+        # builds a new graph.
         state = self.graph_state
         if state is not None and graph_key(target) not in state["returns"]:
             state = None
@@ -3360,9 +3355,8 @@ class Explorer(App):
     def action_escape(self) -> None:
         """Leave the filter if one is open, otherwise go back a step.
 
-        Two things can be "where I am": a filter narrowing the frame, and the
-        frame itself. Escape drops the innermost one, so it never navigates
-        away from a frame the user was still filtering.
+        Escape first closes an open filter, and only goes back a frame when no
+        filter is open, so it does not leave a frame that is being filtered.
         """
         for widget_id, kind in (("#route-modal", RouteModal),):
             try:
@@ -3392,7 +3386,7 @@ class Explorer(App):
         self._mark_graph_return()
 
     def open_rows(self, label: str, make_rows, doc: str = "") -> None:
-        """Push a list view built by someone else's expander."""
+        """Push a list view built by a caller-supplied expander."""
         self.push(Frame(label, make_rows, doc=doc))
         self._mark_graph_return()
 

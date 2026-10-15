@@ -1,27 +1,26 @@
 """Packet buffers.
 
-Packets in flight are not browsable. An skb being processed by the network
-stack exists for microseconds, lives on a kernel stack or in a CPU-local
-variable, and is gone before you can look at it. There is no global list of
-live skbs, and drgn on a live kernel is not synchronised with packet
-processing anyway.
+An skb in flight through the network stack cannot be browsed: it exists for
+microseconds, is referenced from a kernel stack or a per-CPU variable, and is
+freed before drgn can read it. The kernel keeps no global list of live skbs,
+and drgn on a live kernel is not synchronised with packet processing.
 
-What you *can* browse is skbs that are sitting still, queued at a choke point:
+The skbs that can be browsed are those queued at one of three points:
 
-  * **Socket queues** -- ``sk_receive_queue`` holds data that has arrived but
-    not been read; ``sk_write_queue`` holds data sent but not acknowledged.
-    These are the easiest to catch, because a socket nobody is reading will
-    hold its skbs indefinitely.
-  * **Per-CPU backlog** -- ``softnet_data.input_pkt_queue`` and
-    ``process_queue``, where RPS/NAPI parks packets between the driver and the
-    protocol stack. Usually empty on an idle system.
-  * **Qdisc queues** -- packets waiting to be transmitted on a device.
+  * **Socket queues**: ``sk_receive_queue`` holds data that has arrived but
+    not been read, and ``sk_write_queue`` holds data sent but not
+    acknowledged. A socket that is never read keeps its received skbs queued
+    indefinitely.
+  * **Per-CPU backlog**: ``softnet_data.input_pkt_queue`` and
+    ``process_queue``, where RPS and NAPI queue packets between the driver and
+    the protocol stack. Both are usually empty on an idle system.
+  * **Qdisc queues**: packets waiting to be transmitted on a device.
 
-If you need packets *in flight*, that's a tracing problem rather than a memory
-inspection one: a kprobe on ``netif_receive_skb`` or ``__netif_receive_skb_core``.
+Packets in flight require tracing instead, for example a kprobe on
+``netif_receive_skb`` or ``__netif_receive_skb_core``.
 
-A ``sk_buff_head`` is a circular doubly-linked list whose head is not an skb,
-so the walk terminates when ``next`` points back at the head address.
+A ``sk_buff_head`` is a circular doubly linked list whose head is not an skb,
+so a walk ends when ``next`` points back to the head's address.
 """
 
 from __future__ import annotations
@@ -43,7 +42,8 @@ MAX_SKBS = 64
 def skb_list(head: Object):
     """Walk a struct sk_buff_head.
 
-    ``head`` is the list anchor, not an skb -- stop when we come back to it.
+    ``head`` is the list anchor, not an skb; the walk stops when it returns to
+    the anchor.
     """
     anchor = head.value_() if head.type_.kind == drgn.TypeKind.POINTER else head.address_
     node = head.next
@@ -71,8 +71,8 @@ def qdisc_skb_list(head: Object):
 def _socket_socks(prog: Program):
     """(task, fd, sock) for every socket fd on the system.
 
-    The protocol half. A socket whose sk is NULL is being torn down and has
-    nothing to queue.
+    The protocol half. A socket whose sk is NULL is being torn down and has no
+    queues to walk.
     """
     for task, fd, file in socket_files(prog):
         sk = SOCKET_I(file.f_inode).sk
@@ -124,7 +124,7 @@ def qdisc_queues(prog: Program):
 
 
 def nonempty_queues(prog: Program):
-    """Every socket queue that currently holds something -- where to look first."""
+    """Every socket queue that is not empty."""
     for task, fd, sk in _socket_socks(prog):
         for name in ("sk_receive_queue", "sk_write_queue", "sk_error_queue"):
             queue = ct.safe(lambda: sk.member_(name), None)

@@ -1,9 +1,9 @@
-"""Make the scheduler accounting counters show something.
+"""Load the CPUs so the scheduler accounting counters have non-trivial values.
 
 On an idle machine every task's ``sched_info.run_delay`` is a fraction of a
 millisecond accumulated over days, so a walkthrough of the time accounting
-fields opens on numbers that say nothing. This holds two kinds of task alive
-at once so the fields can be compared:
+fields shows values near zero. This keeps two kinds of task alive at once so
+the fields can be compared:
 
   * ``spin``   twice as many CPU-bound loops as there are CPUs, so each one
                spends about half its time on a runqueue waiting for a CPU.
@@ -12,16 +12,16 @@ at once so the fields can be compared:
   * ``sleep``  one task that sleeps in short intervals and never competes.
                run_delay stays near zero; every context switch is voluntary.
 
-Each child sets its own comm, so a walkthrough can find them by name:
+Each child sets its comm, so a walkthrough can find them by name:
 ``kexplore-spin`` and ``kexplore-sleep``.
 
-What it does to the machine, for as long as it runs:
+While it runs:
 
-  * every CPU is saturated, so anything else running is slowed down
+  * every CPU is saturated, which slows down every other process
   * ``kernel.task_delayacct`` is set to 1 if it is not already, and the
     previous value is restored on exit
 
-It asks before starting when there is a terminal to ask on. Detached, pass
+It asks for confirmation when run from a terminal. When detached, pass
 ``--yes``:
 
     sudo setsid nohup python3 tests/helpers/cpu_contention.py 300 --yes \

@@ -1,16 +1,14 @@
-"""A neighbourhood of the object graph, laid out for a character grid.
+"""Layout of a neighbourhood of the object graph on a character grid.
 
-Nothing here reads kernel memory. It is handed nodes and edges that someone
-else already resolved and decides where the boxes go, so the part most likely
-to be wrong -- the drawing -- can be tested on any machine, with no VM and no
-vmlinux.
+This module does not read kernel memory. It receives nodes and edges that are
+already resolved and computes where each box is drawn, so the layout can be
+tested without a kernel or a vmlinux.
 
-The layout is a tidy tree, not a force simulation: columns are depth, and a
-parent sits centred on its children. Real object graphs are full of cycles
-(a task's runqueue points back at the task), so the tree is the *first* path
-found to each node and every other edge into it becomes a back-edge, drawn as
-a badge rather than a line. Lines that loop across a character grid are how
-these pictures stop being readable.
+The layout is a tidy tree: each column is one depth, and a parent is centred
+on its children. Object graphs contain cycles (a task's runqueue points back
+to the task), so each node is placed on the first path found to it, and every
+other edge into it is drawn as a back-edge badge instead of a line, because
+lines routed back across a character grid cannot be followed.
 """
 
 from __future__ import annotations
@@ -20,12 +18,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # A box is three lines: border, content, border. The type and the identity
-# share the content line -- stacking them doubled the height of every picture
-# for two words that read fine side by side.
+# share the content line, which keeps every box one content line high.
 BOX_HEIGHT = 3
-# No blank row between boxes. Each edge already owns two lines -- its name and
-# its operation -- and those sit in the gap column, so stacked boxes read as a
-# list without a separator and the picture loses a quarter of its height.
+# Boxes in a column are stacked without a blank row between them, because an
+# edge's name and operation are drawn in the gap between columns.
 ROW_GAP = 0
 # Room between one column's right edge and the next one's left, holding the
 # trunk, the edge's name and the operation that traverses it.
@@ -38,9 +34,9 @@ MAX_LABEL = COL_GAP - 8
 class Node:
     """One box.
 
-    ``key`` is identity, not position: two edges reaching the same address
-    must produce the same key or the picture grows duplicate boxes for what
-    is one struct.
+    ``key`` identifies the object, not its position: two edges that reach the
+    same address must produce the same key, or the same struct is drawn as two
+    boxes.
     """
 
     key: str
@@ -50,13 +46,13 @@ class Node:
     kind: str = "object"  # root | object | fanout | error
     obj: Any = None
     doc: str = ""
-    # Collapsed nodes have edges that were deliberately not walked. The count
-    # comes from the link table, not from resolving anything, so a box can
-    # advertise what it is hiding without reading kernel memory for it.
+    # A collapsed node has edges that were not walked. ``link_count`` comes
+    # from the link table without resolving the links, so the box shows how
+    # many edges it hides without reading kernel memory.
     collapsed: bool = False
     link_count: int = 0
-    # What the box had to shorten to fit -- the full address, normally. Shown
-    # in the info line, so the box can stay narrow without losing it.
+    # The text the box shortened to fit, normally the full address. It is
+    # shown in the info line.
     detail: str = ""
     # Fan-out nodes stand for a whole collection; this opens it as a list.
     expand: Callable[[], list] | None = None
@@ -66,8 +62,8 @@ class Node:
     @property
     def content(self) -> str:
         text = f"{self.title}  {self.subtitle}".rstrip()
-        # A collection already advertises its size as "×156"; adding "+156"
-        # would say the same thing twice in the widest line of the picture.
+        # A collection already shows its size, as "×156", so "+156" is not
+        # added to it.
         if self.collapsed and self.link_count and self.kind not in ("fanout", "more"):
             text += f"  +{self.link_count}"
         return text
@@ -80,13 +76,11 @@ class Node:
 
 @dataclass
 class Edge:
-    """A traversal, not just a line.
+    """The operation that leads from one object to another.
 
-    An edge is the interesting half: a box is a struct sitting in memory, but
-    getting from one to the next is always *something the kernel does* --
-    dereference a member, walk a list, call ``task_rq()``. ``op`` is that
-    step, spelled the way the kernel spells it, and it is drawn under the
-    edge's name rather than hidden in a detail pane.
+    ``op`` is that operation as the kernel writes it: a member dereference, a
+    list walk, or a call such as ``task_rq()``. It is drawn under the edge's
+    name.
     """
 
     src: str
@@ -140,18 +134,17 @@ class Placed:
 def layout(graph: Graph) -> dict[str, Placed]:
     """Assign every node a position, root at the left.
 
-    Children are stacked in edge order and the parent is centred on them,
-    which is what makes the fan out of a task readable: the mm, the runqueue
-    and the parent task each get their own row and nothing crosses.
+    Children are stacked in edge order and the parent is centred on them, so
+    each child of a task (the mm, the runqueue, the parent task) has its own
+    row and no two edges cross.
     """
     by_depth: dict[int, list[str]] = {}
     for key, node in graph.nodes.items():
         by_depth.setdefault(node.depth, []).append(key)
 
-    # Every box in a column takes the column's width, and the column is as
-    # wide as its widest box. Uniform width is not cosmetic: the trunk is
-    # placed just past the column's right edge, so a narrow box would put its
-    # trunk inside the band where its own neighbours are drawn.
+    # Every box in a column takes the width of the widest box. The trunk is
+    # drawn just past the column's right edge, so a narrower box would place
+    # its trunk inside the area where the boxes beside it are drawn.
     column_x: dict[int, int] = {}
     column_w: dict[int, int] = {}
     x = 0
@@ -161,8 +154,8 @@ def layout(graph: Graph) -> dict[str, Placed]:
         x += column_w[depth] + COL_GAP
 
     placed: dict[str, Placed] = {}
-    # Next free row per column. Kept per column rather than globally so a deep
-    # branch does not push its cousins down for no reason.
+    # Next free row per column. A per-column cursor keeps a deep branch from
+    # moving down the boxes of other branches in the columns it does not use.
     cursor: dict[int, int] = {}
 
     def place(key: str) -> int:
@@ -182,8 +175,8 @@ def layout(graph: Graph) -> dict[str, Placed]:
         return y
 
     place(graph.root)
-    # Anything unreachable through tree edges (should not happen, but a bad
-    # resolver should not silently vanish) goes below everything else.
+    # A node not reachable through tree edges indicates a resolver fault. It
+    # is placed below all other nodes so that it remains visible.
     for key in graph.nodes:
         if key not in placed:
             node = graph.nodes[key]
@@ -193,9 +186,9 @@ def layout(graph: Graph) -> dict[str, Placed]:
     return placed
 
 
-# Which box-drawing character has exactly these arms. Building the trunk from
-# arms rather than special-casing first/last child is what keeps the junction
-# right when a parent's own row is also one of its children's rows.
+# The box-drawing character for each set of arms. Composing the trunk from
+# arms, instead of special-casing the first and last child, draws the correct
+# junction when a parent's row is also one of its children's rows.
 _ARMS = {
     frozenset("ud"): "│",
     frozenset("lr"): "─",
@@ -254,9 +247,8 @@ def draw(
 ) -> Canvas:
     """Render boxes and connectors into a canvas.
 
-    ``path`` is the chain of ancestors from the root to the selected node.
-    Lighting it is what keeps a wide picture legible: without it every box has
-    the same weight and there is no visual thread back to where you started.
+    ``path`` is the chain of ancestors from the root to the selected node, and
+    is highlighted so the route from the root to the selection is visible.
     """
     canvas = Canvas()
 
@@ -271,8 +263,8 @@ def draw(
         node = spot.node
         style = tone(key, node.kind)
         inner = spot.w - 2
-        # The badge marks a node that other edges also reach; which edges is
-        # in the info line, because naming them here would not fit.
+        # The badge marks a node that other edges also reach. The info line
+        # names those edges, because the box has no room for them.
         badge = "↺" if node.returns else " "
         body = _clip(node.content, inner - 3)
         canvas.text(spot.y, spot.x, "┌" + "─" * inner + "┐", style)
@@ -309,18 +301,16 @@ def draw(
             edge = graph.edge(key, child)
             name = _clip(edge.label if edge else "", MAX_LABEL)
             style = tone(child, "edge")
-            # An unlabelled edge draws no gap in the run -- "└─  ───▸" reads
-            # as a label that failed to render.
+            # An unlabelled edge is drawn as a continuous line, because a gap
+            # in it would look like a missing label.
             if name:
                 canvas.text(target.port, trunk + 2, f" {name} ", style)
             canvas.hline(target.port, trunk + 1, target.x, "edge")
             canvas.put(target.port, target.x - 1, "▸", style)
-            # The operation rides one line below the name. This is the line
-            # that turns the picture from a diagram of structs into a diagram
-            # of what the kernel does to get between them.
+            # The operation is drawn one line below the edge's name.
             if edge and edge.op:
-                # Stop a column short of the box, so a long traversal never
-                # reads as if it were part of the struct it points at.
+                # The text ends one column before the target box, so that it
+                # is not read as part of that box.
                 room = target.x - trunk - 4
                 canvas.text(
                     target.port + 1,

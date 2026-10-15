@@ -1,21 +1,18 @@
-"""Make the debuginfod cache survive between runs, and let it work offline.
+"""Keep the debuginfod cache between runs and allow lookups from the cache only.
 
-The kernel's DWARF is ~700MB. libdebuginfod downloads it to a temporary name
-(``debuginfo.XXXXXX``) and only renames it to ``debuginfo`` once the transfer
-*completes* -- there is no resume. Quitting the explorer mid-fetch therefore
-throws the whole download away and leaves the partial file behind, so the next
-run starts from zero. That is why the fetch appears to happen every time.
+libdebuginfod downloads the kernel's DWARF, several hundred MB, to a temporary
+file (``debuginfo.XXXXXX``) and renames it to ``debuginfo`` only when the
+transfer completes; it does not resume an interrupted transfer. Quitting the
+explorer during the download discards it and leaves the partial file behind,
+and the next run downloads from the beginning.
 
-Two things follow:
-
-  * the download has to be done once, to completion, outside the UI
-    (:func:`prefetch`), after which every later run is a local cache hit;
-  * once it is cached, the network is not needed at all -- but the client only
-    consults its cache when at least one URL is configured. With
-    ``DEBUGINFOD_URLS`` empty it returns ENOSYS without ever looking. So
-    "cache only" is spelled as a URL pointing at a closed port
-    (:data:`OFFLINE_URLS`): hits are served from disk, misses fail instantly
-    rather than reaching for a roaming connection.
+:func:`prefetch` therefore downloads to completion outside the UI, after which
+later runs are served from the cache. libdebuginfod reads its cache only when
+at least one URL is configured, and with ``DEBUGINFOD_URLS`` empty it returns
+ENOSYS without reading it. Cache-only lookups therefore use a URL that points
+at a closed port (:data:`OFFLINE_URLS`): cached files are served from disk, and
+a file missing from the cache fails immediately instead of opening a network
+connection.
 """
 
 from __future__ import annotations
@@ -33,16 +30,16 @@ from pathlib import Path
 # ECONNREFUSED, but the cache is still searched first. See the module docstring.
 OFFLINE_URLS = "http://127.0.0.1:1/"
 
-# The client prunes any file it has not read for max_unused_age_s (a week by
-# default) and re-probes a miss after cache_miss_s (ten minutes). Both are far
-# too short to keep a 700MB vmlinux across a stretch of working offline, and
-# both are documented as being read from these files in the cache directory.
+# libdebuginfod prunes any file it has not read for max_unused_age_s (a week by
+# default) and re-probes a miss after cache_miss_s (ten minutes). Both are
+# shorter than a period of offline work, so a prefetched vmlinux could be
+# pruned. libdebuginfod reads both settings from these files in the cache
+# directory.
 _RETAIN_SECONDS = 365 * 24 * 3600
 _MISS_SECONDS = 24 * 3600
 
-# Partial downloads are named "<kind>.XXXXXX" by mkstemp. Anything older than
-# this is from a run that has already exited, so it is dead weight, not
-# progress.
+# Partial downloads are named "<kind>.XXXXXX" by mkstemp. One older than this
+# belongs to a run that has exited, and will not be completed.
 _STALE_TEMP_SECONDS = 4 * 3600
 
 _TEMP = re.compile(r"^(debuginfo|executable|source.*)\.[A-Za-z0-9]{6}$")
@@ -81,17 +78,17 @@ def offline() -> bool:
 
 
 def configure(offline_only: bool = False) -> None:
-    """Pin the cache retention, and optionally cut the network off.
+    """Set the cache retention and, if requested, restrict lookups to the cache.
 
-    Safe to call before drgn attaches: drgn reads ``DEBUGINFOD_URLS`` when it
-    loads debug info, not at import, so this still applies to its own fetch of
-    the vmlinux DWARF.
+    drgn reads ``DEBUGINFOD_URLS`` when it loads debug info, not at import, so
+    calling this before drgn attaches also applies to drgn's fetch of the
+    vmlinux DWARF.
     """
     if offline_only:
         os.environ["DEBUGINFOD_URLS"] = OFFLINE_URLS
 
-    # Signature enforcement without keys is worse than either alternative: it
-    # pays for the whole transfer and then throws it away, every run.
+    # Signature enforcement without certificates downloads the whole file and
+    # then rejects it with ENOKEY, on every run.
     if (
         "ima:" in os.environ.get("DEBUGINFOD_URLS", "")
         and not os.environ.get("DEBUGINFOD_IMA_CERT_PATH")
@@ -100,8 +97,8 @@ def configure(offline_only: bool = False) -> None:
         if certs:
             os.environ["DEBUGINFOD_IMA_CERT_PATH"] = certs
         else:
-            # No keys anywhere: enforcing can only fail, so ask for the
-            # download the caller actually wants and say what was given up.
+            # No certificates are installed, so enforcement cannot succeed:
+            # download without signature verification and report it.
             os.environ["DEBUGINFOD_URLS"] = servers()
             print("kernel debug info: no IMA certificates on this machine, "
                   "so the download is not signature-checked", file=sys.stderr)
@@ -111,16 +108,15 @@ def configure(offline_only: bool = False) -> None:
         cache.mkdir(parents=True, exist_ok=True)
         (cache / "max_unused_age_s").write_text(f"{_RETAIN_SECONDS}\n")
         (cache / "cache_clean_interval_s").write_text(f"{_RETAIN_SECONDS}\n")
-        # A missing source file for a given build-id stays missing, and the
-        # source-prefix probe deliberately asks for paths that do not exist.
-        # Without this every run re-asks the server for the same two misses.
+        # A source file missing for a build ID stays missing, and the
+        # source-prefix probe requests paths that do not exist. Without this
+        # setting, every run repeats the same two failed requests.
         (cache / "cache_miss_s").write_text(f"{_MISS_SECONDS}\n")
     except OSError:
-        pass  # A read-only or absent cache is the client's problem to report.
+        pass  # libdebuginfod reports a read-only or missing cache itself.
 
-    # Zero-length debuginfo/executable entries are poison from an interrupted
-    # transfer or a 404 negative-cache write; drop them before anything reads
-    # the cache.
+    # Remove zero-length debuginfo and executable entries, left by an
+    # interrupted transfer or a cached 404, before anything reads the cache.
     clear_empty_entries()
 
 
@@ -159,11 +155,11 @@ def is_cached(build_id: str) -> bool:
 def clear_empty_entries() -> int:
     """Delete zero-length debuginfo/executable cache entries; return count.
 
-    libdebuginfod answers a later query with the empty file itself (instant
-    ENOENT), so leaving them breaks every future fetch for that build-id.
-    Source misses are cached as empty files too, but those are legitimate
-    and cheap to keep; only debuginfo/executable entries are removed, and a
-    genuine 404 there costs one fast re-query.
+    libdebuginfod answers a later query from the empty file with an immediate
+    ENOENT, so an empty entry prevents every later fetch for that build ID.
+    Source misses are also cached as empty files; those are correct and are
+    kept. Removing a debuginfo or executable entry that was a real 404 costs
+    one repeated query.
     """
     removed = 0
     for entry_dir in _directories(cache_path()):
@@ -179,7 +175,7 @@ def clear_empty_entries() -> int:
 
 
 def stale_partials(build_id: str | None = None, max_age: float = _STALE_TEMP_SECONDS) -> list[Path]:
-    """Abandoned partial downloads, which cost ~700MB each and never resume.
+    """Abandoned partial downloads, which libdebuginfod never resumes.
 
     ``max_age`` zero means every partial, fresh ones included; the default
     keeps only those from runs that have already exited.
@@ -237,8 +233,8 @@ def servers(urls: str | None = None) -> str:
     """The server URLs in DEBUGINFOD_URLS, without the ``ima:`` directives.
 
     Fedora ships ``ima:enforcing <url> ima:ignore`` in /etc/debuginfod/*.urls.
-    Those tokens set signature checking for the URL between them, so the
-    variable is correct but printing it raw reads as a corrupted value.
+    Those tokens set signature checking for the URL between them. The value is
+    valid, but printed unmodified it appears malformed.
     """
     if urls is None:
         urls = os.environ.get("DEBUGINFOD_URLS", "")
@@ -275,10 +271,9 @@ def _partial_size(build_id: str) -> int:
 class _Progress(threading.Thread):
     """Report transfer progress by watching the partial file grow.
 
-    libdebuginfod's own DEBUGINFOD_PROGRESS output is one line per callback
-    with no rate and no total, so this watches the file instead: it is the
-    same number the transfer is producing, and the cache entry already says
-    how large the whole thing will be.
+    DEBUGINFOD_PROGRESS prints one line per callback, with no rate and no
+    total. The size of the partial file is the number of bytes transferred,
+    and the cache entry records the total size.
     """
 
     def __init__(self, build_id: str, stream) -> None:
@@ -320,17 +315,16 @@ class _Progress(threading.Thread):
 
 
 def field(label: str, value: str) -> str:
-    """One indented ``label value`` line, so the fetch reads as a block."""
+    """One indented ``label value`` line of the fetch report."""
     return f"  {label:<9}{value}"
 
 
 def prefetch(build_id: str, log: Callable[[str], None] = print) -> bool:
     """Download the vmlinux debuginfo to completion, reporting progress.
 
-    This is the whole point of a separate command: run it once on a connection
-    you are happy to use, and every later run -- including ``--offline`` ones --
-    is served from disk. Interrupting the explorer's own fetch discards it, but
-    interrupting this only costs the same download again.
+    After a completed prefetch, every later run, including ``--offline`` runs,
+    is served from the cache. An interrupted prefetch, like an interrupted
+    fetch in the explorer, discards the partial download.
     """
     local = local_vmlinux()
     if local:

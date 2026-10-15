@@ -1,25 +1,25 @@
 """Sockets.
 
-Unlike tasks, there is no single global list of sockets. They're reachable
-from three different directions, and which one you want depends on the
-question:
+The kernel keeps no single list of sockets. They are reached in three ways,
+each answering a different question:
 
-  * **From a process** -- a socket with an fd is a ``struct file`` whose
-    ``f_op`` is ``socket_file_ops``. Its inode is embedded in a
-    ``struct socket_alloc``, so ``SOCKET_I()`` walks back to the
-    ``struct socket``. This is the view that answers "who owns this".
+  * **From a process**: a socket with a file descriptor is a ``struct file``
+    whose ``f_op`` is ``socket_file_ops``. Its inode is embedded in a
+    ``struct socket_alloc``, from which ``SOCKET_I()`` returns the
+    ``struct socket``. This path identifies the socket's owner.
 
-  * **From the protocol hash tables** -- per-netns TCP ehash/lhash2 and the
-    UDP table. This is the only way to see sockets with *no* fd: TIME_WAIT,
-    orphans, and anything whose owner already exited.
+  * **From the protocol hash tables**: the per-namespace TCP ehash and lhash2
+    tables and the UDP table. This is the only way to reach sockets with no
+    file descriptor: TIME_WAIT sockets, orphans, and sockets whose owner has
+    exited.
 
-  * **From the unix table** -- ``net->unx.table.buckets``, since AF_UNIX has
-    its own hashing entirely.
+  * **From the unix table**: ``net->unx.table.buckets``, because AF_UNIX uses
+    its own hash table.
 
-Layering note: ``struct socket`` is the VFS-facing half and ``struct sock``
-the protocol half; ``socket->sk`` crosses between them, and ``sock`` is the
-first member of ``inet_sock``/``tcp_sock``, so those are casts rather than
-pointer hops.
+``struct socket`` is the VFS-facing half and ``struct sock`` the protocol half;
+``socket->sk`` links them. ``sock`` is the first member of ``inet_sock`` and
+``tcp_sock``, so converting between those types is a cast, not a pointer
+dereference.
 """
 
 from __future__ import annotations

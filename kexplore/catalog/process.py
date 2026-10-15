@@ -1,19 +1,19 @@
 """Process-centric entry points.
 
-Three terms, used precisely throughout:
+These terms are used as follows:
 
-* **task** -- one ``task_struct``, and what ends up running on a CPU. The
-  scheduler picks ``sched_entity``s and descends through group entities until
-  it reaches a task's, so a task is the end of that descent, not the only
-  thing scheduled.
-* **thread** -- a task seen as a member of a thread group. Every task is a
-  thread, the leader included.
-* **process** -- the *thread group*: the tasks sharing a ``signal_struct``,
-  named by its leader's pid (== tgid). It is a set, not an object, because the
-  kernel has no process struct.
+* **task**: one ``task_struct``, the entity that runs on a CPU. The scheduler
+  selects ``sched_entity`` structures and descends through group entities
+  until it reaches a task's entity, so a task is the end of that descent, not
+  the only entity scheduled.
+* **thread**: a task as a member of a thread group. Every task is a thread,
+  including the group leader.
+* **process**: a thread group, the tasks that share a ``signal_struct``,
+  identified by its leader's pid (equal to the tgid). The kernel has no process
+  struct, so a process is a set of tasks, not an object.
 
-So these entries list one task per thread group -- the leader -- because that
-is the task userspace would call the process. The rest of a group is reached
+The entries list one task per thread group, the leader, because that is the
+task userspace calls the process. The other tasks of a group are reached
 through the ``threads`` link.
 """
 
@@ -36,8 +36,8 @@ def _is_leader(task) -> bool:
     return task.pid == task.tgid
 
 
-# Every list here is a list of tasks, so they answer with the same columns and
-# insert one more only where that entry has something of its own to report.
+# Every list here lists tasks, so all use the same columns, with an extra
+# column where an entry reports a property specific to it.
 TASK_COLUMNS = ("pid", "state", "command")
 OBJECT_COLUMNS = ("type", "address")
 
@@ -47,16 +47,15 @@ def task_columns(*extra: str) -> tuple[str, ...]:
 
 
 def _cells(task, *extra: str) -> tuple[str, ...]:
-    """One task as columns: what it is to userspace, then what it is here.
+    """One task as columns: its userspace identity, then its kernel object.
 
-    The type and address repeat on every row, which is the point: a table of
-    pid, state and command is ps output, and these two say that each row is a
-    kernel structure at an address you can read.
+    pid, state and command are the columns ps prints. The type and address,
+    repeated on every row, identify each row as a kernel structure at a
+    readable address.
     """
     return (
-        # Right-aligned by padding: the table sizes a column to its widest cell
-        # and left-aligns everything in it, so a ragged pid column is the only
-        # other option.
+        # Right-aligned by padding, because the table left-aligns every
+        # column.
         f"{task.pid.value_():>7}",
         task_state_to_char(task),
         task_comm(task),

@@ -1,17 +1,15 @@
-"""Turn a catalog item into the table that represents it.
+"""Build the table that represents a catalog item.
 
-Every view in the explorer has the same parts: a label, a line of
-documentation, some columns, and rows. So this module has one job: given
-something from the catalog or from ``operations``, produce the :class:`Frame`
-that shows it.
+Every view in the explorer consists of a label, a line of documentation,
+columns and rows. This module produces the :class:`Frame` for an item from the
+catalog or from ``operations``.
 
-Nothing here imports a UI toolkit. That is deliberate: this is the layer a
-second frontend would reuse, and it is what the crawl test drives instead of
-opening a terminal. What the frontend still owns is *when* to build: a
-:class:`Plan` says whether a frame can be built inline or has to go to a worker
-first, because resolving one can mean running pahole over a 700MB vmlinux,
-fetching source through debuginfod, or holding a bpftrace program open for ten
-seconds.
+This module imports no UI toolkit, so a second frontend can reuse it and the
+crawl test can drive it without a terminal. The frontend decides when a frame
+is built: a :class:`Plan` states whether the frame can be built inline or must
+be built in a worker, because building it can mean running pahole over the
+vmlinux, fetching source through debuginfod, or running a bpftrace program for
+ten seconds.
 """
 
 from __future__ import annotations
@@ -45,9 +43,9 @@ COMMAND_TRACE_COLUMNS = ("stage", "detail", "evidence")
 TUTORIAL_COLUMNS = ("step", "action / path", "live commentary", "userspace")
 TOUR_COLUMNS = TUTORIAL_COLUMNS
 
-# What a branch of the sidebar is, when the branch is not itself a catalog
-# item. The tree groups entries by ``entry.group``; this says what that group
-# holds, so landing on the heading explains it rather than showing nothing.
+# Descriptions of sidebar branches that are not catalog items. The tree groups
+# entries by ``entry.group``, and selecting a group's heading displays its
+# description.
 GROUP_DOCS = {
     "measure": "Tracers run in the foreground for a few seconds. Nothing is "
                "measured until one is opened.",
@@ -57,10 +55,9 @@ GROUP_DOCS = {
 def _sort_key(cell: str) -> tuple[int, float, str]:
     """Order a cell as a number when it is one, and as text otherwise.
 
-    A pid column sorted as text puts 10 before 2, and an address column sorted
-    as text is ordered by its digits rather than by where it points. Numbers
-    sort before text, so a blank cell (no thread count, no group) collects at
-    one end rather than among the values.
+    Sorted as text, a pid column places 10 before 2, and an address column is
+    ordered by its digits instead of by numeric address. Numbers sort before
+    text, so blank cells (no thread count, no group) sort to one end.
     """
     text = cell.strip()
     try:
@@ -70,10 +67,10 @@ def _sort_key(cell: str) -> tuple[int, float, str]:
 
 
 def sort_rows(rows: list[Row], column: int, reverse: bool) -> list[Row]:
-    """Order the rows that stand for objects, leaving the others where they are.
+    """Sort the rows that represent objects; other rows keep their position.
 
-    "… truncated" and "(empty)" say something about the list as a whole, so
-    they stay at the end instead of being sorted into it.
+    "… truncated" and "(empty)" describe the list as a whole, so they stay at
+    the end.
     """
     listed = [row for row in rows if row.marked and row.cells is not None]
     rest = [row for row in rows if not (row.marked and row.cells is not None)]
@@ -94,15 +91,16 @@ class Frame:
     doc: str = ""
     rows: list[Row] = field(default_factory=list)
     columns: tuple[str, ...] = FIELD_COLUMNS
-    # Which column the rows are ordered by, None being the order the walk
-    # produced them in. Sorting rebuilds the frame, so any row opened in place
-    # closes: a child sorted away from its parent belongs to nothing.
+    # The column the rows are sorted by, or None for the order the walk
+    # produced. Sorting rebuilds the frame and collapses every row expanded in
+    # place, because sorting would separate expanded children from their
+    # parent.
     sort_column: int | None = None
     sort_reverse: bool = False
-    # A frame whose doc line depends on the display mode builds it here rather
-    # than passing a string, so that toggling userspace and reloading updates
-    # the line as well as the rows. An entry list keeps its userspace command
-    # in the doc, and that command is what "t" traces.
+    # A frame whose doc line depends on the display mode builds it with this
+    # function instead of a string, so that toggling userspace mode and
+    # reloading updates the doc line as well as the rows. An entry list holds
+    # its userspace command in the doc line, and "t" traces that command.
     make_doc: Callable[[], str] | None = None
 
     def load(self) -> None:
@@ -120,9 +118,9 @@ class Frame:
 class Context:
     """What every builder needs: the kernel, its source, and the display mode.
 
-    Held by the frontend and read at row-build time, so toggling ``userspace``
-    and reloading a frame is enough to swap the kernel origins for the commands
-    that get the same information from userspace.
+    Held by the frontend and read when rows are built, so toggling
+    ``userspace`` and reloading a frame replaces the kernel origins with the
+    userspace commands.
     """
 
     prog: Program
@@ -138,10 +136,10 @@ class Context:
 class Plan:
     """How to open one item: the frame, and whether it can be built inline.
 
-    ``activity`` is what to say while a slow build runs; when it is empty the
-    build is cheap and the frontend just calls ``build()``. ``placeholder`` is
-    what to show meanwhile -- a measurement keeps its own definition on screen
-    while the tracer runs, rather than replacing the view with a spinner.
+    ``activity`` is the message displayed while a slow build runs; when it is
+    empty, the build is fast and the frontend calls ``build()`` directly.
+    ``placeholder`` is the frame displayed during the build: a measurement
+    displays its definition while the tracer runs.
     """
 
     label: str
@@ -177,10 +175,11 @@ def _fixed_rows(make_rows: Callable[[], list[Row]]) -> Callable[[], list[Row]]:
 
 
 def _decoded(parent: Object, row: Row) -> Row:
-    """Annotate a field with its human-readable meaning, if we know one.
+    """Annotate a field with its decoded meaning, if a decoder exists.
 
-    The raw value is kept alongside the decoded text -- these tables are
-    hand-maintained, so the number stays visible to check against.
+    The raw value is displayed with the decoded text, because the decoder
+    tables are maintained by hand and the number allows the decoding to be
+    checked.
     """
     if row.obj is None or row.kind != "field":
         return row
@@ -188,16 +187,15 @@ def _decoded(parent: Object, row: Row) -> Row:
     if result is None:
         return row
     text, doc = result
-    # "=" not "→": this is the same value spelled differently, not a change.
-    # The arrow is already the marker for a navigable link.
+    # "=" because the decoded text is the same value in another form; "→"
+    # marks a navigable link.
     return replace(row, value=f"{row.value}  = {text}", doc=doc)
 
 
 def _with_userspace(parent: Object, row: Row, found: dict[str, str]) -> Row:
-    """Replace a field's type with how to read it from userspace, if possible.
+    """Replace a field's type with its userspace command, if one exists.
 
-    Most fields have no equivalent; those keep their type, because claiming an
-    equivalent that does not exist would be worse than saying nothing.
+    Most fields have no userspace equivalent and keep their C type.
     """
     if row.kind != "field":
         return row
@@ -213,11 +211,11 @@ def _with_userspace(parent: Object, row: Row, found: dict[str, str]) -> Row:
 def _link_row(link: Link, obj: Object, userspace: bool) -> Row:
     """A curated relationship, rendered as a followable row.
 
-    In userspace mode the origin column is replaced by the command that gets
-    the same information on a box without this tool. The origin moves to
-    ``original_type``, the same way a field's C type does, which is what marks
-    the column as holding a command rather than a kernel path: a link with no
-    equivalent says so and keeps the marker clear.
+    In userspace mode, the origin column shows the userspace command that
+    reads the same information. The origin moves to ``original_type``, as a
+    field's C type does, which marks the column as holding a command instead of
+    a kernel path. A link with no userspace command keeps its origin in the
+    column and leaves ``original_type`` empty.
     """
     command = userspace_for(link, obj) if userspace and link.userspace else ""
     return Row(
@@ -236,10 +234,10 @@ def _link_row(link: Link, obj: Object, userspace: bool) -> Row:
 def _observation_row(observation) -> Row:
     """An ``operations`` Observation as a Row.
 
-    Both the analyses and the command trace report through Observation, so both
-    turn into rows the same way. An observation that carries no cells, expansion
-    or object still fills the three columns, which is why the trace can share
-    this without naming the fields it never sets.
+    The analyses and the command trace both report through Observation and are
+    converted to rows by this function. An observation without cells, expansion
+    or object fills the three default columns, so the trace does not set those
+    fields.
     """
     return Row(
         name=observation.label,
@@ -256,7 +254,7 @@ def _observation_row(observation) -> Row:
 
 
 def _derived_row(derived: Derived, obj: Object) -> Row:
-    """A computed value: read-only, shown above the real fields."""
+    """A computed value: read-only, shown above the struct's members."""
     return Row(
         name=derived.label,
         obj=None,
@@ -272,18 +270,18 @@ def _derived_row(derived: Derived, obj: Object) -> Row:
 
 
 def object_frame(label: str, obj: Object, ctx: Context | None = None, doc: str = "") -> Frame:
-    """A struct's computed values, its curated links, then its real fields."""
+    """A struct's computed values, its curated links, then its members."""
     # Resolvers and decoders get a pointer to the struct: drgn's Linux helpers
     # require one, and member access behaves identically through it. If obj is
-    # already a pointer, use it as-is -- taking address_of_() again would make
-    # a double pointer that still reports the same tag, so the mistake would
-    # only surface later as a missing member.
+    # already a pointer it is used unchanged: address_of_() would produce a
+    # double pointer that reports the same tag, and the error would appear
+    # later as a missing member.
     if ct.strip(obj.type_).kind == TypeKind.POINTER:
         target = obj
     else:
         target = obj.address_of_() if obj.address_ is not None else obj
 
-    # A NULL pointer has no struct behind it to compute against.
+    # A NULL pointer has no struct to compute values from.
     empty = ct.strip(target.type_).kind == TypeKind.POINTER and not ct.safe(
         target.value_, 0
     )
@@ -354,8 +352,8 @@ def algorithm_frame(ctx: Context, algorithm: Algorithm) -> Frame:
     """The rule an algorithm applies, its inputs, and the outcome."""
 
     def make_rows() -> list[Row]:
-        # The rule belongs above the table, not in a row: it applies to all of
-        # them and would otherwise be repeated or truncated.
+        # The rule is displayed above the table, not in a row, because it
+        # applies to every row and a cell would truncate it.
         return [_observation_row(o) for o in algorithm.run(ctx.prog)]
 
     rows = _fixed_rows(make_rows) if algorithm.background else make_rows
@@ -414,7 +412,7 @@ def _step_expander(prog: Program, step: Step) -> Callable[[], list[Row]] | None:
 
 
 def tutorial_frame(ctx: Context | None, tutorial: GuidedTutorial) -> Frame:
-    """The steps of a live guided tutorial, with live commentary and userspace equivalents."""
+    """The steps of a guided tutorial, with commentary and userspace commands."""
 
     def make_rows() -> list[Row]:
         rows: list[Row] = []
@@ -470,7 +468,7 @@ _tour_step_expander = _tutorial_step_expander
 
 
 def matches_field(needle: str, row_name: str, display_name: str = "") -> bool:
-    """Check if row_name or display_name matches a tutorial target field."""
+    """Whether row_name or display_name matches a tutorial step's target field."""
     if not needle:
         return False
     n = needle.lower().strip()
@@ -507,14 +505,14 @@ def matches_field(needle: str, row_name: str, display_name: str = "") -> bool:
     return False
 
 
-# Textual sizes a column to its widest cell, so a single long value pushes the
-# remaining columns off screen. The frontend truncates to this for display; the
-# hint line still shows the row's full text.
+# Textual sizes a column to its widest cell, so one long value moves the
+# remaining columns off screen. The frontend truncates cells to this width;
+# the hint line shows the row's full text.
 MAX_CELL = 46
 
 
 def tutorial_step_frame(ctx: Context, step: TutorialStep) -> Frame:
-    """Build the real live Frame for a tutorial step using core object_frame or collection_rows."""
+    """Build a tutorial step's frame from live objects, with object_frame or collection_rows."""
     if step.action == "kexplore" or step.action.startswith("kexplore ›"):
         frame = landing_frame(ctx)
         if step.commentary:
@@ -549,9 +547,8 @@ tour_step_frame = tutorial_step_frame
 def measurement_frame(entry: Measurement) -> Frame:
     """Run the tracer, then render its sections as rows.
 
-    Blocking for ``entry.duration`` seconds by construction -- that is the
-    measurement. The plan marks it deferred so a frontend runs it off its own
-    thread.
+    Blocks for ``entry.duration`` seconds, the measurement interval. The plan
+    is marked deferred, so the frontend runs it in a worker thread.
     """
     return Frame(
         entry.label,
@@ -564,9 +561,9 @@ def measurement_frame(entry: Measurement) -> Frame:
 def measurement_definition_frame(entry: Measurement) -> Frame:
     """What the probe measures and cannot see, without attaching it.
 
-    What a highlighted measurement shows in the sidebar preview: moving the
-    cursor over an entry must not start a tracer, so the definition stands in
-    until enter runs it.
+    Shown in the sidebar preview when a measurement is highlighted, because
+    moving the cursor over an entry must not start a tracer. Enter runs the
+    measurement.
     """
     return Frame(
         entry.label,
@@ -581,7 +578,7 @@ def measurement_definition_frame(entry: Measurement) -> Frame:
 
 
 def _definition_rows(entry: Measurement) -> list[Row]:
-    """The probe's own account of itself: what it times, and what it misses."""
+    """The probe's definition: what it times, and its blind spots."""
     rows = [_measures_row(entry)]
     if entry.blind_spot:
         rows.append(
@@ -658,11 +655,11 @@ def source_frame(ctx: Context, path: str, line: int, title: str) -> Frame:
 
 
 def landing_frame(ctx: Context) -> Frame:
-    """Opening screen: which kernel this is, and what the tool can do to it.
+    """Opening screen: the running kernel, and the capabilities available.
 
-    The capability lines matter because docs and measurements depend on
-    external pieces (debuginfod, pahole, bpftrace). Without this they fail
-    silently at the point of use instead of being reported up front.
+    Struct documentation and measurements depend on external tools
+    (debuginfod, pahole, bpftrace). The capability lines report a missing tool
+    on this screen, instead of a failure when the feature is first used.
     """
 
     def make_rows() -> list[Row]:
@@ -718,11 +715,11 @@ def landing_frame(ctx: Context) -> Frame:
         rows.append(Row("", None, "", "", False))
         rows.append(Row("── entry points", None, "", "", False, kind="derived"))
 
-        # These rows carry the catalog entry they name, so enter opens it the
-        # same way the sidebar does. That matters most in the tutorials tab,
-        # where the sidebar lists tutorials rather than subsystems: without a
-        # followable row here the opening screen has no way out, and a
-        # walkthrough that starts on it cannot take its own first step.
+        # These rows carry the catalog entry they name, so Enter opens it as
+        # the sidebar does. In the tutorials tab the sidebar lists tutorials,
+        # not subsystems, so these rows are the only way from the opening
+        # screen to an entry, and a tutorial that starts on this screen uses
+        # them for its first step.
         from ..catalog.registry import subsystems
 
         by_key = {sub.key: sub for sub in subsystems()}
@@ -742,7 +739,7 @@ def landing_frame(ctx: Context) -> Frame:
              ("process", "processes")),
             ("runqueue latency", "sched > measure > runqueue latency",
              ("sched", "runqueue latency")),
-            # Names two destinations, so there is nothing single to follow.
+            # Names two destinations, so the row is not followable.
             ("kernel configuration and topology", "system > scheduler, memory", None),
             ("structure layout and source",
              "open an entry; enter follows; s opens source", None),
@@ -786,7 +783,7 @@ def command_trace_frame(
     selected_field: str = "",
     progress: Callable[[str], None] | None = None,
 ) -> Frame:
-    """One userspace command, traced down to the kernel function behind it."""
+    """One userspace command, traced to the kernel functions that serve it."""
     from ..operations.command_trace import command_trace
 
     def make_rows() -> list[Row]:
@@ -808,9 +805,8 @@ def command_trace_frame(
 def _trace_doc(command: str) -> str:
     """The doc line for a trace frame: the command, and what the rows below are.
 
-    Takes no ``served`` file. Naming one up here would promise that the trace
-    confirmed it, and a candidate from procfs is only a guess until the run
-    says which file was actually read.
+    Takes no ``served`` file, because the procfs table gives only a candidate
+    file and the trace determines which file was read.
     """
     return f"{command}  ->  observed kernel interfaces and field references"
 
@@ -850,9 +846,9 @@ def source_plan(ctx: Context, path: str, line: int, title: str) -> Plan:
 class Listing:
     """A sidebar branch that is a heading rather than a catalog item.
 
-    The root of each tree and the per-group branches under a subsystem have no
-    object behind them. This gives them one, so selecting a heading opens what
-    it contains instead of doing nothing.
+    The root of each tree and the per-group branches under a subsystem
+    correspond to no catalog item. This item lists their contents, so
+    selecting a heading opens that list.
     """
 
     label: str
@@ -861,7 +857,7 @@ class Listing:
 
 
 def listing_frame(label: str, doc: str, items) -> Frame:
-    """One row per item, saying what it is and opening it when followed."""
+    """One row per item, with its description; following a row opens the item."""
 
     def make_rows() -> list[Row]:
         return [
@@ -877,15 +873,14 @@ def listing_frame(label: str, doc: str, items) -> Frame:
 
 def plan_for(item, ctx: Context, subsystem_key: str = "",
              preview: bool = False) -> Plan | None:
-    """The plan for one catalog or operations item, or None if it opens nothing.
+    """The plan for one catalog or operations item, or None if it has no frame.
 
-    The single place that asks what kind of thing an item is. Everywhere else
-    -- the frontend, ``--check``, the crawl -- works through the interface the
-    item itself provides.
+    This is the only function that dispatches on the type of an item. The
+    frontend, ``--check`` and the crawl use the interface the item provides.
 
-    ``preview`` is a plan for an item the cursor is merely resting on rather
-    than one the user asked for. It differs only for a measurement, which must
-    not attach a tracer until asked.
+    ``preview`` requests a plan for an item the cursor is on, not one the user
+    opened. It differs only for a measurement, which does not attach a tracer
+    until opened.
     """
     if (plan := procfile.plan_for(item, ctx)) is not None:  # experiment
         return plan
@@ -934,8 +929,8 @@ def plan_for(item, ctx: Context, subsystem_key: str = "",
             doc=item.doc,
             columns=STEP_COLUMNS,
             build=lambda: walkthrough_frame(ctx, item),
-            # Each step is resolved to a file:line through nm and addr2line
-            # over the vmlinux debuginfo, so this is not instant.
+            # Each step is resolved to file:line with nm and addr2line over the
+            # vmlinux debuginfo, which takes seconds.
             activity="resolving each step to its source line…",
         )
     if isinstance(item, (GuidedTour, GuidedTutorial)):

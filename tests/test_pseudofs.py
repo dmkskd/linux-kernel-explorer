@@ -1,9 +1,9 @@
-"""Check the /proc annotation table: its paths, and what it claims.
+"""Check the /proc annotation table: its paths, and the files it describes.
 
-Two halves. The table itself is static data, so the parsing and the coverage
-of a captured file are checked anywhere, with no kernel. The paths are checked
-against the running kernel's types when drgn can attach, because a member that
-was renamed upstream is exactly the failure this table has.
+The table is static data, so its parsing and its coverage of a captured file
+are checked on any machine, without a kernel. Its member paths are checked
+against the running kernel's types when drgn can attach, because a member
+renamed upstream is the error the table is most likely to contain.
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ def check(condition: bool, message: str) -> None:
     print(("  ok   " if condition else "  FAIL ") + message)
 
 
-# One kernel's output, kept verbatim. Not to assert any of these numbers, but
-# because a file with every optional line in it (the arch lines, hugetlb,
-# seccomp) is what shows whether the table covers a real kernel's output.
+# One kernel's output, kept verbatim. The numbers are not asserted; the file
+# contains every optional line (the arch lines, hugetlb, seccomp), so it shows
+# whether the table covers a complete file.
 CAPTURED = """\
 Name:   python3
 Umask:  0022

@@ -68,16 +68,17 @@ _PID_PATH = re.compile(r"^/proc/\d+")
 # names against what it was measured reading.
 _NAMED_PID = re.compile(r"/proc/\d+/")
 
-# A multi-interface trace can visit several uncached source files. Do not let
-# each unavailable file hold the result for the browser's full download timeout.
+# A multi-interface trace can request several uncached source files. A shorter
+# timeout keeps each unavailable file from delaying the result by the browser's
+# full download timeout.
 _SOURCE = KernelSource(source_timeout=5)
 
 
 def _grouped_opens(rows: list[tuple[str, str, str]]) -> list[tuple[str, int]]:
     """Collapse the per-pid paths, which are one row each, into one line.
 
-    ps opens /proc/1, /proc/2, /proc/17… once each. Listing them is a list of
-    the pids that existed, which is not what the stage is about; the count is.
+    ps opens /proc/1, /proc/2, /proc/17… once each. The stage reports the
+    number of these paths, not the list of pids.
     """
     counts: dict[str, int] = {}
     for label, value, _bar in rows:
@@ -86,8 +87,9 @@ def _grouped_opens(rows: list[tuple[str, str, str]]) -> list[tuple[str, int]]:
             counts[path] = counts.get(path, 0) + int(value)
         except ValueError:
             continue
-    # /proc first: the point of the stage is the file the kernel serves, and it
-    # is opened once, so a plain sort by count buries it under the loader's.
+    # /proc paths first: the stage reports the file the kernel serves, which is
+    # opened once, so sorting by count alone would place it below the files the
+    # dynamic loader opens.
     return sorted(
         counts.items(),
         key=lambda pair: (pair[0].startswith("/proc"), pair[1]),
@@ -137,9 +139,9 @@ def _probeable(prog: Program, name: str) -> bool:
     """Whether a kprobe on this name can attach.
 
     A static function's name is not unique: two translation units both define
-    m_show, kallsyms holds both, and bpftrace refuses the ambiguous name rather
-    than guessing. The measured address still says which one ran, so the trace
-    keeps the function and gives up only the stack below it.
+    m_show, kallsyms holds both, and bpftrace rejects the ambiguous name. The
+    measured address identifies the function that ran, so the trace reports the
+    function and omits only the stack below it.
     """
     return len(ct.safe(lambda: prog.symbols(name), [])) == 1
 
@@ -172,9 +174,9 @@ def _opens_stage(command: str, sections: dict) -> Iterator[Observation]:
     )
     for path, count in opens[:6]:
         # ps opens the task directory once and then opens the files inside it
-        # by name, so most of these arrive as a bare "stat" with a directory fd
-        # this probe does not record. Marking them keeps the row honest about
-        # what was measured.
+        # by name, so most of these are recorded as a bare "stat" relative to a
+        # directory fd this probe does not record. They are marked, so the row
+        # states that the full path was not measured.
         relative = not path.startswith("/")
         yield Observation(
             f"   {'…/' if relative else ''}{path}",
@@ -199,12 +201,13 @@ def _merge_stacks(stacks):
 
 
 def _files_read(sections: dict, command: str) -> list[tuple[str, int]]:
-    """Every /proc path the command read, the one it is about first.
+    """Every /proc path the command read, the path it names first.
 
-    Read counts alone rank the wrong file. ``grep VmPin /proc/1/status`` reads
-    the status file once and its own ``/proc/self/maps`` twice while starting
-    up, so the busiest file is the one nobody asked about. A path the command
-    names outright wins regardless of count; everything else falls back to it.
+    Read counts alone rank the wrong file first. ``grep VmPin /proc/1/status``
+    reads the status file once and ``/proc/self/maps`` twice during startup,
+    so the most-read file is not the one the command names. A path that
+    appears in the command is ranked first regardless of count, and the
+    remaining paths follow, ordered by count.
     """
     named = _NAMED_PID.sub("/proc/<pid>/", command)
     counts: dict[str, int] = {}
@@ -236,8 +239,8 @@ def _proc_show_at(prog: Program, inode_address: int) -> tuple[str, int] | None:
     """The function a /proc/<pid> file names in its inode.
 
     proc_single_show leaves the inode in the seq_file's private pointer and
-    calls PROC_I(inode)->op.proc_show, so the interesting function is one
-    dereference away from something the probe already recorded.
+    calls PROC_I(inode)->op.proc_show, so the file's show function is one
+    dereference from a pointer the probe already recorded.
     """
     from drgn import Object, container_of
 
@@ -255,10 +258,10 @@ def _proc_show_at(prog: Program, inode_address: int) -> tuple[str, int] | None:
 def _measured_leaf(prog: Program, sections: dict, path: str) -> tuple[str, int]:
     """The show function the kernel is holding for the file being read.
 
-    A file with its own iterator keeps the real one in ``m->op->show``. A
-    ``single_open`` file under /proc/<pid> keeps ``proc_single_show`` there and
-    the interesting one behind the inode, so unwrap that: the probe records both
-    pointers and this reads the second only when the first says to.
+    A file with its own iterator holds its show function in ``m->op->show``. A
+    ``single_open`` file under /proc/<pid> holds ``proc_single_show`` there and
+    its own show function in the inode. The probe records both pointers, and
+    this reads the inode's only when the first is ``proc_single_show``.
     """
     best = ("", 0, 0)
     for label, value, _bar in sections["shows"].rows if "shows" in sections else []:

@@ -15,9 +15,9 @@ if TYPE_CHECKING:
 def print_script(key: str, tutorials) -> int:
     """Print one tutorial's script: the steps as text, with no UI and no kernel.
 
-    The steps are built without a Program, so the labels are the generic ones
-    rather than the live process this machine happens to be running. That is
-    what a script is for: reading and correcting the sequence before it is run.
+    The steps are built without a Program, so the labels are generic instead
+    of naming processes on this machine. The script is used to read and
+    correct the sequence before it runs against a kernel.
     """
     if key.lower() == "list":
         for tutorial in tutorials:
@@ -192,8 +192,8 @@ def main() -> int:
             debuginfod.local_vmlinux()
             or (build_id and debuginfod.is_cached(build_id))
         )
-        # One heading, then the fetch indents under it. Printing the cache
-        # status as well would say the same thing twice.
+        # One heading, with the fetch output indented under it. The cache
+        # status is not printed as well, because it would repeat the heading.
         downloading = bool(build_id) and not have_dwarf and not offline \
             and not args.no_prefetch
         if downloading:
@@ -203,32 +203,33 @@ def main() -> int:
             say("debug info", debuginfod.status(build_id))
 
         if offline and not have_dwarf:
-            # Without the DWARF drgn attaches but cannot name a single type, so
-            # fail here rather than at the first empty view.
+            # Without the DWARF, drgn attaches but cannot resolve any type, so
+            # startup fails here instead of at the first view.
             print("run 'kexplore --prefetch' once with a connection you are "
                   "happy to use, then --offline works with no network at all",
                   file=sys.stderr)
             return 1
         if not have_dwarf and not offline:
             if downloading:
-                # Download here, to completion, with progress -- not silently
-                # inside the attach, where interrupting looks like a hang and
-                # throws the transfer away.
+                # Download here, to completion, with progress. During the
+                # attach the download prints no progress, and interrupting it
+                # discards the transfer.
                 if not debuginfod.prefetch(build_id, log=indented):
                     return 1
             else:
-                # Let libdebuginfod narrate the transfer; without it the wait
-                # is silent. Harmless when the fetch is a cache hit.
+                # DEBUGINFOD_PROGRESS makes libdebuginfod print transfer
+                # progress, which it otherwise does not. It has no effect on a
+                # cache hit.
                 os.environ.setdefault("DEBUGINFOD_PROGRESS", "1")
         say("kernel", "attaching to the live kernel…")
         sys.stderr.flush()
         prog = drgn.program_from_kernel()
 
-    # drgn attaches happily without DWARF and only fails at the first type
-    # lookup, which turns into "could not find 'cpu_online_mask'" in every view
-    # instead of one comprehensible error. Check once, here. The first lookup
-    # also builds drgn's DWARF index, which on a multi-GB debug package takes
-    # a while, so time it: a slow one should be visible, not silent.
+    # drgn attaches without DWARF and fails at the first type lookup, which
+    # would show "could not find 'cpu_online_mask'" in every view instead of one
+    # error at startup, so the lookup is tested once here. The first lookup
+    # also builds drgn's DWARF index, which takes noticeable time on a
+    # multi-GB debug package, so its duration is reported.
     import time
 
     start = time.monotonic()
@@ -240,8 +241,8 @@ def main() -> int:
         print("\nattached, but this kernel's debug info is not loaded: every "
               "view would fail.", file=sys.stderr)
         if not args.core:
-            # Say what the cache actually holds, so the user can tell an
-            # interrupted download apart from a fetch that never happened.
+            # Report the cache contents, so that an interrupted download can be
+            # distinguished from a download that never started.
             partials = debuginfod.stale_partials(build_id, max_age=0)
             if partials:
                 size = sum(p.stat().st_size for p in partials)
@@ -270,9 +271,9 @@ def main() -> int:
 
     source = None
     if not args.core:
-        # Probe once here so startup says what is available instead of the UI
-        # discovering it later. Skipped for -c: the probe would describe the
-        # host kernel, not the core.
+        # Probe once here, so startup reports whether source is available.
+        # Skipped for -c, because the probe would describe the host kernel,
+        # not the core.
         source = _probe_source()
         if source is not None:
             if source.local_root is not None:
@@ -288,9 +289,9 @@ def main() -> int:
 
     from .tui.app import Explorer
 
-    # source is None when the probe found nothing fetchable for this build, and
-    # the line above has just said the 's' key is disabled. Pass that through,
-    # or the key stays on the footer and contradicts it.
+    # source is None when the probe found no fetchable source for this build,
+    # and the line above reported that the 's' key is disabled. Passing None
+    # removes the key from the footer, which would otherwise contradict it.
     Explorer(
         prog,
         source,
@@ -323,10 +324,10 @@ def _probe_source(timeout: float = 5.0) -> KernelSource | None:
 
 
 def _has_debug_info(prog) -> bool:
-    """True if the kernel's DWARF actually loaded.
+    """True if the kernel's DWARF loaded.
 
-    ``struct task_struct`` is the cheapest thing that is always there when the
-    debuginfo is present and never there when it is not.
+    Looking up ``struct task_struct`` is the cheapest test: the type exists if
+    and only if the debuginfo is loaded.
     """
     try:
         prog.type("struct task_struct")
@@ -338,10 +339,10 @@ def _has_debug_info(prog) -> bool:
 def _check(prog) -> int:
     """Smoke-test every catalog entry against this kernel.
 
-    Helper availability shifts with kernel version and config, so this reports
-    which entries actually resolve here rather than failing at browse time.
-    Every kind of entry answers ``check()``, so there is nothing to dispatch
-    on: objects, computed facts and measurements each report themselves.
+    Helper availability varies with kernel version and configuration, so this
+    reports which entries resolve on the running kernel, before they are
+    browsed. Every kind of entry implements ``check()``, so objects, computed
+    facts and measurements are checked without dispatching on their type.
     """
     from .catalog.registry import subsystems
     from .operations.tutorial import tutorials

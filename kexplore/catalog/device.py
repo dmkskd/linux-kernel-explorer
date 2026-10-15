@@ -69,7 +69,7 @@ def classes(prog: Program):
 
 
 def bound_devices(prog: Program):
-    """Only devices that actually have a driver bound."""
+    """Only devices with a driver bound."""
     for kobj in kset_kobjects(prog["devices_kset"]):
         device = container_of(kobj, "struct device", "kobj")
         if not ct.safe(lambda: device.driver.value_(), 0):
@@ -119,11 +119,11 @@ register(
             Entry("buses", "buses", "Registered bus types, via subsys_private.", buses),
             Entry("classes", "classes", "Registered struct class instances backing /sys/class.", classes),
             Entry("pci", "PCI devices", "struct pci_dev, with vendor:device ids.", pci_devices),
-            # The same objects the block branch lists, reached from the driver
-            # model instead of from the queue. sysfs does exactly this: the
-            # disk lives under /sys/devices/.../block/vda, and /sys/block and
-            # /sys/class/block are symlink views into it -- the first of whole
-            # disks, the second of disks and partitions together.
+            # The objects the block branch lists, reached from the driver
+            # model instead of from the queue. sysfs has the same layout: the
+            # disk is under /sys/devices/.../block/vda, and /sys/block and
+            # /sys/class/block contain symlinks to it, the first for whole
+            # disks and the second for disks and partitions.
             Entry("disks", "block disks",
                   "struct gendisk per disk, as /sys/block lists them.", disks),
             Entry("partitions", "partitions",

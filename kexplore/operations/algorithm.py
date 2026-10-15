@@ -1,11 +1,13 @@
-"""Algorithm views: the decision a kernel routine would make, and why. (WIP)
+"""Algorithm views: the decision a kernel routine would make, and its inputs.
+Work in progress.
 
-The structure browser shows values. Walkthroughs show a sequence. Neither shows
-the reasoning: given this state, which task runs next, and what made it win.
+The structure browser shows values and a walkthrough shows a sequence of
+steps. An algorithm view shows a decision: for the current state, which task
+runs next, and which inputs selected it.
 
-An algorithm view states the rule, lists the inputs the rule considers, and
-marks the outcome. The point is that the answer is recomputed from live state
-rather than asserted, so it can be checked against what the kernel actually did.
+An algorithm view states the rule, lists the inputs the rule uses, and marks
+the outcome. The outcome is recomputed from live state, not stated, so it can
+be checked against the kernel's choice.
 """
 
 from __future__ import annotations
@@ -211,10 +213,9 @@ def register_algorithm(algorithm: Algorithm) -> Algorithm:
 def algorithms() -> list[Algorithm]:
     """Every analysis, in registration order.
 
-    Importing is the side effect, the same way ``subsystems()`` does it: an
-    analysis defined elsewhere registers itself by being imported here, rather
-    than by the frontend importing it for its side effects and having to say so
-    with a noqa.
+    As with ``subsystems()``, registration happens on import: an analysis
+    defined in another module registers itself when this function imports it,
+    so the frontend does not import modules only for their side effects.
     """
     from . import clone_experiment, command_trace  # noqa: F401
 

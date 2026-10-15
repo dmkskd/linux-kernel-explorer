@@ -1,10 +1,10 @@
-"""Park unread packets in a socket receive queue, so there are skbs to look at.
+"""Keep unread packets in a socket receive queue, so there are skbs to inspect.
 
-An idle system has essentially no queued skbs -- they're consumed as fast as
-they arrive. This binds a UDP socket, sends to it, and never calls recv(), so
+On an idle system received skbs are consumed as they arrive, so almost none
+are queued. This binds a UDP socket, sends to it, and never calls recv(), so
 the skbs stay in sk_receive_queue for as long as this runs.
 
-Run it detached, or it dies with the shell that started it:
+Run it detached, or it exits with the shell that started it:
 
     setsid nohup python3 tests/helpers/stuck_socket.py 1800 >/tmp/stuck.log 2>&1 </dev/null &
 

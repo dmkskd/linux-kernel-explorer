@@ -1,11 +1,10 @@
-"""Walks that more than one subsystem needs.
+"""Walks shared by several subsystems.
 
-The fd table is the obvious one: vfs lists it as open files, socket and skb
-filter it down to the sockets, and a task's ``open files`` link walks it again.
-All four want the same loop, including the same tolerance -- a task can exit
-while we are walking it, and reading its torn-down fd table faults. That
-recovery is the part worth having in one place: divergence there means one view
-crashing where the others survive.
+vfs lists the fd table as open files, socket and skb filter it for sockets, and
+a task's ``open files`` link walks it again. All four use this loop. A task can
+exit during the walk, and reading its freed fd table then faults; the loop
+catches the fault in one place, so all four views recover from it the same
+way.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ def open_files(prog: Program) -> Iterator[tuple[Object, int, Object]]:
 
     One struct file can appear many times: fork() shares the fd table, and
     dup() adds descriptors to the same file. Each tuple is one (task, fd) pair,
-    so repeats are real rather than a bug.
+    so a file appears once per descriptor.
     """
     for task in for_each_task(prog):
         try:

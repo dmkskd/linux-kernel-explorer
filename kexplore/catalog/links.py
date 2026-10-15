@@ -1,15 +1,16 @@
 """Curated relationships between structures.
 
-Field navigation shows what a struct contains. It does not show the edges that
-are not fields: a task's threads come from walking ``signal->thread_head``,
-its runqueue from ``task_rq()``.
+Field navigation shows the members of a struct, but not the relationships that
+are not members: a task's threads are reached by walking
+``signal->thread_head``, and its runqueue through ``task_rq()``.
 
-A Link names one edge out of a struct and how to traverse it, selected by hand
-from the hundreds a struct like ``task_struct`` exposes. It also carries the
-two things worth knowing about an edge besides where it goes: what it really is
-(``origin`` -- a member read, a list walk, a helper call) and how you would get
-the same information from userspace. Both live on the Link rather than in a
-side table keyed by its label, so renaming a label cannot silently drop them.
+A Link names one such relationship out of a struct and the operation that
+traverses it. Links are selected by hand from the hundreds a struct such as
+``task_struct`` allows. Each Link also carries ``origin``, the kernel operation
+behind it (a member read, a list walk or a helper call), and ``userspace``, the
+command that reads the same information without a debugger. Both are fields of
+the Link, not entries in a table keyed by its label, so renaming a label cannot
+separate them from it.
 """
 
 from __future__ import annotations
@@ -80,8 +81,8 @@ from .walk import files_of, path_of
 # A resolver returns one object or an iterable of labelled objects.
 Resolver = Callable[[Object], "Object | Iterator[tuple[str, Object]]"]
 
-# include/linux/page-flags.h: page->mapping is a tagged pointer. Bit 0 says the
-# rest of it is an anon_vma rather than the file's address_space.
+# include/linux/page-flags.h: page->mapping is a tagged pointer. With bit 0 set,
+# the remaining bits point to an anon_vma instead of the file's address_space.
 # The clocks whose ids clock_gettime also accepts.
 CLOCK_GETTIME_IDS = frozenset(CLOCK_NAMES)
 
@@ -95,11 +96,11 @@ AF_UNIX = 1
 
 @dataclass(frozen=True)
 class Derived:
-    """A computed value shown alongside the real fields.
+    """A computed value shown with the struct's members.
 
-    Values not stored in the struct: a page's pfn and decoded flags, an skb's
-    headroom, a socket's address family. Rendered as read-only rows so they do
-    not require a helper call in the REPL.
+    A value not stored in the struct, such as a page's pfn and decoded flags,
+    an skb's headroom, or a socket's address family. It is rendered as a
+    read-only row, so reading it requires no helper call in the REPL.
     """
 
     label: str
@@ -108,7 +109,7 @@ class Derived:
 
 
 def _name_storage(cache: Object) -> str:
-    """Where a slab cache's name string physically lives.
+    """The memory region that holds a slab cache's name string.
 
     ``kmem_cache_create()`` calls ``kstrdup_const()``, which avoids the copy
     only when the string is in the *core kernel's* rodata. A module's string
@@ -218,8 +219,8 @@ def _is_socket_file(file: Object) -> bool:
 
 # ------------------------------------------------------------------ irq
 
-# include/linux/sched.h. PF_WQ_WORKER marks a kworker thread, which is what
-# makes the walk back from a task to its worker_pool worth attempting.
+# include/linux/sched.h. PF_WQ_WORKER marks a kworker thread; only a task with
+# this flag is searched for in the worker pools.
 PF_WQ_WORKER = 0x00000020
 # enum worker_pool_flags. A BH pool's work runs in softirq context, not in a
 # kthread: kernel/softirq.c calls workqueue_softirq_action(), which runs
@@ -295,7 +296,7 @@ def _pool_worklist(pool: Object):
 
 
 def _pool_context(pool: Object) -> str:
-    """Where this pool's work actually runs."""
+    """The execution context of this pool's work: kworker threads or softirq."""
     if int(pool.flags) & POOL_BH:
         return "softirq (BH pool: its worker has no task, so it cannot sleep)"
     cpu = int(pool.cpu)
@@ -306,9 +307,9 @@ def _pool_context(pool: Object) -> str:
 def _wq_pwqs(wq: Object):
     """The per-CPU (or per-node) halves of this workqueue.
 
-    A workqueue is one name; the queueing actually happens on a
-    ``pool_workqueue`` per CPU, each attached to the worker pool that will run
-    the work.
+    Work queued on a workqueue is placed on one of its ``pool_workqueue``
+    structures, one per CPU, each attached to the worker pool that runs the
+    work.
     """
     for pwq in list_for_each_entry(
         "struct pool_workqueue", wq.pwqs.address_of_(), "pwqs_node"
@@ -337,15 +338,15 @@ def _wq_flags(wq: Object) -> str:
 def _task_worker(task: Object):
     """From a kworker task back to the ``struct worker`` the pools know it by.
 
-    There is no pointer for this: ``task_struct`` has no worker field, so the
-    only way is to search the pools. There are a couple of dozen, so this is a
-    short search, not a scan of the whole kernel.
+    ``task_struct`` has no pointer to its ``struct worker``, so the worker
+    pools are searched. A system has a few dozen pools, so the search reads a
+    few dozen lists.
     """
     prog = task.prog_
     for _, address in idr_for_each(prog["worker_pool_idr"].address_of_()):
         pool = Object(prog, "struct worker_pool *", address)
-        # A BH pool's worker has no task, so it can never be the one searched
-        # for, and skipping it saves reading the list at all.
+        # A BH pool's worker has a NULL task and cannot match, so the pool's
+        # worker list is not read.
         if int(pool.flags) & POOL_BH:
             continue
         for worker in list_for_each_entry(
@@ -412,8 +413,8 @@ def _hrtimer_expires_in(timer: Object) -> str:
     The clockid an hrtimer base carries is the number userspace passes to
     ``clock_gettime``, so the two are directly comparable -- but only when the
     kernel being inspected is this machine's. Against a core dump the answer
-    would be measured from the wrong clock, so it is labelled rather than
-    presented as the kernel's own view.
+    would be measured against the inspecting machine's clock, so it is
+    labelled as such.
     """
     clockid = _hrtimer_clock(timer)
     if clockid not in CLOCK_GETTIME_IDS:
@@ -466,9 +467,9 @@ def _wheel_base_timers(base: Object):
 def _jiffy_ns(prog) -> int:
     """Nanoseconds in a jiffy, read from the jiffies clocksource.
 
-    ``HZ`` is a compile-time constant and not a symbol, so it cannot be read
-    from the kernel directly. The jiffies clocksource carries the same number
-    as a mult/shift pair, which is where this comes from rather than a guess.
+    ``HZ`` is a compile-time constant, not a symbol, so it cannot be read from
+    the kernel. The jiffies clocksource encodes the same value as a mult/shift
+    pair, which is read here.
     """
     for source in list_for_each_entry(
         "struct clocksource", prog["clocksource_list"].address_of_(), "list"
@@ -514,10 +515,10 @@ def _clock_event_state(device: Object) -> str:
 
 
 def _clock_event_handler(device: Object) -> str:
-    """The function this device's interrupt calls, once something claims it.
+    """The function this device's interrupt calls, once a tick device uses it.
 
-    A detached device has none: nothing is armed on it, so there is no handler
-    to name rather than an unresolvable one.
+    A detached device has no event_handler, because no timer is programmed on
+    it; this is reported as detached, not as an unresolved symbol.
     """
     if not ct.safe(lambda: device.event_handler.value_(), 0):
         return "none (device not in use)"
@@ -545,16 +546,16 @@ def _rwsem_locked(sem: Object) -> bool:
 
 
 def _rwsem_state(sem: Object) -> str:
-    """Unlocked, read-locked or write-locked, and who holds it if anyone.
+    """Unlocked, read-locked or write-locked, and the holder when there is one.
 
-    A read-locked rwsem has no single owner to report: the count says how many
-    readers hold it, not which tasks they are.
+    A read-locked rwsem has no single owner: the count records how many readers
+    hold it, not which tasks they are.
 
     An unlocked one can still name a task. A writer clears ``sem->owner`` when
     it releases, but reader ownership is only cleared in a build with
     CONFIG_DEBUG_RWSEMS or CONFIG_DETECT_HUNG_TASK_BLOCKER
     (kernel/locking/rwsem.c), so the field is usually the last reader rather
-    than a current holder. Reporting that as an owner would be wrong.
+    than a current holder, and it is not reported as the owner.
     """
     state = ct.safe(lambda: str(rwsem_locked(sem)).rsplit(".", 1)[-1].lower(), "?")
     owner = ct.safe(lambda: rwsem_owner(sem), None)
@@ -568,7 +569,7 @@ def _rwsem_state(sem: Object) -> str:
 
 
 def _mutex_waiters(lock: Object):
-    """The tasks queued on this mutex, first to be handed it first.
+    """The tasks queued on this mutex, in the order they will acquire it.
 
     This kernel keeps the queue as ``mutex->first_waiter`` and a list running
     through each waiter, so the walk starts at the first waiter rather than at
@@ -602,19 +603,17 @@ class Link:
     label: str
     doc: str
     resolve: Resolver
-    # Some edges only exist for certain instances of a type -- a struct file
-    # is only a socket if its f_op says so. Links whose predicate fails are
-    # hidden rather than shown as dead ends.
+    # Some links apply only to some instances of a type: a struct file is a
+    # socket only if its f_op is socket_file_ops. A link whose predicate
+    # returns False is hidden.
     applies: Callable[[Object], bool] | None = None
-    # What this edge actually is: a plain member read, or a walk or helper call
-    # that has no corresponding field on the struct. A link is not an alias for
-    # a field, and this is where the difference is stated.
+    # The kernel operation behind the link: a member read, or a list walk or
+    # helper call with no corresponding member in the struct.
     origin: str = ""
-    # The same information as seen from userspace, so the mental model carries
-    # to a production box where none of this is installed. "<pid>" is
-    # substituted with the pid of the object being viewed. Left empty when
-    # there is genuinely no equivalent, which is worth saying: it marks what
-    # only a debugger can reach.
+    # The userspace command that reads the same information without a
+    # debugger. "<pid>" is replaced with the pid of the object being viewed.
+    # Empty when there is no userspace equivalent, which is displayed as such:
+    # the information is readable only with a debugger.
     userspace: str = ""
 
     def visible(self, obj: Object) -> bool:
@@ -648,8 +647,8 @@ def _threads(task: Object):
 def _signal_threads(signal: Object):
     """The same walk as ``task_struct/threads``, done one hop at a time.
 
-    thread_head is a bare list_head, so landing on a signal_struct otherwise
-    dead-ends: the list is there but nothing in the UI can step along it.
+    thread_head is a bare list_head, which the struct view cannot follow, so
+    this link walks it from a signal_struct.
     """
     for thread in list_for_each_entry(
         "struct task_struct", signal.thread_head.address_of_(), "thread_node"
@@ -809,29 +808,29 @@ def _has_next_slab_cache(cache: Object) -> bool:
 def _page_in_use(page: Object) -> bool:
     """Whether this frame is allocated.
 
-    A free frame keeps whatever its last user left behind. On this kernel pfn
-    458753 reads mapping 0xffffffff and PG_writeback while its refcount is 0,
-    and following that mapping walks into unmapped memory. The refcount is
-    what separates a frame that means something from one that does not.
+    A free frame keeps the field values its last user wrote. On the lab kernel,
+    pfn 458753 has mapping 0xffffffff and PG_writeback set with a refcount of 0,
+    and following that mapping reads unmapped memory. A refcount of 0 marks the
+    other fields as stale.
     """
     return ct.safe(lambda: int(page._refcount.counter) > 0, False)
 
 
 def _page_mappers(page: Object, limit: int = 64, scan: int = 4096):
-    """The VMAs mapping this page, checked rather than assumed.
+    """The VMAs that map this page, each verified by a page table walk.
 
-    Both reverse-mapping trees answer "may map", not "does map", and they are
-    two different kinds of "may". A VMA whose range does not cover the folio's
+    Both reverse-mapping trees list VMAs that may map the page, not VMAs that
+    do, for two different reasons. A VMA whose range does not cover the folio's
     offset is in the tree only because it maps some other part of the same file
     or anon area, and is dropped here: an ``i_mmap`` tree for a shared library
     holds one VMA per mapping process per segment. A VMA that does cover the
-    offset still may never have faulted the page in, which is what a fork
-    leaves behind, so each one gets the check ``rmap_walk`` performs: compute
-    the address the folio's index lands on and walk that address space's page
-    tables to see whether the same page comes back.
+    offset may still never have faulted the page in, as after a fork, so each
+    one gets the check ``rmap_walk`` performs: compute the address that the
+    folio's index corresponds to, and walk that address space's page tables to
+    check whether they map the same page.
 
-    ``scan`` bounds the tree walk itself, because a popular file can be mapped
-    by more VMAs than are worth reading to find the few that cover this page.
+    ``scan`` bounds the tree walk, because the tree of a widely mapped file can
+    hold many VMAs that do not cover this page.
     """
     shift = page.prog_["PAGE_SHIFT"].value_()
     folio = cast("struct folio *", compound_head(page))
@@ -956,9 +955,9 @@ def _sockfs_super(sock: Object) -> Object:
 def _fs_type_supers(fs_type: Object):
     """Every live superblock of this filesystem type.
 
-    One file_system_type is shared by every instance -- all the tmpfs mounts
-    point at the same one -- so this is how you get from the type back to the
-    individual filesystems. Each is labelled with where it is mounted, since
+    One file_system_type is shared by every instance (all tmpfs mounts point to
+    the same one), so this link leads from the type to the individual
+    filesystems. Each is labelled with where it is mounted, since
     s_id is the same string for all of them.
     """
     for sb in hlist_for_each_entry(
@@ -1032,8 +1031,8 @@ def _queue_in_flight(queue: Object):
 def _request_bios(request: Object):
     """The bios merged into this request, in submission order.
 
-    A request starts as one bio and grows by merging adjacent ones, which is
-    what an I/O scheduler is for. ``biotail`` is the last of the chain.
+    A request starts as one bio and grows as the I/O scheduler merges adjacent
+    bios into it. ``biotail`` is the last bio in the chain.
     """
     bio = request.bio
     while bio:
@@ -1046,7 +1045,7 @@ def _bio_pages(bio: Object):
     """The pages this bio transfers, from its bio_vec array.
 
     ``bi_vcnt`` counts the vectors that were filled in; ``bi_max_vecs`` is the
-    allocation, and the entries between the two hold nothing. One vector can
+    allocation, and the entries between the two are unused. One vector can
     cover more than a page: since multipage bvecs, ``bv_len`` runs over as many
     physically contiguous pages as were available, and ``bv_page`` is the first
     of them. So the count here is vectors, not pages transferred.
@@ -1124,15 +1123,15 @@ def _ipc_task(pid: Object):
 
     These record who last acted on the object: the last sender, the creator,
     the process that ran the last semop. The creating process has usually
-    exited, and the pid then holds no task. The IPC objects keep a struct pid
-    rather than a task_struct so that this case reads as NULL instead of as a
-    pointer to whatever now occupies that memory.
+    exited, and the pid then maps to no task. The IPC objects keep a struct pid
+    instead of a task_struct pointer, so that an exited task reads as NULL and
+    not as a pointer to freed memory.
     """
     if not ct.safe(lambda: pid.value_(), 0):
         return None
     task = ct.safe(lambda: pid_task(pid, pid.prog_["PIDTYPE_PID"]), None)
-    # pid_task answers with a NULL object rather than nothing when the pid has
-    # no task left, and a link resolving to NULL is a row that goes nowhere.
+    # pid_task returns a NULL object, not None, when the pid has no task, and a
+    # link that resolves to NULL produces a row that cannot be followed.
     if task is None or not ct.safe(lambda: task.value_(), 0):
         return None
     return task
@@ -1141,10 +1140,10 @@ def _ipc_task(pid: Object):
 def _ipc_task_item(pid: Object):
     """The task behind an IPC pid, as zero or one labelled item.
 
-    A resolver that returns None has nothing for the frame to render, and the
-    process can exit between the moment the link is offered and the moment it
-    is followed. Yielding nothing covers that race; a single item is opened
-    directly, the same as returning the object would be.
+    The process can exit between the moment the link is offered and the moment
+    it is followed, and a resolver that returns None leaves the frame empty.
+    Yielding no item covers that race, and a single item is opened directly,
+    as a returned object would be.
     """
     task = _ipc_task(pid)
     if task is None:
@@ -1153,7 +1152,7 @@ def _ipc_task_item(pid: Object):
 
 
 def _ipc_pid_label(pid: Object) -> str:
-    """"pid, and the program running under it, or what became of it."""
+    """"pid and the program it runs, or a note that the process has exited."""
     if not ct.safe(lambda: pid.value_(), 0):
         return "none recorded"
     task = _ipc_task(pid)
@@ -1163,7 +1162,7 @@ def _ipc_pid_label(pid: Object) -> str:
 
 
 def _task_shm_segments(task: Object):
-    """The segments this task created, which it is still on the hook for.
+    """The shared memory segments this task created.
 
     ``shm_clist`` holds the segments this task created. The kernel keeps it so
     that shm_rmid_forced can destroy them when the creator exits. Segments this
@@ -1212,7 +1211,7 @@ def _ipc_owner(perm: Object) -> str:
 
 
 def _ipc_mode(perm: Object) -> str:
-    """The permission bits, and who they let in."""
+    """The permission bits, with the access each grants."""
     mode = ct.safe(lambda: int(perm.mode), 0) & 0o7777
     bits = "".join(
         letter if mode & bit else "-"
@@ -1282,7 +1281,7 @@ def _msg_receivers(queue: Object):
 
 
 def _msg_usage(queue: Object) -> str:
-    """Why a sender would block here: the byte budget, not the count."""
+    """Bytes queued against the byte limit, which blocks a sender when reached."""
     used = ct.safe(lambda: int(queue.q_cbytes), 0)
     limit = ct.safe(lambda: int(queue.q_qbytes), 0)
     count = ct.safe(lambda: int(queue.q_qnum), 0)
@@ -1419,10 +1418,9 @@ LINKS: dict[str, list[Link]] = {
              userspace="ls /proc/<pid>/task, or ps -L -p <pid>"),
         Link("mm (address space)", "Userspace address space in task->mm.",
              lambda t: t.mm,
-             # Deliberately still offered for a kernel thread, whose task->mm
-             # is NULL: the empty row says a kthread has no address space of
-             # its own, which is worth seeing. The links that walk *through*
-             # mm are the ones that have to be hidden.
+             # Offered for a kernel thread too, whose task->mm is NULL: the
+             # NULL row shows that a kthread has no user address space. Only
+             # the links that dereference mm are hidden for a kthread.
              origin="task->mm",
              userspace="grep VmRSS /proc/<pid>/status"),
         Link(
@@ -2519,7 +2517,7 @@ def derived_for(obj: Object) -> list[Derived]:
 
 
 def userspace_for(link: Link, obj: Object) -> str:
-    """The link's command, with whatever this struct can fill in filled in.
+    """The link's command, with the placeholders this struct supplies filled in.
 
     The rules live in ``userspace.placeholders`` and are shared with the field
     commands, so a struct file resolves <pid> the same way whether the command
@@ -2535,7 +2533,7 @@ def userspace_for(link: Link, obj: Object) -> str:
 
 
 def links_for(obj: Object) -> list[Link]:
-    """Curated edges out of ``obj``, or none if we have no map for its type.
+    """Curated links out of ``obj``, or an empty list if its type has none.
 
     Accepts a struct or a pointer to one: resolvers are always handed a
     pointer, because drgn's Linux helpers require one and member access works

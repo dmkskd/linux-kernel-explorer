@@ -1,9 +1,9 @@
 """skb queue walking, page resolution, and derived rows.
 
-An idle system has no queued skbs at all, so this makes its own: it binds a UDP
-socket, sends to it, and never reads, which is what tests/helpers/stuck_socket.py
-does interactively. It used to rely on whatever the machine happened to have
-queued, which made the result depend on how long the tests before it took.
+An idle system has no queued skbs, so the test creates them: it binds a UDP
+socket, sends to it, and does not read, as tests/helpers/stuck_socket.py does
+interactively. Relying on skbs already queued made the result depend on how
+long the preceding tests took.
 """
 
 from __future__ import annotations

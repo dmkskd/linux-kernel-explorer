@@ -7,10 +7,10 @@ Holds four live tasks that differ only in what they share:
   * a fork child  (no sharing; the address space is duplicated copy-on-write)
   * a vfork child would suspend the parent, so it is not held open here
 
-The child deliberately does not exec, so its copy-on-write address space is
+The child does not exec, so its copy-on-write address space is
 still shared with the parent and can be observed.
 
-Run it detached, or it dies with the shell that started it:
+Run it detached, or it exits with the shell that started it:
 
     setsid nohup python3 tests/helpers/clone_demo.py 600 >/tmp/clone.log 2>&1 </dev/null &
 """

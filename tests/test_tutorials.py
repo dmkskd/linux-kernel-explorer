@@ -1,14 +1,14 @@
-"""Tests for live guided tutorials through running kernel structures.
+"""Tests for the guided tutorials.
 
-Verifies:
-- All guided tutorials pass check against the live kernel.
-- Tutorials dynamically inspect live processes, generating steps reflecting real PIDs.
-- Tutorial frames render with the expected 4 columns.
-- Live structure resolvers attached to steps expand into real kernel objects.
-- The TUI displays the tutorials tab, builds the tree, opens tutorials,
-  shows commentary, and cycles views via the 'v' keybinding.
-- Backward-compatibility aliases (TourBanner, TourLanding, active_tour, initial_tour, etc.)
-  remain operational.
+Checks that:
+- every guided tutorial passes check against the live kernel;
+- tutorials select live processes and generate steps with their PIDs;
+- tutorial frames render with the expected 4 columns;
+- live structure resolvers attached to steps expand into kernel objects;
+- the TUI shows the tutorials tab, builds the tree, opens tutorials, shows
+  commentary, and cycles views with the 'v' key;
+- the backward-compatibility aliases (TourBanner, TourLanding, active_tour,
+  initial_tour, etc.) are still accepted.
 """
 
 from __future__ import annotations

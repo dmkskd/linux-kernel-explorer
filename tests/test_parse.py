@@ -1,12 +1,11 @@
-"""bpftrace output parsing, with no tracer involved.
+"""bpftrace output parsing, without a tracer.
 
-``core/probe.py`` turns whatever bpftrace printed into sections of rows. The
-parsing is pure text work, so it runs anywhere -- which matters, because the
-alternative is only ever exercising it against whatever a two-second trace on
-one idle VM happened to emit.
+``core/probe.py`` turns bpftrace output into sections of rows. The parsing is
+text processing, so it is tested on any machine against fixed samples, instead
+of only against the output of a two-second trace on an idle VM.
 
-The samples below are real bpftrace output: a histogram, keyed counts,
-a scalar, and the two together in one run.
+The samples are recorded bpftrace output: a histogram, keyed counts, a scalar,
+and a histogram and counts in one run.
 """
 
 from __future__ import annotations

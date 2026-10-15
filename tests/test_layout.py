@@ -1,12 +1,12 @@
-"""Graph layout and drawing, with no kernel involved.
+"""Graph layout and drawing, without a kernel.
 
-``core/graph.py`` is handed nodes and edges that someone else resolved, which
-is what makes the part most likely to be wrong -- the drawing -- testable on
-any machine: no VM, no root, no vmlinux. This is that test.
+``core/graph.py`` receives nodes and edges that are already resolved, so the
+layout and drawing can be tested on any machine, without a VM, root or a
+vmlinux.
 
-The cases here are the ones real object graphs produce: a fan out of a task,
-a cycle back to a box already drawn, and a parent whose own row collides with
-one of its children's.
+The cases are those that object graphs produce: a task with many children, a
+cycle back to a box already drawn, and a parent whose row is also one of its
+children's rows.
 """
 
 from __future__ import annotations

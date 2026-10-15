@@ -1,12 +1,11 @@
-"""Shared bits for the tests that drive the TUI.
+"""Shared helpers for the tests that drive the TUI.
 
-The explorer builds anything slow -- a walkthrough's source lookups, a
-measurement, the landing page's capability probes -- in a worker thread, so
-what is on screen one message-loop cycle after a keypress is a placeholder.
-``pilot.pause()`` does not wait for that: it yields to the message loop, not to
-a thread. Tests that check the *contents* of such a view have to wait for the
-build, or they assert against the placeholder and fail in a way that looks like
-a bug in the app.
+The explorer builds slow views (a walkthrough's source lookups, a measurement,
+the landing page's capability probes) in a worker thread, so one message-loop
+cycle after a keypress the screen shows a placeholder. ``pilot.pause()`` yields
+to the message loop, not to the worker thread. A test that checks the contents
+of such a view must wait for the build, or it asserts against the placeholder
+and fails as if the app had a bug.
 """
 
 from __future__ import annotations

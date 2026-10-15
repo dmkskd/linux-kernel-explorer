@@ -149,7 +149,7 @@ async def main() -> int:
         await pilot.pause()
         check(len(app.stack[-1].rows) > 5, f"pid 1 has {len(app.stack[-1].rows)} VMAs")
 
-        # Every curated link must survive being followed. Regression: single
+        # Every curated link must be followable without an exception. Regression: single
         # object links (cred, parent, signal) went through `follow(x) or x`,
         # and drgn structs have no truth value.
         open_entry(app, tree, "init")

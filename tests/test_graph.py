@@ -1,8 +1,8 @@
 """Focus mode: the graph screen, driven headlessly.
 
-``core/graph.py`` is covered without a kernel by test_layout.py. This is the
-other half -- the part that resolves real links into boxes, hands off to the
-table view, and comes back to the picture it left.
+``core/graph.py`` is tested without a kernel by test_layout.py. This test covers
+the screen: resolving live links into boxes, switching to the table view, and
+returning to the previous graph.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ async def main() -> int:
         # z collapses everything off the current branch. Asserted as a property
         # of the expansion set, not as a box count: every rebuild re-resolves
         # live state, so a collection that grew an entry between two builds can
-        # add a box while the picture is genuinely narrower.
+        # add a box while the graph is narrower.
         screen.action_isolate()
         await settle(app, pilot)
         keep = screen.path_to_root(screen.selected) | {screen.selected}

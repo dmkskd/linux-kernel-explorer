@@ -48,8 +48,8 @@ def parameter_calls(body: str, parameters: dict[str, str]) -> dict[str, set[int]
     """Direct calls passing a caller parameter unchanged, indexed by argument.
 
     Nested parentheses are balanced. Casts, member expressions, function pointer
-    calls, and locals are deliberately excluded; their provenance needs more
-    than this textual scan can establish.
+    calls, and locals are excluded, because a textual scan cannot establish
+    where their values come from.
     """
     calls: dict[str, set[int]] = {}
     for match in _CALL.finditer(body):

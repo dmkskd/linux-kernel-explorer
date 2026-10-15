@@ -1,15 +1,14 @@
-"""Human-readable meanings for well-known raw fields.
+"""Decoded meanings for raw field values defined by preprocessor macros.
 
-``task_struct.__state`` shows as ``0`` because task states are ``#define``s,
-not enums -- and the C preprocessor runs long before DWARF is emitted, so
-there is nothing in the debug info to decode against. Fields whose type is a
-real ``enum`` already render by name; everything here is the macro case.
+``task_struct.__state`` is displayed as ``0`` because task states are
+``#define`` constants, not enumerators, and DWARF records no macros. A field
+whose type is an ``enum`` is already rendered by name; the tables here cover
+the macro-defined values.
 
-That means these tables are hand-maintained kernel knowledge, with the usual
-risk: a value renumbered upstream would decode wrongly and silently. So
-decoders prefer a drgn helper whenever one exists (``get_task_state``,
-``decode_page_flags``), and the raw value is always still displayed next to the
-decoded text.
+The tables are maintained by hand, so a value renumbered upstream would be
+decoded incorrectly without any error. Decoders therefore use a drgn helper
+where one exists (``get_task_state``, ``decode_page_flags``), and the raw value
+is always displayed next to the decoded text.
 """
 
 from __future__ import annotations
@@ -34,8 +33,8 @@ class Decoder:
 def _flags(pairs: tuple[tuple[str, int], ...], zero: str = "none"):
     """A decoder for a bitmask field, given (name, mask) pairs.
 
-    ``decode_flags`` renders an empty mask as "0", which reads like a value
-    rather than an absence, so zero gets its own wording.
+    ``decode_flags`` renders an empty mask as "0", which is indistinguishable
+    from a numeric value, so an empty mask is given its own text.
     """
 
     def decode(parent: Object, value: Object) -> str:
@@ -437,8 +436,8 @@ WHEEL_BASES = {
 
 # ---------------------------------------------------------------- workqueues
 
-# include/linux/workqueue.h, enum wq_flags: the bits that say what a queue
-# promises its users, leaving out internal state like __WQ_DRAINING.
+# include/linux/workqueue.h, enum wq_flags: the flags a caller passes to
+# alloc_workqueue(), excluding internal state such as __WQ_DRAINING.
 WQ_FLAG_NAMES = (
     (0x1, "bh"),
     (0x2, "unbound"),
@@ -453,7 +452,7 @@ WQ_FLAG_NAMES = (
 
 
 def decode_field(parent: Object, name: str, value: Object) -> tuple[str, str] | None:
-    """Decoded text and its explanation for ``parent.name``, if we know it.
+    """Decoded text and its explanation for ``parent.name``, if a decoder exists.
 
     ``parent`` is passed as well as the field because some decoders need the
     whole object -- ``get_task_state()`` reads more than ``__state`` alone.

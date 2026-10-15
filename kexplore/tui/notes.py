@@ -7,8 +7,8 @@ typing or pasting during the session.
 
 A note is written in Markdown and shown rendered: ``**bold**``, ``*italic*``,
 ```code```, lists and headings. Unlike standard Markdown, every newline is a
-line break, so a note written as plain lines keeps them. ``e`` opens the source for editing; an empty
-note opens straight into the editor.
+line break, so a note written as plain lines keeps them. ``e`` opens the
+source for editing, and an empty note opens directly in the editor.
 """
 
 from __future__ import annotations
@@ -73,8 +73,8 @@ class NoteScreen(ModalScreen[str]):
     }
     """
 
-    # Focus is placed in on_mount; left to Textual, the hidden editor takes it
-    # and swallows the e that should open it.
+    # Focus is set in on_mount. With Textual's automatic focus, the hidden
+    # editor would receive focus and consume the "e" keypress that opens it.
     AUTO_FOCUS = ""
 
     BINDINGS = [

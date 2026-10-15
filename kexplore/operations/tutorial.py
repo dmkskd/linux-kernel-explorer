@@ -1,4 +1,4 @@
-"""Live guided tutorials: interactive walkthroughs through live kernel structures."""
+"""Live guided tutorials through kernel structures."""
 
 from __future__ import annotations
 

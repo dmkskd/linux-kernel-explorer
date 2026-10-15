@@ -1,50 +1,37 @@
 """Short foreground measurements, attached to the subsystem they describe.
 
-Measurements are grouped by what they are about, not by how they are taken:
-scheduler measurements live under ``sched`` next to the runqueues they explain.
-The mechanism (bpftrace, tracepoints) is an implementation detail in
-``core/probe.py``.
+Measurements are grouped by subsystem, not by mechanism: the scheduler
+measurements are under ``sched``, next to the runqueues. The mechanism
+(bpftrace, tracepoints) is implemented in ``core/probe.py``.
 
-The four scheduler measurements are legs of one loop, not separate topics::
+The four scheduler measurements time the legs of one cycle::
 
     wakeup --(1) waiting--> on CPU --(2) running--> switched out
       ^                                                  |
       +---------------(3) off-CPU-----------------------+
 
-Leg 3 contains leg 1, so leg 3 minus leg 1 is the time a task was genuinely
-blocked rather than waiting for a CPU. The fourth entry counts transitions
-around that loop instead of timing a leg.
+Leg 3 contains leg 1, so leg 3 minus leg 1 is the time a task was blocked
+rather than waiting for a CPU. The fourth measurement counts transitions
+around the cycle instead of timing a leg.
 
-Every probe names the two events it measures between, in the map name itself:
-``@us_from_sched_wakeup_to_oncpu`` says exactly what the number is, where
-"runqueue latency" would not. If you cannot state a metric as "time from
-tracepoint A to tracepoint B", it does not belong here.
+Each probe names the two events it measures between in its map name, for
+example ``@us_from_sched_wakeup_to_oncpu``. A metric that cannot be defined as
+the time from one tracepoint to another does not belong in this module.
 
 Each probe also records its blind spots. A measurement anchored on
-``sched_wakeup`` cannot see a task that was preempted and re-queued, because
-that path emits no wakeup -- and knowing that is the difference between reading
-a histogram and trusting it.
+``sched_wakeup`` does not record a task that was preempted and requeued,
+because that path does not fire the ``sched_wakeup`` tracepoint.
 
-This file should be split, one measurement into the file for the subsystem it
-describes. Grouping by mechanism (everything bpftrace here) is the opposite of
-how the rest of the catalog is split, and it costs two things: a measurement's
-subsystem is only the dict key it happens to sit under, tens of lines above it,
-and reading a subsystem means reading two files. With measurements for two of
-the twelve subsystems the file is manageable; filled in, it would restate the
-whole catalog in bpftrace.
-
-The move: each Measurement and its script constant into that subsystem's
-``entries=[...]``, after the browsable entries, keeping ``group="measure"``
-because that is what makes the collapsible branch in the tree. The loop diagram
-above goes to sched.py with the four measurements it explains; the general rules
-(name the two tracepoints in the map name, record the blind spot) go to
-registry.py next to Measurement, where anyone writing one will see them.
-
-That leaves this file as the only caller of ``attach``, so attach, _ATTACHED and
-the merge in ``subsystems()`` can go with it unless something else needs to
-register entries from another file. tests/test_catalog.py asserts the current
-arrangement (that sched's five are attached, that the syscall one sits under
-process) and would be rewritten to check membership instead.
+Planned change: move each Measurement and its script constant into the
+subsystem module it describes, after that subsystem's browsable entries and
+with ``group="measure"``, which creates the collapsible branch in the tree. The
+cycle diagram moves to sched.py with the four measurements it describes, and
+the general rules (two tracepoints in the map name, a recorded blind spot) move
+to registry.py next to Measurement. This module is then the only caller of
+``attach``, so ``attach``, ``_ATTACHED`` and the merge in ``subsystems()`` can
+be removed with it. tests/test_catalog.py asserts the current arrangement
+(sched's five attached entries, the syscall measurement under process) and
+would check membership instead.
 """
 
 from __future__ import annotations
@@ -73,10 +60,11 @@ tracepoint:sched:sched_migrate_task { @migrations_per_cpu[cpu] = count(); }
 interval:s:{duration} { exit(); }
 """
 
-# Split by whether the CPU was idle immediately before taking the task. Waking
-# an idle CPU costs an IPI plus leaving WFI (and, in a VM, a hypervisor round
-# trip), which dwarfs the scheduler decision. Without the split the two are
-# averaged into one number that looks like queueing but is not.
+# Split by whether the CPU was idle immediately before running the task. Waking
+# an idle CPU costs an IPI and an exit from WFI (in a VM, also a hypervisor
+# round trip), which takes far longer than the scheduler decision. Without the
+# split, the two cases are averaged into one latency that includes the exit
+# from idle.
 RUNQ_WAIT = """
 tracepoint:sched:sched_wakeup { @wake[args.pid] = nsecs; }
 tracepoint:sched:sched_wakeup_new { @wake[args.pid] = nsecs; }
@@ -93,9 +81,9 @@ interval:s:{duration} { exit(); }
 END { clear(@wake); }
 """
 
-# Idle is not a time slice. Track each task's own on-CPU span and keep the
-# swapper (pid 0) spans separately, or the two get mixed into one histogram
-# spanning five orders of magnitude.
+# Each task's on-CPU spans are recorded separately from the idle task's
+# (swapper, pid 0); combined, they form one histogram spanning five orders of
+# magnitude.
 TIMESLICE = """
 tracepoint:sched:sched_switch {
   $prev = @on[args.prev_pid];
@@ -114,8 +102,8 @@ END { clear(@on); }
 """
 
 # fentry/fexit rather than kprobe/kretprobe: measured side by side on the same
-# function, kretprobe added 2-4us of its own overhead while fentry cost ~100ns.
-# At this scale the instrument would otherwise dominate the measurement.
+# function, kretprobe added 2-4us of overhead and fentry about 100ns, and the
+# kretprobe overhead exceeds the durations being measured.
 WAKEUP_BREAKDOWN = """
 tracepoint:sched:sched_waking { @waking[args.pid] = nsecs; }
 tracepoint:sched:sched_wakeup /@waking[args.pid]/ {
@@ -208,8 +196,8 @@ END { clear(@e); }
 """
 
 
-# Measurements keyed by the subsystem they belong under. Anything genuinely
-# cross-cutting stays in "measure" until a subsystem exists to own it.
+# Measurements keyed by the subsystem they are listed under. A measurement
+# that spans several subsystems is listed under "measure".
 MEASUREMENTS: dict[str, list[Measurement]] = {
     "sched": [
         Measurement(
@@ -365,7 +353,7 @@ MEASUREMENTS: dict[str, list[Measurement]] = {
 }
 
 
-# A measurement belongs under the subsystem it describes, and every one of
-# them now has a subsystem that owns it, registered elsewhere.
+# Each measurement is attached to the subsystem it describes, which is
+# registered in its own module.
 for _key, _measurements in MEASUREMENTS.items():
     attach(_key, *_measurements)

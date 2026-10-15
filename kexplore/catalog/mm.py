@@ -32,7 +32,7 @@ def vmap_areas(prog: Program):
 
 
 def init_vmas(prog: Program):
-    """VMAs of pid 1 -- a concrete, always-present address space to explore."""
+    """VMAs of pid 1, a user address space present on every system."""
     from drgn.helpers.linux.mm import for_each_vma
 
     task = find_task(prog, 1)

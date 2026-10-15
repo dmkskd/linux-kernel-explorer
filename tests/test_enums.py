@@ -1,17 +1,14 @@
-"""Check the hand-written tables against the kernel that is running.
+"""Check the hand-written tables against the running kernel.
 
-Some of what the catalog prints is not read from the kernel but typed out
-here: the name for a clock event state, the bits of wq_flags, which timer
-wheel base is which. Every one of those is a claim about the kernel, written
-from memory, and a wrong one is invisible -- it produces a plausible word next
-to a real number.
+Some of what the catalog prints is written in kexplore, not read from the
+kernel: the name of a clock event state, the bits of wq_flags, the index of
+each timer wheel base. An error in one of these tables produces a plausible
+name next to a correct number and is not otherwise detectable.
 
-Where the kernel keeps the same knowledge as an enum in its debug info, this
-compares the two and fails on a difference. That turns "this table is right"
-from something to be trusted into something the suite proves on whatever
-kernel it runs against. A table with no enum behind it (the CLOCK_* ids are
-uapi constants, not DWARF) is listed at the end as still unchecked, so the gap
-is visible rather than forgotten.
+Where the kernel's debug info has the same values as an enum, this compares
+the two and fails on a difference, on whichever kernel the suite runs against.
+A table with no corresponding enum (the CLOCK_* ids are uapi constants, not in
+DWARF) is listed at the end as unchecked.
 """
 
 from __future__ import annotations
@@ -67,8 +64,8 @@ def main() -> int:
     check_value_table(prog, "tick_device_mode", "TICKDEV_MODE_", TICK_MODES)
 
     # wq_flags: every bit the catalog spells out must exist in the enum with
-    # that value. The enum has more (the __WQ_ internals), which the catalog
-    # deliberately leaves out.
+    # that value. The enum also has the __WQ_ internal flags, which the catalog
+    # omits.
     flags = enumerators(prog, "wq_flags") or {}
     mismatched = [
         (bit, name) for bit, name in WQ_FLAG_NAMES

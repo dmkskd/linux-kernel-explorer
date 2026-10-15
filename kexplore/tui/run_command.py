@@ -21,7 +21,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 TIMEOUT = 10.0
-# Lines kept from each stream. lsof on a busy box prints tens of thousands.
+# Lines kept from each stream. lsof on a busy system prints tens of thousands.
 MAX_LINES = 2000
 
 

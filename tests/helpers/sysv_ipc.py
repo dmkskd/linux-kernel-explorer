@@ -8,7 +8,7 @@ segment with an attachment. This holds all three open for as long as it runs.
 glibc's msgget/semget/shmget are called through ctypes, so the helper needs
 only the standard library.
 
-Run it detached, or it dies with the shell that started it:
+Run it detached, or it exits with the shell that started it:
 
     setsid nohup python3 tests/helpers/sysv_ipc.py 1800 >/tmp/ipc.log 2>&1 </dev/null &
 

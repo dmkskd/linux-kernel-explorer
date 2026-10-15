@@ -1,26 +1,27 @@
-"""A pseudo-file as rows: each line, and the member it is picked up from.
+"""A pseudo-file as rows: each line, and the member it is read from.
 
-An experiment, and deliberately removable. Everything it adds lives here and
-in ``catalog/pseudofs.py``; what it needs from the rest of the explorer is
-three marked lines in ``frames.py``:
+An experiment, written to be removable. Its code is in this module and in
+``catalog/pseudofs.py``; the rest of the explorer refers to it in three marked
+lines in ``frames.py``:
 
 * the import of this module,
-* ``procfile.task_rows(target)`` in ``object_frame``, which offers a task its
-  own /proc directory,
-* ``procfile.plan_for(item, ctx)`` in ``frames.plan_for``, which opens what
-  that row leads to,
+* ``procfile.task_rows(target)`` in ``object_frame``, which adds a row for the
+  task's /proc directory,
+* ``procfile.plan_for(item, ctx)`` in ``frames.plan_for``, which opens the
+  item that row leads to,
 
-and four in ``tui/app.py``: the tab, the branch of ``build_tree`` that fills
-the sidebar from here, the node-expanded handler that walks a directory, and
-the tab in the cycling order.
+and in four places in ``tui/app.py``: the tab, the branch of ``build_tree``
+that fills the sidebar from this module, the node-expanded handler that lists
+a directory, and the tab in the cycling order.
 
-Deleting this file and ``catalog/pseudofs.py``, dropping those three lines and
-``tests/test_pseudofs.py``, leaves the explorer exactly as it was.
+Deleting this module, ``catalog/pseudofs.py`` and ``tests/test_pseudofs.py``,
+and removing those marked lines, restores the explorer to its state without
+the experiment.
 
-``frames`` is imported inside the functions rather than at the top, because it
-imports this module: the cycle would be fine at call time and fatal at import
-time. It also keeps the dependency pointing one way on paper, which is what
-makes the removal a deletion rather than an untangling.
+``frames`` is imported inside the functions, not at module level, because it
+imports this module: the circular import succeeds at call time and fails at
+import time. Importing it locally also keeps the dependency one-directional,
+so removing the experiment requires only deletions.
 """
 
 from __future__ import annotations
@@ -36,20 +37,21 @@ from ..catalog import pseudofs
 from ..core import ctypes as ct
 from ..core.nav import MAX_ROWS, Row
 
-# A pseudo-file is read as text, so its rows are the file's own lines and the
-# member each one is picked up from.
+# A pseudo-file is read as text, so its rows are the file's lines, each with
+# the member it is read from.
 COLUMNS = ("line", "value", "read from")
-# A directory lists what it holds; a file with no line table is shown as the
-# text it is, with the same three columns so the two do not jump.
+# A directory lists its entries; a file with no line table is shown as text,
+# with the same three columns, so the column layout does not change between
+# the two.
 DIR_COLUMNS = ("name", "kind", "what it is")
 TEXT_COLUMNS = ("line", "name", "value")
 
 
 def task_rows(target: Object) -> list[Row]:
-    """The task's own /proc directory, as a row that opens it.
+    """The task's /proc directory, as a row that opens it.
 
-    Only a task has one here. The row is an index row rather than a link:
-    what it opens is text the kernel publishes, not another struct.
+    Only a task gets this row. It is an index row, not a link, because it
+    opens files the kernel publishes, not another struct.
     """
     if ct.tag_of(target.type_) != "task_struct":
         return []
@@ -67,8 +69,8 @@ def task_rows(target: Object) -> list[Row]:
 def plan_for(item, ctx):
     """The plan for a directory or a file, or None when this is neither.
 
-    Returning None is what lets ``frames.plan_for`` keep one dispatch point:
-    it asks here first and carries on down its own chain unchanged.
+    ``frames.plan_for`` calls this first and, on None, continues with its own
+    dispatch, so it remains the only dispatch point.
     """
     from . import frames
 
@@ -87,9 +89,9 @@ def plan_for(item, ctx):
 def file_frame(ctx, item: pseudofs.FileItem):
     """A pseudo-file as one row per line, in the order the file prints them.
 
-    The values are the file's own. Nothing is read from memory to produce
-    them, so what a row says is where the kernel picked the value up, not
-    whether it would still report the same number.
+    The values are those in the file; none is read from kernel memory. A row
+    shows where the kernel reads the value, not whether a new read of the file
+    would print the same value.
     """
     from . import frames
 
@@ -109,11 +111,11 @@ def file_frame(ctx, item: pseudofs.FileItem):
 
 
 def _raw_row(item: pseudofs.FileItem) -> Row:
-    """The file as cat prints it, one press away.
+    """The file as cat prints it, in a collapsed row.
 
-    The annotated rows are a reading of the file, not the file. Keeping the
-    text itself on the same screen is what lets the two be compared, and
-    keeping it closed is what stops it doubling every view.
+    The annotated rows are an interpretation of the file. The raw text is on
+    the same screen so the two can be compared, and is collapsed by default so
+    that it does not double the length of every view.
     """
     def raw() -> list[Row]:
         try:
@@ -138,8 +140,8 @@ def _line_row(ctx, item: pseudofs.FileItem, line: pseudofs.Line) -> Row:
     """One line of the file, with the member it is picked up from."""
     origin = line.origin
     if origin is None and item.spec.repeating:
-        # Every line is one object, so the columns are the same for all of
-        # them and the expansion says which column is which.
+        # Every line represents one object, so all lines have the same
+        # columns, and the expansion names each column.
         return Row(line.label, None, "", line.value, False, kind="field",
                    cells=(line.label, line.value, _walk_path(item.spec)),
                    doc=item.spec.doc,
@@ -167,13 +169,13 @@ def _pid_of(path: str) -> int:
 
 @dataclass(frozen=True)
 class Jump:
-    """Where a line's value is kept, as something the explorer can open.
+    """The location of a line's value, as an object the explorer can open.
 
-    Carried on the row so the key that opens it needs no table of its own.
-    The row is not followable, so this never turns into a plain enter.
+    Stored on the row, so the key that opens it needs no lookup table. The row
+    is not followable, so Enter does not open it.
 
     ``index`` is set for a file with one line per object: the line is the nth
-    of them, and the object is reached by walking rather than by a member.
+    object, which is reached by a walk instead of a member read.
     """
 
     pid: int
@@ -184,8 +186,8 @@ class Jump:
 def jump_target(ctx, row) -> tuple[str, Object] | None:
     """The struct a line is read from, resolved now against the live kernel.
 
-    Returns None when the row is not one of ours, and raises nothing: a task
-    that exited or a NULL pointer gives None too, and the caller says so.
+    Returns None, without raising, when the row is not a pseudo-file line, the
+    task has exited, or a pointer on the path is NULL; the caller reports it.
     """
     jump = getattr(row, "item", None)
     if not isinstance(jump, Jump):
@@ -206,8 +208,8 @@ def jump_target(ctx, row) -> tuple[str, Object] | None:
         return None
     obj, label = task, "task_struct"
     for hop in jump.origin.hops:
-        # A hop spelled with a leading dot is an embedded struct: the member
-        # is read by name either way, the dot only says how it is reached.
+        # A hop written with a leading dot is an embedded struct. The member is
+        # read by name in both cases; the dot records only the access syntax.
         name = hop.lstrip(".")
         try:
             obj = obj.member_(name)
@@ -220,7 +222,7 @@ def jump_target(ctx, row) -> tuple[str, Object] | None:
 
 
 def _nth_vma(task: Object, index: int) -> tuple[str, Object] | None:
-    """The mapping a maps line stands for, by its position in the file.
+    """The mapping a maps line represents, found by its position in the file.
 
     maps prints the vmas in address order, which is the order the walk
     produces, so the nth line is the nth vma.
@@ -238,16 +240,16 @@ def _nth_vma(task: Object, index: int) -> tuple[str, Object] | None:
 def _split(line: str) -> tuple[str, str]:
     """A line as name and value, when it is written that way.
 
-    Most of /proc is "name: value", padded into columns. Left whole, the value
-    is the part that falls off the right of a cell and is replaced by an
-    ellipsis, which is the half worth reading. A line with no colon keeps the
-    whole of itself in the first column.
+    Most /proc files print "name: value", padded into columns. Kept in one
+    cell, the value would be the truncated end of the line. A line with no
+    colon is kept whole in the first column.
     """
     name, separator, value = line.partition(":")
     label = name.strip()
-    # One token before the colon is a label. Several means the colon belongs
-    # to the content: a maps line carries the device as "00:23", and splitting
-    # there would cut an address range in half.
+    # One token before the colon is a label. Several tokens mean the colon is
+    # part of the content: a maps line contains the device as "00:23", and
+    # splitting there would make the address range, permissions and offset
+    # the label.
     if not separator or not label or len(label.split()) != 1:
         return line, ""
     return label, " ".join(value.split())
@@ -255,15 +257,15 @@ def _split(line: str) -> tuple[str, str]:
 
 def _origin_rows(ctx, spec: pseudofs.PseudoFile,
                  origin: pseudofs.Origin) -> list[Row]:
-    """One line's path expanded: each pointer followed, and where it lands.
+    """One line's path expanded: each pointer followed, and its target type.
 
-    The names are the table's; the types are read from this kernel's debug
-    information, so the expansion shows what is there rather than what was
-    written down.
+    The names come from the table and the types from the running kernel's
+    debug information, so the expansion shows the kernel's types, not those
+    the table assumed.
     """
-    # Indented here rather than by the frontend: it indents a row that stands
-    # for a kernel object, and these stand for a path through one. Without the
-    # prefix an expanded hop reads as another line of the file.
+    # Indented here, not by the frontend, which indents rows that represent
+    # kernel objects; these rows represent steps of a path. Without the prefix,
+    # an expanded hop looks like another line of the file.
     steps = pseudofs.hop_types(ctx.prog, spec, origin)
     rows = [
         Row(name, None, type_name, "", False, kind="derived",
@@ -297,11 +299,10 @@ def _column_rows(ctx, spec: pseudofs.PseudoFile) -> list[Row]:
 
 
 def _walk_path(spec: pseudofs.PseudoFile) -> str:
-    """The expression that reaches one line's object, as C with a walk in it.
+    """The expression that reaches one line's object, as C with a walk.
 
-    A repeating file's line is not read from a member, it is one object out
-    of a collection, so the column shows the collection and the walk rather
-    than a member that does not exist.
+    A line of a repeating file is one object of a collection, not a member, so
+    the column shows the collection and the walk.
     """
     chain = _root_name(spec) or spec.root
     for hop in spec.line_hops:
@@ -310,7 +311,7 @@ def _walk_path(spec: pseudofs.PseudoFile) -> str:
 
 
 def _root_name(spec: pseudofs.PseudoFile) -> str:
-    """What the root object is called in a path, or nothing for a global."""
+    """The name of the root object in a path, or an empty string for a global."""
     return "task" if spec.root == "task_struct" else ""
 
 
@@ -330,9 +331,9 @@ def _with_last(items: list) -> list[tuple[object, bool]]:
 def build_tree(tree) -> None:
     """Fill the sidebar with the pseudo-filesystems, one root each.
 
-    Only the roots are added here. A directory is walked when it is opened,
-    because /proc holds one directory per task and reading all of them to
-    build a sidebar nobody has expanded yet is work for nothing.
+    Only the roots are added here. A directory is read when it is expanded,
+    because /proc holds one directory per task and reading all of them before
+    any is expanded would read hundreds of directories that are not displayed.
     """
     tree.root.set_label("filesystems")
     tree.root.data = pseudofs.ROOT
@@ -345,9 +346,9 @@ def build_tree(tree) -> None:
 def fill(node) -> bool:
     """Add a directory's children to its tree node. True when it did.
 
-    Called when a node is expanded, and answers False for anything that is
-    not a directory of ours or has been filled already, so the handler in the
-    app is one line and knows nothing about /proc.
+    Called when a node is expanded. Returns False for a node that is not a
+    pseudo-filesystem directory or is already filled, so the handler in the
+    app is one line and contains no /proc logic.
     """
     item = getattr(node, "data", None)
     if not isinstance(item, pseudofs.Directory) or node.children:
@@ -367,17 +368,17 @@ def fill(node) -> bool:
     return True
 
 
-# The colour a file with a line table is named in, and a directory holding
-# one. Same cyan the explorer uses for the rows it adds to a struct, against
-# the plain names of everything it only shows as text.
+# The colour of a file with a line table, and of a directory containing one:
+# the cyan the explorer uses for the rows it adds to a struct. Files shown
+# only as text keep the default colour.
 ANNOTATED = "cyan"
 
 
 def _name(entry: pseudofs.Node) -> str:
     """The name, and for a task its command.
 
-    A directory of digits is a pid and nothing else. Reading its comm costs
-    one small file and turns a column of numbers into a process list.
+    A directory named with digits is a pid. Reading its comm costs one small
+    file read and shows each pid with its command.
     """
     if entry.is_dir and entry.name.isdigit():
         comm = pseudofs.comm_of(entry.path)
@@ -395,10 +396,10 @@ def _tree_label(entry: pseudofs.Node):
 def _entry_row(entry: pseudofs.Node) -> Row:
     """One directory entry: a folder to open, a file, or an annotated file.
 
-    The kind carries the colour. A directory is a link, the same as a curated
-    edge out of a struct, because opening it is the same action. A file with a
-    line table is coloured as something the explorer adds, and a file without
-    one keeps the plain colour of the text it holds.
+    The kind determines the colour. A directory is a link, like a curated
+    link out of a struct, because opening it is the same action. A file with a
+    line table has the colour of the rows the explorer adds, and a file without
+    one has the default colour.
     """
     if entry.is_dir:
         kind = "link"

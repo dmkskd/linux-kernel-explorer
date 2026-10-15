@@ -47,7 +47,7 @@ SECTOR_SIZE = 512
 
 def _capacity(sectors: int) -> str:
     """Sectors as a size. The block layer counts in 512-byte sectors whatever
-    the device's real logical block size is."""
+    the device's logical block size."""
     mib = sectors * SECTOR_SIZE / (1024 * 1024)
     if mib >= 1024:
         return f"{mib / 1024:.1f}G"
@@ -162,7 +162,7 @@ def hw_queues(prog: Program):
 
 
 def sw_queues(prog: Program):
-    """struct blk_mq_ctx: the per-CPU queue a submitting task lands on.
+    """struct blk_mq_ctx: the per-CPU software queue that receives a submission.
 
     Allocated per CPU, so a bio submitted on CPU 2 is staged on CPU 2's queue
     and never touches another CPU's lock. ``index_hw`` says which hardware

@@ -226,8 +226,8 @@ async def main() -> int:
             # runs pahole over the whole vmlinux, and it reports when it is
             # done. Pressing g first puts the graph screen on top, and on
             # Textual 2 an app-level widget query then resolves against that
-            # screen alone and finds nothing. This is what crashed on the
-            # Debian lab: the main screen is addressed explicitly now.
+            # screen only and raises NoMatches. This crashed on the Debian lab;
+            # the main screen is now queried explicitly.
             open_entry(app, tree, "namespaces")
             await settle(app, pilot)
             app.action_follow()

@@ -1,13 +1,13 @@
-"""Controlled clone experiment: pass one flag at a time and look at the result.
+"""Controlled clone experiment: pass one flag at a time and inspect the result.
 
-Watching an existing process cannot attribute cause. pthread_create passes
-CLONE_VM|CLONE_FILES|CLONE_FS|CLONE_SIGHAND|CLONE_THREAD in one call, so every
-structure differs at once. This runs a helper that clones once per flag
-combination, holds the children alive, reads their task_structs, and reports
-which structure each flag actually changed.
+Observing an existing process cannot attribute a structure to one flag:
+pthread_create passes CLONE_VM|CLONE_FILES|CLONE_FS|CLONE_SIGHAND|CLONE_THREAD
+in one call, so all the corresponding structures are shared at once. This runs
+a helper that clones once per flag combination, keeps the children alive,
+reads their task_structs, and reports which structures each flag made shared.
 
-Reading down a column shows which flag controls that structure. Reading across
-a row shows what one flag combination buys, and what it costs.
+Each column shows which flag controls that structure. Each row shows what one
+flag combination shares and what it costs in clone time.
 """
 
 from __future__ import annotations
@@ -69,8 +69,8 @@ def _sharers(obj, field: str) -> str:
         lambda c: c,
     ):
         try:
-            # A wrong path raises AttributeError, which ct.safe does not catch
-            # because it is a programming error everywhere else.
+            # A wrong member path raises AttributeError, which ct.safe does not
+            # catch because elsewhere it indicates a bug.
             value = path(counter).value_()
         except Exception:  # noqa: BLE001, S112 - trying paths until one fits
             continue
@@ -135,8 +135,8 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
         base = {f: parent.member_(f).value_() for f in FIELDS}
         held = {name for _pid, name in children}
 
-        # Timed-only variants have no child to inspect; report the cost and say
-        # why the structure columns are empty.
+        # Timed-only variants leave no child to inspect; the row reports the
+        # cost and states why the structure columns are empty.
         for name, stats in costs.items():
             if name in held:
                 continue
@@ -160,9 +160,9 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
         def build_detail(name: str, pid: int, child_task) -> list[Row]:
             """Build the drill-down now, while both tasks are still alive.
 
-            This must not be lazy. The helper is killed when the analysis
-            returns, so a closure that read the tasks at expand time would be
-            reading freed slab memory and silently getting nothing.
+            The drill-down is built immediately, not on expansion: the helper
+            is killed when the analysis returns, so a closure that read the
+            tasks on expansion would read freed slab memory.
             """
             rows = [
                 Row(
@@ -222,7 +222,7 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
         for pid, name in children:
             task = find_task(prog, pid)
             cells = [name]
-            # What userspace calls a thread is exactly this: same thread group.
+            # A thread, in userspace terms, is a task in the same thread group.
             cells.append(
                 "same group" if task.tgid == parent.tgid else "new group"
             )
@@ -239,11 +239,10 @@ def _clone_matrix(prog: Program) -> Iterator[Observation]:
             yield Observation(
                 name,
                 cells=tuple(cells),
-                # Deliberately no obj: the helper is killed when this analysis
-                # returns, so these task_structs are TASK_DEAD by the time a
-                # row could be followed. Enter opens the captured comparison
-                # instead, which is the only thing worth seeing here anyway.
-                # Rows are built now and merely handed back later.
+                # No obj: the helper is killed when this analysis returns, so
+                # these task_structs are TASK_DEAD before a row can be
+                # followed. Enter opens the comparison captured while the tasks
+                # were alive. The rows are built now and returned later.
                 expand=lambda rows=detail: rows,
                 expand_columns=(
                     "field",
@@ -302,9 +301,9 @@ CLONE_MATRIX = register_algorithm(
 def _cow_after_fork(prog: Program) -> Iterator[Observation]:
     """Count pages a forked child still shares with its parent.
 
-    Uses the same helper as the flag matrix rather than an arbitrary process:
-    an unrelated parent may have exec'd, may have written most of its pages
-    already, or may not exist at all, none of which is reproducible.
+    Uses the same helper as the flag matrix instead of an arbitrary process,
+    whose parent may have called exec, may have written most of its pages, or
+    may have exited, so the result would not be reproducible.
     """
     from drgn.helpers.linux.mm import follow_page, for_each_vma
     from drgn.helpers.linux.pid import find_task
@@ -320,7 +319,8 @@ def _cow_after_fork(prog: Program) -> Iterator[Observation]:
         )
         return
 
-    # 64 MiB of dirtied anonymous memory, so there is something to share.
+    # 64 MiB of anonymous memory, written by the parent before fork so that the
+    # pages exist and are shared copy-on-write.
     running = experiment.start(BINARY, ["120", "64"], ready="READY", timeout=90)
     if running.error:
         yield Observation("helper failed", cells=(running.error, "", ""), kind="result")

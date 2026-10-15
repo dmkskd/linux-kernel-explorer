@@ -40,9 +40,9 @@ IPC_SHM_IDS = 2
 def _key(perm: Object) -> str:
     """The key a process passes to msgget/semget/shmget.
 
-    ipcs prints it in hex and so does this: a key is usually built by ftok()
-    or written as a constant in a header, and neither reads as a decimal.
-    ``0x00000000`` is IPC_PRIVATE -- no key, reachable only by id.
+    It is shown in hexadecimal, as ipcs prints it, because a key is usually
+    produced by ftok() or defined as a constant in a header. ``0x00000000`` is
+    IPC_PRIVATE: the object has no key and is reachable only by id.
     """
     raw = ct.safe(lambda: int(perm.key), 0) & 0xFFFFFFFF
     return f"0x{raw:08x}"
@@ -227,8 +227,8 @@ def waiting_tasks(prog: Program):
 ULONG_MAX = (1 << 64) - 1
 # include/uapi/linux/shm.h: the SHMMAX and SHMALL defaults are ULONG_MAX backed
 # off by 16MiB, so that a sysctl "read the limit, add to it, write it back"
-# cannot wrap. A kernel left at the default therefore imposes no limit, and the
-# raw number states that only to a reader who recognises it.
+# cannot wrap. A kernel left at the default imposes no limit, which the raw
+# number does not show, so the default is named.
 SHM_UNLIMITED = ULONG_MAX - (1 << 24)
 
 

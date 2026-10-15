@@ -1,25 +1,25 @@
-"""Timers, and the hardware and bookkeeping that make them fire.
+"""Timers, and the hardware and bookkeeping that expire them.
 
-Two timer machines, with different promises:
+The kernel has two timer mechanisms with different precision:
 
-* the timer wheel (``struct timer_list``, ``struct timer_base``) rounds to a
-  jiffy and buckets timers by how far away they are. Cheap to add and cancel,
-  imprecise on purpose, and used where a timeout is a deadline that normally
-  never arrives.
+* the timer wheel (``struct timer_list``, ``struct timer_base``) rounds expiry
+  to a jiffy and buckets timers by distance to expiry. Adding and cancelling a
+  timer is cheap and expiry is approximate, which suits timeouts that are
+  normally cancelled before they expire.
 * hrtimers (``struct hrtimer``, ``struct hrtimer_clock_base``) keep a per-CPU
-  red-black tree ordered by nanosecond expiry, and program the clock event
-  device for the earliest one. Used where the expiry itself is the point:
-  ``nanosleep``, a scheduler deadline, a poll timeout.
+  red-black tree ordered by expiry in nanoseconds, and program the clock event
+  device for the earliest one. They are used where a timer must expire at an
+  exact time: ``nanosleep``, scheduler deadlines, poll timeouts.
 
-Under both sits the hardware: a ``clocksource`` is what the kernel reads to
-know the time, a ``clock_event_device`` is what it programs to be interrupted
-at a given time, and the tick device is the per-CPU pairing of the two.
+Below both is the hardware: a ``clocksource`` is read to obtain the time, a
+``clock_event_device`` is programmed to raise an interrupt at a given time, and
+the tick device pairs the two per CPU.
 
-Every walk here reads a structure the kernel is still changing, without taking
-its lock. A timer that fires is dequeued and freed, and a walk that was
-following it then faults. So each queue is read on its own through
-``_guarded``: a fault costs that one queue, which says so in a row of its own,
-and the other CPUs still report.
+Every walk here reads structures the kernel is modifying, without taking their
+locks. A timer that expires is dequeued and freed, and a walk that was following
+it faults. Each queue is therefore read separately through ``_guarded``: a
+fault affects only that queue, which is reported in its own row, and the other
+CPUs are still listed.
 """
 
 from __future__ import annotations
@@ -42,18 +42,18 @@ from .decoders import (
 )
 from .registry import Entry, Subsystem, register
 
-# A row is a label and the object behind it, or the label alone when there is
-# nothing to open.
+# A row is a label and its object, or the label alone for a row that cannot be
+# opened.
 Row = tuple[str, "Object | None"]
 
 
 def _guarded(walk: Callable[[], Iterator[Row]], describe: Callable[[str], str]) -> list[Row]:
     """Every row from ``walk``, or one row saying the structure changed.
 
-    The rows are collected before any are handed back, so that a fault part
-    way through a queue reports the queue as unreadable rather than showing
-    half of it as if that were all of it. ``describe`` turns the exception's
-    name into a row that says which queue was lost.
+    The rows are collected before any are returned, so that a fault partway
+    through a queue reports the whole queue as unreadable instead of returning
+    a partial list as if it were complete. ``describe`` turns the exception
+    into a row that names the unreadable queue.
     """
     rows: list[Row] = []
     try:
@@ -73,12 +73,12 @@ def _wheel_base_name(index: int, count: int) -> str:
 
 
 def _timer_owner(timer: Object, func: str) -> str:
-    """Who armed this timer, for the one callback that makes that recoverable.
+    """The task that armed this timer, for the one callback that identifies it.
 
-    A timer is a callback and an expiry; nothing in it says who it is for.
-    ``hrtimer_wakeup`` is the exception: the struct holding the timer can be
-    recovered from it, and it holds the sleeping task. Naming the task is the
-    difference between a list of identical callbacks and a list you can act on.
+    A timer holds a callback and an expiry, and no field identifies its owner.
+    For ``hrtimer_wakeup``, the enclosing ``hrtimer_sleeper`` is recovered from
+    the timer, and it holds the sleeping task. Without the task, many rows show
+    the same callback and cannot be told apart.
     """
     if func != HRTIMER_WAKEUP:
         return ""
@@ -98,9 +98,9 @@ def _clock_bases(cpu_base: Object) -> Iterator[tuple[Object, str]]:
     """Each clock base on this CPU, with the prefix its rows carry.
 
     The array holds each clock twice: the first half fires in the interrupt,
-    the second in the TIMER softirq. Which half a base is in is its position,
-    so the split is read from the array's length rather than written as a
-    constant that a kernel adding a clock would make wrong.
+    the second in the TIMER softirq. A base's half is determined by its
+    position, so the split is computed from the array's length, which stays
+    correct if a kernel adds a clock.
     """
     bases = cpu_base.clock_base
     hard_bases = len(bases) // 2
@@ -134,8 +134,8 @@ def _base_timers(base: Object, prefix: str) -> Iterator[Row]:
     ):
         timer = container_of(node, "struct hrtimer", "node")
         func = _symbol(timer, timer.function)
-        # Padded so the owner column lines up, then trimmed: a timer with no
-        # recoverable owner should not end in the width of a missing column.
+        # Padded so the owner column aligns, then trimmed, so that a timer with
+        # no recoverable owner does not end in trailing spaces.
         yield f"{prefix}{func:<24}{_timer_owner(timer, func)}".rstrip(), timer
 
 
@@ -201,7 +201,7 @@ def wheel_timers(prog: Program):
     """Every timer queued on the wheel, with the function it will call.
 
     Buckets are read one at a time, for the reason given at the top of this
-    file: one bucket's worth is a smaller loss than the whole wheel.
+    file: a fault then makes one bucket unreadable instead of the whole wheel.
     """
     now = int(prog["jiffies"])
     for cpu in for_each_online_cpu(prog):
@@ -222,7 +222,7 @@ def wheel_timers(prog: Program):
 
 
 def clocksources(prog: Program):
-    """What the kernel reads to know what time it is, best rating first.
+    """The clocksources the kernel can read the time from, highest rating first.
 
     The order is the list's own: ``clocksource_enqueue`` inserts each source
     ahead of the first one with a lower rating, so the head of the list is the
@@ -236,7 +236,7 @@ def clocksources(prog: Program):
 
 
 def clockevent_devices(prog: Program):
-    """What the kernel programs to be interrupted at a given time."""
+    """The clock event devices the kernel programs to raise an interrupt at a given time."""
     for device in list_for_each_entry(
         "struct clock_event_device", prog["clockevent_devices"].address_of_(), "list"
     ):

@@ -1,9 +1,9 @@
-"""The irq branch: entries, the edges out of them, and the graph they form.
+"""The irq branch: entries, the links out of them, and the graph they form.
 
-The interesting part is not that the entries list something, which --check
-already says, but that the structures connect: an IRQ line to its handler, a
-worker pool to its threads, a kworker task back to the pool it takes work
-from. A structure with no edges is a dead end in the UI.
+--check already reports that the entries list objects. This checks that the
+structures are linked: an IRQ line to its handler, a worker pool to its
+threads, a kworker task back to the pool it takes work from. In the UI, no row
+leads out of a structure that has no links.
 """
 
 from __future__ import annotations

@@ -1,13 +1,13 @@
-"""Physical pages, and the bridge from virtual mappings to them.
+"""Physical pages, and the link from virtual mappings to them.
 
 There is one ``struct page`` per physical frame, in a flat vmemmap array
-indexed by pfn. The struct is mostly anonymous unions whose interpretation
-depends on the page's current use, so the raw fields read poorly; the derived
-rows (pfn, physical address, decoded flags) are the usable form.
+indexed by pfn. Most of the struct is anonymous unions whose interpretation
+depends on the page's current use, so the derived rows (pfn, physical address,
+decoded flags) are more informative than the raw fields.
 
-A ``vm_area_struct`` describes what may be mapped; a page table walk
-(``follow_page``) reports what is currently resident. That walk is the link
-from virtual to physical.
+A ``vm_area_struct`` describes what may be mapped, and a page table walk
+(``follow_page``) reports what is resident. That walk links a virtual address
+to a physical page.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .registry import Entry, Subsystem, register
 
 
 def resident_pages(prog: Program):
-    """Pages actually backing pid 1's address space."""
+    """The resident pages of pid 1's address space."""
     task = find_task(prog, 1)
     mm = task.mm
     for vma in for_each_vma(mm):
@@ -39,7 +39,7 @@ def resident_pages(prog: Program):
 
 
 def valid_pages(prog: Program):
-    """A window onto the vmemmap: the first valid pfns on the system."""
+    """The vmemmap entries for the first valid pfns on the system."""
     for pfn, page in for_each_valid_pfn_and_page(prog):
         yield f"pfn {pfn}", page
 

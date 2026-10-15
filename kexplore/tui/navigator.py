@@ -1,9 +1,10 @@
-"""Simulated human navigation and cursor pathfinding across TUI tables.
+"""Animated cursor movement between rows of the TUI tables.
 
-Insulated from main application logic. Animates cursor gliding row-by-row
-like a live terminal recording (asciinema style), computing how to reach from
-a to b, updating row documentation as the cursor travels, before settling on
-the destination.
+Used by recorded walkthroughs. The module imports only Textual and the
+standard library.
+The cursor moves one row at a time from its current row to the target row,
+updating the row documentation at each step, so that a recording shows the
+path taken.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class NavigationPlan:
-    """The computed path and action sequence to travel from a to b."""
+    """The rows and key actions that move the cursor from one row to another."""
 
     start: int
     target: int
@@ -36,12 +37,11 @@ def compute_cursor_path(
     max_steps: int = 24,
     total_duration: float = 1.1,
 ) -> NavigationPlan:
-    """Compute an asciinema-like human traversal path from row `start` to row `target`.
+    """The cursor path from row `start` to row `target`, for a recording.
 
-    For short distances, visits every intermediate row (like someone tapping or
-    holding arrow keys). For longer distances, generates an eased trajectory
-    (accelerating then decelerating) so the movement is visibly readable
-    without taking too long.
+    For a short distance the path visits every intermediate row. For a longer
+    distance it follows an ease-in-out curve, accelerating then decelerating,
+    so the movement can be followed and the total duration stays bounded.
     """
     if start == target:
         return NavigationPlan(
@@ -75,7 +75,7 @@ def compute_cursor_path(
             path_list.append(target)
 
     num_intervals = max(1, len(path_list) - 1)
-    # Adaptive step delay clamped to keep movement deliberate, perceptible and human-paced
+    # Per-step delay, clamped to 0.08-0.20 s so each step is visible
     step_delay = max(0.08, min(0.20, total_duration / num_intervals))
 
     return NavigationPlan(
@@ -89,11 +89,10 @@ def compute_cursor_path(
 
 
 class CursorNavigator:
-    """Insulated cursor driver that simulates human-like navigation from A to B.
+    """Moves a DataTable cursor along a NavigationPlan, one row per timer tick.
 
-    Drives smooth row-by-row cursor glide across a DataTable widget, updating
-    documentation/hints along the way as a user would when navigating, then
-    calls `on_settled` when landing squarely on the destination row.
+    Updates the row documentation and hints at each step, as manual navigation
+    does, and calls `on_settled` when the cursor reaches the target row.
     """
 
     def __init__(
@@ -145,9 +144,9 @@ class CursorNavigator:
         total_duration: float = 0.55,
         immediate: bool = False,
     ) -> None:
-        """Begin human-like cursor glide from start_row to target_row.
+        """Start moving the cursor from start_row to target_row.
 
-        If immediate=True or start_row == target_row, lands on target_row instantly.
+        If immediate=True or start_row == target_row, moves to target_row at once.
         """
         self.cancel()
         self._table = table
