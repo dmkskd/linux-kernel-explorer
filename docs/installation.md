@@ -1,177 +1,168 @@
-# Installing a kernel learning lab
+# Installation
 
-kexplore is for learning and experimentation in disposable VMs and dedicated
-lab machines. It is not intended for production servers.
+Run `kexplore` only on disposable virtual machines or dedicated lab machines,
+never on production servers.
 
-## Recommended setup
+## Requirements
 
-On macOS, install Lima 2.0.0 or newer, download or clone this repository under
-your home directory, then run:
+`kexplore` reads kernel memory through `/proc/kcore`, which requires root
+(`CAP_SYS_RAWIO`), and resolves types from DWARF debug info built for the
+running kernel. It therefore has to run on the machine whose kernel it
+inspects.
 
-```sh
-./setup.sh
-./run.sh --check
-./run.sh
-```
+The structure browser needs Python 3.11 or later, drgn 0.1.0 or later and
+Textual 4.0.0. Source comments and the `s` source view additionally need a
+source tree matching the running kernel, the measure groups need bpftrace, and
+the per-task scheduler statistics need `kernel.sched_schedstats=1`.
 
-Setup provisions the Fedora VM. The explorer reads that VM's real running
-kernel. On Linux, a Fedora VM is also a supported learning environment; native
-Fedora installation reads the lab host's kernel. Ubuntu 24.04+ and Debian 12+
-have experimental automated native recipes, not a validated guarantee for
-every release or kernel variant.
+## Backends
 
-## Distro profiles on macOS
+`kexplore` supports three backends:
 
-`KEXPLORE_DISTRO=fedora|ubuntu|debian` selects the Lima profile. Fedora remains
-recommended. Ubuntu 26.04 and Debian 13 are experimental alternatives using
-Lima's bundled image templates, with 60 GiB disks for local debug packages.
-The corresponding template must be present in your Lima installation.
-The Ubuntu profile uses 26.04. Existing 24.04 VMs are preserved and are not
-silently reused: unset KEXPLORE_VM or choose a new VM name to create 26.04.
-Release selection does not replace validation against the actual kernel.
-Ubuntu and Debian profiles use changing distribution repositories, not frozen
-lab releases; every kernel variant and architecture is not yet validated.
+| Backend | `kexplore` runs in | Kernel inspected | Hosts |
+| --- | --- | --- | --- |
+| `lima` | a lima virtual machine | the virtual machine's | macOS; Linux distributions other than Fedora, Ubuntu and Debian |
+| `native` | the host | the host's | Fedora; Ubuntu 24.04 or later and Debian 12 or later (experimental) |
+| `docker` | a container on the host, built by `setup.sh` | the host's | Linux with docker or podman running as root |
 
-```sh
-export KEXPLORE_BACKEND=lima
-export KEXPLORE_DISTRO=debian
-unset KEXPLORE_VM
-./setup.sh
-./run.sh --check
-./run.sh
-```
+`KEXPLORE_BACKEND` selects the backend; when it is unset, `detect.sh` chooses
+one for the host. Kernels in lockdown mode and rootless podman are not
+supported.
 
-Default names are `kernel-lab` (Fedora), `kernel-lab-ubuntu-26-04` and
-`kernel-lab-debian`. Explicit `KEXPLORE_VM` names still work, but the selected
-distro must match that VM. Switching profiles does not convert existing VMs.
-Ubuntu/Debian Lima provisioning uses `/opt/kexplore` for isolated Python
-packages and installs exact-running-kernel DWARF. This is separate from the
-older experimental native recipe. Source trees remain optional.
+## Changes made by `setup.sh`
 
-## Required and optional artifacts
+`setup.sh` lists the changes below before making them. On the `native` backend
+it also asks for confirmation before installing packages.
 
-| Capability | Requirements |
-| --- | --- |
-| Structure browser | Python 3.11+, compatible drgn and Textual, root access to `/proc/kcore`, matching kernel DWARF |
-| Current launcher/tool checks | `debuginfod-find`, `pahole`, `addr2line`, `nm`, `readelf` |
-| Source comments and code links | Matching source tree, DWARF declaration/line information, pahole and binutils |
-| Measurements | bpftrace and the required kernel tracing facilities and permissions |
-| Some scheduling views | `kernel.sched_schedstats=1` |
+### `lima`
 
-Kernel headers and System.map do not replace DWARF. Source is not needed to
-browse structures, and installing source does not require rebuilding the
-kernel. Lockdown can prevent live kernel access even as root.
+On the host, `setup.sh` creates the lima virtual machine and installs nothing.
+lima 2.0.0 or later must already be installed, and the repository must be
+under `~`, which the virtual machine mounts read-only at the same path.
 
-Fedora fetches DWARF by build ID and source on demand through debuginfod.
-Ubuntu Lima setup also downloads and extracts the exact kernel source revision
-recorded by the unsigned debug package. If APT has removed that revision,
-setup fetches its retained source artifacts from Launchpad. The tree and DWARF
-build path mapping are configured inside the VM automatically for run.sh.
-Allow additional disk space and download time for this source tree.
-Ubuntu uses a matching `linux-image-<release>-dbgsym` package; Debian uses
-`linux-image-<release>-dbg`. The installer adds their debug repositories.
-In a Debian Lima lab, if the image's kernel symbols are unavailable, setup
-selects the cloud kernel debug metapackage's concrete kernel, checks that both
-package versions match, installs the pair, and restarts the VM automatically.
-It verifies the booted release and live kernel type resolution before reporting
-Ready. This uses current APT candidates, not a frozen, reproducible lab release.
-Native installation still requires artifacts for the exact running kernel.
-The Debian 13 lab's 6.12 kernel uses the older supported global futex hash
-and hardware queue xarray layouts. Its mutex-wait view is explicitly
-unavailable because task_struct.blocked_on is absent. The catalog check
-distinguishes unavailable capabilities from implementation failures. See
-[kernel compatibility](kernel-compatibility.md).
-Cloud flavours, older kernels and custom builds need matching
-artifacts, not just a source tree with the same upstream version.
+| `KEXPLORE_DISTRO` | Virtual machine | Image | CPUs, memory, disk |
+| --- | --- | --- | --- |
+| `fedora` (default) | `kernel-lab` | Fedora 44 cloud image, about 1 GB | 4, 8 GiB, 40 GiB |
+| `ubuntu` (experimental) | `kernel-lab-ubuntu-26-04` | Ubuntu 26.04, lima template | 4, 8 GiB, 60 GiB |
+| `debian` (experimental) | `kernel-lab-debian` | Debian 13, lima template | 4, 8 GiB, 60 GiB |
 
-Allow space for downloads, extracted DWARF and the debug index in memory.
-Ubuntu/Debian debug packages can occupy several GB. Setup checks tools;
-`./run.sh --check` verifies that actual catalog entries resolve.
+`KEXPLORE_VM` overrides the virtual machine name. `setup.sh` and `run.sh`
+refuse a virtual machine whose distribution or release differs from
+`KEXPLORE_DISTRO`.
 
-## Optional source downloads
+Inside the virtual machine, `setup.sh` installs drgn, elfutils, dwarves,
+binutils and bpftrace, installs Textual 4.0.0 into `/opt/kexplore`, and sets
+`kernel.sched_schedstats=1`. On `ubuntu` and `debian` it also installs the
+kernel debug package and, unless `KEXPLORE_DOWNLOAD_SOURCE=0`, the kernel
+source, several GB in total. On `debian`, if the image's kernel has no debug
+package, it installs the cloud kernel and its debug package and reboots the
+virtual machine.
 
-Ubuntu and Debian Lima labs download matching kernel sources by default.
-Downloads and extraction can take several minutes and use several GB of disk
-space. To skip this optional step before creating a lab or rerunning setup:
+### `native`
+
+On Fedora, `setup.sh` runs, as root:
 
 ```sh
-export KEXPLORE_DOWNLOAD_SOURCE=0
-./setup.sh
-./run.sh
+dnf install -y drgn elfutils-debuginfod-client dwarves binutils uv
+dnf install -y bpftrace bcc-tools perf      # failure is not fatal
 ```
 
-This skips source downloads only. Matching debug symbols are required for live
-structure browsing and are still installed; those packages can also occupy
-several GB. A lab without sources supports structure browsing, but source
-comments and the `s` source view are unavailable. Previously installed sources
-are preserved and remain usable. This option applies to Ubuntu/Debian Lima
-setup; Fedora obtains sources on demand through debuginfod.
+On Ubuntu and Debian, it runs `apt-get install` for debuginfod, elfutils,
+dwarves, binutils, python3-textual and python3-pip, installs drgn into the
+system Python with `pip3 install --break-system-packages`, adds a debug-symbol
+APT source (`/etc/apt/sources.list.d/ddebs.sources` on Ubuntu,
+`/etc/apt/sources.list.d/debian-debug.list` on Debian), and installs
+`linux-image-$(uname -r)-dbgsym` (Ubuntu) or `linux-image-$(uname -r)-dbg`
+(Debian), several GB.
 
-To install matching sources later:
+On all three distributions it installs Textual 4.0.0 into `/opt/kexplore`,
+writes `kernel.sched_schedstats = 1` to `/etc/sysctl.d/99-schedstats.conf`, and
+applies it with `sysctl -w`.
+
+### `docker`
+
+`setup.sh` builds the image `kexplore` from `Containerfile`, pulling the Fedora
+base image on the first build. Nothing is installed on the host. `run.sh` mounts
+a volume named `kexplore-debuginfod` for the debug info cache, and the host's
+`/usr/lib/debug` and `/lib/modules` read-only. The image does not contain
+bpftrace.
+
+## Verifying the installation
+
+After installing, `setup.sh` checks that `drgn`, `debuginfod-find`, `pahole`,
+`addr2line`, `nm` and `readelf` are on `PATH`, that Textual and drgn import,
+that `drgn.helpers.linux.mm.vma_name` exists (drgn 0.1.0 or later), and whether
+bpftrace is installed. It does not attach to the kernel.
+
+`./run.sh --check` attaches to the kernel and resolves every catalog entry
+without starting the UI. `run.sh` installs nothing; if the backend is not set
+up, it exits and names `setup.sh`.
 
 ```sh
-export KEXPLORE_DOWNLOAD_SOURCE=1
-./setup.sh
-./run.sh
+./run.sh --check                              # attach and resolve every catalog entry
+./run.sh                                      # start kexplore
+./run.sh --tutorial list                      # list the guided tutorials
+./run.sh --record demo.cast --tutorial memory # record a tutorial with asciinema
+./run.sh --help                               # all options and environment variables
 ```
 
-The installer uses the exact source revision recorded in the debug package,
-not the latest upstream kernel. It reuses an already configured matching tree.
-Debian uses its distribution source repositories, including security updates.
-If the exact Debian revision is absent, setup stops rather than installing
-unrelated sources. Ubuntu can also retrieve retained revisions from Launchpad.
+## Debug info
 
-## Optional local source
+On Fedora, `run.sh` downloads the `vmlinux` DWARF, a few hundred MB, from
+Fedora's debuginfod server on its first run, and source files on demand. On
+Ubuntu and Debian, `setup.sh` installs the debug package instead. Packages come
+from the current APT candidates, so installations on different days can
+differ.
 
-Enable distribution source repositories and obtain the exact source package
-version used to build the running kernel. On Ubuntu, the starting command is:
+The debuginfod cache is keyed by build ID; each kernel update causes a new
+download. The cache is on the virtual machine's disk for `lima`, in
+`~/.cache/debuginfod_client` for `native`, and in the `kexplore-debuginfod`
+volume for `docker`.
+
+## Kernel source
+
+Source is optional. On `lima` with `ubuntu` or `debian`, `setup.sh` downloads
+the source revision recorded in the debug package; if APT no longer has it,
+Ubuntu retrieves it from Launchpad and Debian stops. `KEXPLORE_DOWNLOAD_SOURCE=0`
+skips the download, and `=1` adds it on a later run.
+
+A local tree must match the source package version of the running kernel (on
+Ubuntu, `apt source linux-image-unsigned-$(uname -r)`):
 
 ```sh
-apt source linux-image-unsigned-$(uname -r)
+./run.sh --source-root /path/to/linux
+./run.sh --source-root /path/to/linux --source-prefix /build/original/linux
 ```
 
-Some variants use a different source package. Select the exact package version,
-not whichever newer version APT currently offers. Debian also provides source
-packages and linux-source archives; match the distribution patch revision.
+`--source-prefix` (`KEXPLORE_SOURCE_PREFIX`) maps the build path recorded in
+DWARF to the tree. Paths are resolved where `kexplore` runs; on `docker`, an
+absolute `KEXPLORE_SOURCE_ROOT` is mounted read-only. A local tree is not
+checked against the running kernel and does not fall back to debuginfod.
 
-Then use an extracted source tree:
+## Offline use
 
 ```sh
-./run.sh --source-root /absolute/path/to/linux-source
+./run.sh --prefetch   # download the DWARF and exit
+./run.sh --offline    # use only the cache; also KEXPLORE_OFFLINE=1
 ```
 
-When DWARF records absolute build paths, supply their root:
+libdebuginfod does not resume interrupted downloads, so `run.sh` downloads the
+DWARF before attaching; `--no-prefetch` attaches first. `--prefetch` deletes
+partial downloads. `kexplore` raises libdebuginfod's cache retention from one
+week to one year and its cache-miss retry interval from ten minutes to one day.
+`--offline` sets the debuginfod URL to a closed port, so the cache is still
+read; an unset `DEBUGINFOD_URLS` makes the client return `ENOSYS` without
+reading it.
 
-```sh
-./run.sh --source-root /absolute/path/to/linux-source --source-prefix /build/original/linux
-```
+## Known limitations
 
-Paths are interpreted where the explorer runs. The Fedora Lima setup mounts
-your home directory at the same path. For a container, use an absolute
-`KEXPLORE_SOURCE_ROOT` so the launcher mounts an external tree read-only:
+- `ubuntu` and `debian` installations are not reproducible: images, APT
+  repositories and Python dependency versions change.
+- Ubuntu removes older debug packages, and `setup.sh` has no kernel/debug-package
+  recovery for Ubuntu.
+- The `native` Ubuntu and Debian installation modifies the system Python.
+- Fresh installations are validated on Apple Silicon only.
 
-```sh
-KEXPLORE_BACKEND=docker KEXPLORE_SOURCE_ROOT=/absolute/path/to/linux-source ./run.sh
-```
-
-`KEXPLORE_SOURCE_PREFIX` is the environment equivalent of `--source-prefix`.
-Explicit local trees are authoritative: missing files do not fall back to
-network source. The app labels the source revision as unverified. A wrong
-revision can produce misleading comments or code locations.
-
-## Containers and offline use
-
-A container shares the Linux host's kernel. Its Fedora userspace does not make
-the host kernel Fedora. The launcher selects the host distro's symbol server
-and mounts installed `/usr/lib/debug` and `/lib/modules` directories read-only.
-Install matching host debug packages when automatic downloads are unsuitable.
-The existing container image does not include tracing tools.
-
-`./run.sh --prefetch` prepares kernel DWARF, not a complete source tree.
-Use `--offline` with installed or cached DWARF. Source requests can use cached
-files, or a supplied local source tree. Kernel updates require matching new
-artifacts. The app is currently run from this repository, not installed via pip.
-
-References: [drgn symbol installation](https://drgn.readthedocs.io/en/latest/getting_debugging_symbols.html),
-[Ubuntu source instructions](https://ubuntu.com/kernel/docs/how-to/develop-customise/build-kernel/),
-[Debian kernel sources](https://www.debian.org/doc/manuals/debian-handbook/sect.kernel-compilation.en.html).
+References: [drgn: getting debugging symbols](https://drgn.readthedocs.io/en/latest/getting_debugging_symbols.html),
+[Ubuntu kernel build](https://ubuntu.com/kernel/docs/how-to/develop-customise/build-kernel/),
+[Debian kernel compilation](https://www.debian.org/doc/manuals/debian-handbook/sect.kernel-compilation.en.html).
