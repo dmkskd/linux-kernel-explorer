@@ -13,6 +13,16 @@ from __future__ import annotations
 import re
 import shlex
 
+from ..core import ctypes as ct
+
+# One socket's line of ss, with -O so skmem is on the same line. <ss> is the
+# family flag and <pick> an awk program selecting the socket by inode; both are
+# filled from the sock by _ss_selector.
+SS_LINE = "ss -<ss>anmeOH | awk <pick>"
+# The same line for the fields only inet sockets have (addresses, ports,
+# cookie). <inet> is <pick>, left unfilled on a unix socket.
+INET_LINE = "ss -<ss>anmeOH | awk <inet>"
+
 # Keyed by (subsystem key, entry key).
 ENTRY_COMMANDS: dict[tuple[str, str], str] = {
     # process
@@ -108,6 +118,31 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
     ("task_struct", "sessionid"): "cat /proc/<pid>/sessionid",
     ("task_struct", "exit_code"): "no userspace equivalent: only the parent sees it, from wait()",
     ("task_struct", "ioac"): "cat /proc/<pid>/io",
+    ("task_struct", "real_parent"): "ps -o ppid= -p <pid>",
+    ("task_struct", "ptrace"): "grep TracerPid /proc/<pid>/status  # 0 when not traced",
+    ("task_struct", "children"): "cat /proc/<pid>/task/<pid>/children",
+    ("task_struct", "exit_signal"): "awk '{sub(/.*\\) /,\"\"); print $36}' /proc/<pid>/stat",
+    ("task_struct", "start_boottime"): "awk '{sub(/.*\\) /,\"\"); print $20}' /proc/<pid>/stat  # clock ticks",
+    ("task_struct", "personality"): "cat /proc/<pid>/personality",
+    ("task_struct", "timer_slack_ns"): "cat /proc/<pid>/timerslack_ns",
+    ("task_struct", "seccomp"): "grep Seccomp /proc/<pid>/status",
+    ("task_struct", "mems_allowed"): "grep Mems_allowed_list /proc/<pid>/status",
+    ("task_struct", "sighand"): "grep -E 'SigIgn|SigCgt' /proc/<pid>/status",
+    ("task_struct", "nsproxy"): "ls -l /proc/<pid>/ns",
+    ("task_struct", "fs"): "readlink /proc/<pid>/cwd /proc/<pid>/root",
+    ("task_struct", "files"): "ls -l /proc/<pid>/fd",
+    ("task_struct", "stack"): "cat /proc/<pid>/stack",
+    ("task_struct", "security"): "cat /proc/<pid>/attr/current",
+    ("task_struct", "io_context"): "ionice -p <pid>",
+    # /proc/<pid>/sched prints se.* by name, and sched_statistics unprefixed,
+    # from sum_sleep_runtime to core_forceidle_sum.
+    ("task_struct", "se"): "grep '^se\\.' /proc/<pid>/sched",
+    ("task_struct", "stats"): "sed -n '/^sum_sleep_runtime/,/^core_forceidle_sum/p' /proc/<pid>/sched",
+    ("task_struct", "uclamp"): "grep uclamp /proc/<pid>/sched",
+    ("task_struct", "numa_scan_seq"): "grep numa_scan_seq /proc/<pid>/sched",
+    ("task_struct", "numa_preferred_nid"): "grep numa_preferred_nid /proc/<pid>/sched",
+    ("task_struct", "numa_pages_migrated"): "grep numa_pages_migrated /proc/<pid>/sched",
+    ("task_struct", "total_numa_faults"): "grep total_numa_faults /proc/<pid>/sched",
     # task_io_accounting: one line of /proc/<pid>/io each. The file sums the
     # thread group, so it matches these per-thread counters only for a
     # single-threaded process.
@@ -178,27 +213,55 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
     ("vm_area_struct", "vm_flags"): "awk '{print $2}' /proc/<pid>/maps",
     ("vm_area_struct", "vm_pgoff"): "awk '{print $3}' /proc/<pid>/maps",
     ("vm_area_struct", "vm_file"): "awk '{print $6}' /proc/<pid>/maps",
-    # sock: one field per entry in the skmem tuple of ss -tanm.
-    ("sock", "sk_rcvbuf"): "ss -tanmH | grep -o 'skmem:([^)]*)' | cut -d, -f2",
-    ("sock", "sk_sndbuf"): "ss -tanmH | grep -o 'skmem:([^)]*)' | cut -d, -f4",
-    ("sock", "sk_forward_alloc"): "ss -tanmH | grep -o 'skmem:([^)]*)' | cut -d, -f5",
-    ("sock", "sk_wmem_queued"): "ss -tanmH | grep -o 'skmem:([^)]*)' | cut -d, -f6",
-    ("sock", "sk_omem_alloc"): "ss -tanmH | grep -o 'skmem:([^)]*)' | cut -d, -f7",
-    ("sock", "sk_backlog"): "ss -tanmH | grep -o 'skmem:([^)]*)' | cut -d, -f8",
-    ("sock", "sk_drops"): "ss -tanmH | grep -o 'skmem:([^)]*)' | cut -d, -f9 | tr -d ')'",
-    ("sock", "sk_receive_queue"): "ss -tanH | awk '{print $2}'  # Recv-Q",
-    ("sock", "sk_write_queue"): "ss -tanH | awk '{print $3}'  # Send-Q",
-    ("sock", "sk_ack_backlog"): "ss -tlnH | awk '{print $2}'",
-    ("sock", "sk_max_ack_backlog"): "ss -tlnH | awk '{print $3}'",
-    ("sock", "sk_ino"): "ss -taneH | grep -o 'ino:[0-9]*'",
-    ("sock", "sk_uid"): "ss -taneH | grep -o 'uid:[0-9]*'",
-    ("sock", "sk_err"): "ss -tani",
-    ("sock_common", "skc_state"): "ss -tanH | awk '{print $1}'",
-    ("sock_common", "skc_num"): "ss -tanH | awk '{print $4}'  # address:port",
+    # sock: this socket's line of ss, picked out by inode (see _ss_line).
+    # After <pick> the columns are State, Recv-Q, Send-Q, local, peer for
+    # every family. skmem is one entry per field.
+    ("sock", "sk_rcvbuf"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f2",
+    ("sock", "sk_sndbuf"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f4",
+    ("sock", "sk_forward_alloc"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f5",
+    ("sock", "sk_wmem_queued"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f6",
+    ("sock", "sk_omem_alloc"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f7",
+    ("sock", "sk_backlog"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f8",
+    ("sock", "sk_drops"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f9 | tr -d ')'",
+    # Recv-Q and Send-Q are not queue lengths. On a TCP listener they are the
+    # accept queue and its limit; otherwise they count bytes.
+    ("sock", "sk_receive_queue"): f"{SS_LINE} | awk '{{print $2}}'  # Recv-Q: unread bytes",
+    ("sock", "sk_write_queue"): f"{SS_LINE} | awk '{{print $3}}'  # Send-Q: unacknowledged bytes",
+    ("sock", "sk_ack_backlog"): f"{SS_LINE} | awk '{{print $2}}'  # Recv-Q on a listener",
+    ("sock", "sk_max_ack_backlog"): f"{SS_LINE} | awk '{{print $3}}'  # Send-Q on a listener",
+    # The socket's inode: sk_ino and sk_uid are copied from it, so stat
+    # answers for every family, ss or not.
+    # ss prints sk_wmem_alloc_get(), which leaves out the reference the
+    # socket holds on itself: the field reads 1 where ss prints t0.
+    ("sock", "sk_wmem_alloc"): f"{SS_LINE} | grep -o 'skmem:([^)]*)' | cut -d, -f3  # minus 1",
+    ("sock", "sk_cgrp_data"): f"{SS_LINE} | grep -o 'cgroup:[^ ]*'",
+    ("sock", "sk_pacing_rate"): "ss -<ss>anmeiOH | awk <inet> | grep -o ' pacing_rate [^ ]*'  # bits/s, the field times 8; none on a listener",
+    ("sock", "sk_type"): "ss -A tcp,udp,raw,unix,packet,vsock -anpOH | grep -F 'pid=<pid>,fd=<n>)' | awk '{print $1}'  # Netid",
+    ("sock", "sk_protocol"): "ss -A tcp,udp,raw,unix,packet,vsock -anpOH | grep -F 'pid=<pid>,fd=<n>)' | awk '{print $1}'  # Netid",
+    ("sock", "sk_socket"): "readlink /proc/<pid>/fd/<n>",
+    ("sock", "sk_ino"): "readlink /proc/<pid>/fd/<n>  # socket:[inode]",
+    ("sock", "sk_uid"): "stat -L -c %u /proc/<pid>/fd/<n>",
+    ("sock_common", "skc_state"): f"{SS_LINE} | awk '{{print $1}}'",
+    ("sock_common", "skc_num"): f"{INET_LINE} | awk '{{print $4}}'  # address:port",
+    ("sock_common", "skc_rcv_saddr"): f"{INET_LINE} | awk '{{print $4}}'  # address:port",
+    ("sock_common", "skc_v6_rcv_saddr"): f"{INET_LINE} | awk '{{print $4}}'  # address:port",
+    ("sock_common", "skc_daddr"): f"{INET_LINE} | awk '{{print $5}}'  # address:port",
+    ("sock_common", "skc_v6_daddr"): f"{INET_LINE} | awk '{{print $5}}'  # address:port",
+    ("sock_common", "skc_dport"): f"{INET_LINE} | awk '{{print $5}}'  # address:port",
+    ("sock_common", "skc_bound_dev_if"): f"{INET_LINE} | awk '{{print $4}}'  # %device after the address, if bound",
+    ("sock_common", "skc_cookie"): f"{INET_LINE} | grep -o 'sk:[0-9a-f]*'  # hex",
+    ("sock_common", "skc_ipv6only"): f"{INET_LINE} | grep -o 'v6only:[01]'  # inet6 only",
+    ("sock_common", "skc_family"): "ss -A tcp,udp,raw,unix,packet,vsock -anpOH | grep -F 'pid=<pid>,fd=<n>)' | awk '{print $1}'  # Netid",
+    # socket: the VFS half. Only the type and the file have a userspace view.
+    ("socket", "type"): "ss -A tcp,udp,raw,unix,packet,vsock -anpOH | grep -F 'pid=<pid>,fd=<n>)' | awk '{print $1}'  # Netid",
+    ("socket", "file"): "readlink /proc/<pid>/fd/<n>",
     # file
     ("file", "f_pos"): "cat /proc/<pid>/fdinfo/<n>",
     ("file", "f_flags"): "cat /proc/<pid>/fdinfo/<n>",
     ("file", "f_inode"): "stat -L -c %i /proc/<pid>/fd/<n>",
+    # The link's permission bits are set from f_mode: r for FMODE_READ, w for
+    # FMODE_WRITE.
+    ("file", "f_mode"): "stat -c %A /proc/<pid>/fd/<n>",
     # net_device: sysfs publishes one file per field.
     ("net_device", "name"): "ip link",
     ("net_device", "ifindex"): "cat /sys/class/net/<name>/ifindex",
@@ -278,6 +341,40 @@ def _delays_owner(obj):
     return None
 
 
+def _ss_selector(sk) -> dict[str, str]:
+    """<ss> and <pick> for one struct sock, or nothing where ss cannot show it.
+
+    TCP, UDP and raw print the socket inode as "ino:N" (with -e). Unix prints
+    "ino:" too, but for the inode of the bound path; the socket's own inode is
+    the sixth column, after Netid, which only unix output has. Dropping Netid
+    leaves every family with the same columns.
+    """
+    prog = sk.prog_
+    inode = sk.sk_ino.value_()
+    if not inode:
+        return {}
+    family = sk.__sk_common.skc_family.value_()
+    names = ct.safe(lambda: prog["pf_family_names"], None)
+    name = ct.safe(lambda: names[family].string_().decode(), "") if names is not None else ""
+    name = name.split("/")[0]
+    sock_type = sk.sk_type.value_()
+    protocol = sk.sk_protocol.value_()
+    if name == "PF_UNIX":
+        return {"<ss>": "x", "<pick>": f'$6 == {inode} {{$1 = ""; print}}'}
+    if name not in ("PF_INET", "PF_INET6"):
+        return {}
+    if sock_type == prog["SOCK_STREAM"].value_() and protocol == prog["IPPROTO_TCP"].value_():
+        flag = "t"
+    elif sock_type == prog["SOCK_DGRAM"].value_() and protocol == prog["IPPROTO_UDP"].value_():
+        flag = "u"
+    elif sock_type == prog["SOCK_RAW"].value_():
+        flag = "w"
+    else:
+        return {}
+    pick = f"/ino:{inode}( |$)/"
+    return {"<ss>": flag, "<pick>": pick, "<inet>": pick}
+
+
 def placeholders(obj, tag: str) -> dict[str, str]:
     """What this struct can fill into a command shown against it."""
     found: dict[str, str] = {}
@@ -317,10 +414,18 @@ def placeholders(obj, tag: str) -> dict[str, str]:
             pid, fd = _holder_of(obj.file)
             if pid is not None:
                 found["<pid>"], found["<n>"] = str(pid), str(fd)
-        elif tag == "sock" and obj.sk_socket and obj.sk_socket.file:
-            pid, fd = _holder_of(obj.sk_socket.file)
-            if pid is not None:
-                found["<pid>"], found["<n>"] = str(pid), str(fd)
+        elif tag in ("sock", "sock_common"):
+            # sock_common is the first member of sock, so the address is the
+            # same; the ss commands on its fields need the whole sock.
+            from drgn import TypeKind, cast
+
+            pointer = obj if ct.strip(obj.type_).kind == TypeKind.POINTER else obj.address_of_()
+            sk = cast("struct sock *", pointer)
+            found.update(_ss_selector(sk))
+            if sk.sk_socket and sk.sk_socket.file:
+                pid, fd = _holder_of(sk.sk_socket.file)
+                if pid is not None:
+                    found["<pid>"], found["<n>"] = str(pid), str(fd)
     except Exception:  # noqa: BLE001 - an unreadable owner leaves the placeholder
         return found
     return found
@@ -333,6 +438,9 @@ UNFILLED = {
     "<pid>": "no owning task, so no /proc path",
     "<n>": "no owning task, so no /proc path",
     "<name>": "no interface name",
+    "<ss>": "ss does not list sockets of this family by inode",
+    "<pick>": "ss does not list sockets of this family by inode",
+    "<inet>": "only an inet socket has this in ss",
 }
 
 _PLACEHOLDER = re.compile(r"<\w+>")

@@ -24,6 +24,8 @@ pointer hops.
 
 from __future__ import annotations
 
+import socket
+
 from drgn import Program
 from drgn.helpers.linux.list import hlist_for_each_entry
 from drgn.helpers.linux.net import SOCKET_I, sk_nulls_for_each
@@ -76,12 +78,52 @@ def _sock_kind(sk, families: list[str]) -> str:
     return kind
 
 
+def _endpoints(sk, families: list[str]) -> str:
+    """Local and remote address of an inet socket, as in "10.0.0.1:22 → 10.0.0.2:51234".
+
+    struct socket holds no address; these are struct sock's __sk_common fields.
+    Ports and addresses are read as bytes because skc_dport and the addresses
+    are stored in network byte order (skc_num, the local port, is not). An
+    unconnected socket has no remote end and shows only the local one. Empty
+    for families other than inet and inet6.
+    """
+    common = sk.__sk_common
+    family = ct.safe(lambda: common.skc_family.value_(), None)
+    name = families[family] if family is not None and family < len(families) else ""
+    if name == "inet":
+        af, local, remote = socket.AF_INET, common.skc_rcv_saddr, common.skc_daddr
+    elif name == "inet6":
+        af, local, remote = (
+            socket.AF_INET6, common.skc_v6_rcv_saddr, common.skc_v6_daddr
+        )
+    else:
+        return ""
+
+    def address(field) -> str:
+        raw = sk.prog_.read(field.address_, 4 if af == socket.AF_INET else 16)
+        text = socket.inet_ntop(af, raw)
+        return f"[{text}]" if af == socket.AF_INET6 else text
+
+    def text() -> str:
+        port = common.skc_num.value_()
+        dport = int.from_bytes(sk.prog_.read(common.skc_dport.address_, 2), "big")
+        here = f"{address(local)}:{port}"
+        if not dport:
+            return here
+        return f"{here} → {address(remote)}:{dport}"
+
+    return ct.safe(text, "?")
+
+
 def process_sockets(prog: Program):
     """struct socket per open socket fd, labelled with its owner."""
     families = _family_names(prog)
     for task, fd, file in socket_files(prog):
         sock = SOCKET_I(file.f_inode)
-        kind = _sock_kind(sock.sk, families) if sock.sk.value_() else "no sock"
+        if sock.sk.value_():
+            kind = f"{_sock_kind(sock.sk, families)}  {_endpoints(sock.sk, families)}".rstrip()
+        else:
+            kind = "no sock"
         yield f"{task_comm(task)}[{task.pid.value_()}] fd {fd}  {kind}", sock
 
 
@@ -91,7 +133,8 @@ def process_socks(prog: Program):
     for task, fd, file in socket_files(prog):
         sk = SOCKET_I(file.f_inode).sk
         if sk.value_():
-            yield f"{task_comm(task)}[{task.pid.value_()}] fd {fd}  {_sock_kind(sk, families)}", sk
+            kind = f"{_sock_kind(sk, families)}  {_endpoints(sk, families)}".rstrip()
+            yield f"{task_comm(task)}[{task.pid.value_()}] fd {fd}  {kind}", sk
 
 
 def _hashinfo(prog: Program):
@@ -100,22 +143,19 @@ def _hashinfo(prog: Program):
 
 
 def tcp_listening(prog: Program):
+    families = _family_names(prog)
     hashinfo = _hashinfo(prog)
     for index in range(hashinfo.lhash2_mask.value_() + 1):
         for sk in sk_nulls_for_each(hashinfo.lhash2[index].nulls_head):
-            port = sk.__sk_common.skc_num.value_()
-            yield f"listen :{port}", sk
+            yield f"listen {_endpoints(sk, families) or '?'}", sk
 
 
 def tcp_established(prog: Program):
+    families = _family_names(prog)
     hashinfo = _hashinfo(prog)
     for index in range(hashinfo.ehash_mask.value_() + 1):
         for sk in sk_nulls_for_each(hashinfo.ehash[index].chain):
-            common = sk.__sk_common
-            yield (
-                f":{common.skc_num.value_()} → :{ct.safe(lambda: common.skc_dport.value_(), '?')}",
-                sk,
-            )
+            yield _endpoints(sk, families) or "?", sk
 
 
 def udp_sockets(prog: Program):

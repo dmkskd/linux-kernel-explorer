@@ -59,6 +59,7 @@ from ..view.frames import MAX_CELL, matches_field as _matches_field
 from .clipboard import copy_to_system_clipboard
 from .graph import GraphScreen, graph_key
 from .notes import NoteDeck, NoteScreen  # experiment: session notes
+from .run_command import CommandScreen  # experiment: run a userspace command
 from .navigator import CursorNavigator
 
 # Source frames are exempt. Their wide column is the last one, so a long line
@@ -192,6 +193,7 @@ ACTION_SCREENS: dict[str, frozenset[str]] = {
     # Tracing leaves the walkthrough for a measurement, so it is a browsing
     # action even though the command is on screen during a step.
     "trace_command": frozenset({"browse"}),
+    "run_command": frozenset({"browse", "step"}),  # experiment: run a userspace command
     "expand": frozenset({"browse", "step"}),
     "source": frozenset({"browse", "step"}),
     "itinerary": frozenset({"landing", "step"}),
@@ -218,6 +220,8 @@ KEY_HELP: dict[str, str] = {
     "fold_tree": "collapse the sidebar to its top-level entries, or open every entry again",
     "source": "open the kernel source this structure is declared in",
     "trace_command": "run the userspace command and record which kernel functions it reaches",
+    # experiment: run a userspace command
+    "run_command": "run the userspace command and show what it prints",
     "graph": "draw this structure and its neighbours",
     "repl": "suspend the UI and open a drgn REPL with this object bound to obj",
     "copy": "copy the value under the cursor",
@@ -936,6 +940,7 @@ class Explorer(App):
         Binding("g", "graph", "graph"),
         Binding("j", "jump_struct", "structure"),  # experiment: /proc annotation
         Binding("colon", "repl", "drgn repl", show=False),
+        Binding("x", "run_command", "run command", show=False),  # experiment: run a userspace command
         Binding("w", "note_next", "note", show=False),  # experiment: session notes
         Binding("W", "note_prev", "previous note", show=False),  # experiment: session notes
         # Escape undoes whatever is most local: the filter box, then the same
@@ -1196,7 +1201,7 @@ class Explorer(App):
             return True
 
         # Tracing commands: requires live kernel and an active stack frame
-        if action == "trace_command":
+        if action in ("trace_command", "run_command"):  # experiment: run_command
             if not self.context.live or not self.stack:
                 return None
             return True
@@ -2984,7 +2989,11 @@ class Explorer(App):
 
         SECTIONS: list[tuple[str, list[str]]] = [
             ("Navigation", ["select_cursor", "expand", "back", "cycle_view", "fold_tree"]),
-            ("Inspection", ["refresh", "source", "userspace", "trace_command", "graph", "repl"]),
+            (
+                "Inspection",
+                # experiment: run_command
+                ["refresh", "source", "userspace", "trace_command", "run_command", "graph", "repl"],
+            ),
             ("Table", ["search", "sort", "sort_reverse", "copy", "copy_row", "toggle_mouse"]),
             (
                 "Walkthrough",
@@ -3278,6 +3287,24 @@ class Explorer(App):
                 selected_field=selected_field,
             )
         )
+
+    # experiment: run a userspace command
+    def action_run_command(self) -> None:
+        if not self.context.live:
+            self.notify("commands describe the live kernel, not this vmcore", severity="warning")
+            return
+        command = self.command_under_cursor()
+        if not command:
+            self.notify(
+                "no command on this row: press u, then select a row that shows one",
+                severity="warning",
+            )
+            return
+        command = runnable(command)
+        if command in UNFILLED.values():
+            self.notify(f"nothing to run here: {command}", severity="warning")
+            return
+        self.push_screen(CommandScreen(command))
 
     def action_repl(self) -> None:
         """Suspend the TUI and hand the current object to a drgn REPL."""
