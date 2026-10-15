@@ -28,9 +28,9 @@ from pathlib import Path
 class Running:
     """A helper process that is alive and holding kernel state in place."""
 
-    # None when the helper could not be started; ``error`` holds the reason.
-    # The other fields keep their defaults, so a caller reports a start
-    # failure the same way as a failure the helper printed.
+    # None when the helper could not be started. Every failure (start, EOF
+    # before the ready line, timeout) is stored in ``error``, so a caller
+    # checks one field.
     process: subprocess.Popen | None
     lines: list[str] = field(default_factory=list)
     error: str = ""

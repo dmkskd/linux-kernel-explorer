@@ -7,8 +7,8 @@ tested without a kernel or a vmlinux.
 The layout is a tidy tree: each column is one depth, and a parent is centred
 on its children. Object graphs contain cycles (a task's runqueue points back
 to the task), so each node is placed on the first path found to it, and every
-other edge into it is drawn as a back-edge badge instead of a line, because
-lines routed back across a character grid cannot be followed.
+other edge into it is drawn as a back-edge badge instead of a line, because a
+line drawn back across the grid crosses other lines.
 """
 
 from __future__ import annotations

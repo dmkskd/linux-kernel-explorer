@@ -6,9 +6,9 @@ and the pointers followed from the root struct to that member.
 
 The values displayed are the ones in the file. This module does not read
 memory to recompute them, because the view shows where a value is read from,
-not whether the kernel would report the same value again. Each path is checked against the
-running kernel's type information, so a table that no longer matches the kernel
-is reported as such instead of displaying a path that does not exist.
+not whether the kernel would report the same value again. Each path is
+checked against the running kernel's type information: ``check()`` returns the
+paths missing from this kernel instead of displaying them.
 
 Lines that no table describes are listed with an empty origin. A kernel can
 print lines a table does not cover (a new architecture line, a configuration

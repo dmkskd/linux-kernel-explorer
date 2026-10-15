@@ -1,8 +1,12 @@
 """Type inspection and one-line value rendering for drgn objects.
 
 A read of live kernel memory can fault at any time: a task exits, a pointer
-is stale, or RCU frees an object during the read. Every read here is wrapped,
-and a fault is rendered as ``<fault>`` instead of raising an exception.
+is stale, or RCU frees an object during the read. ``safe(fn, default)`` runs
+one read and, if it raises one of the exceptions in ``READ_ERRORS``
+(``drgn.FaultError``, ``drgn.OutOfBoundsError``, ``LookupError``,
+``ValueError``, ``TypeError``, ``OverflowError``), returns ``default``, which
+is ``"<fault>"`` unless the caller passes another value. Any other exception
+propagates, because it indicates a bug in kexplore.
 """
 
 from __future__ import annotations

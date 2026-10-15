@@ -518,7 +518,7 @@ def _clock_event_handler(device: Object) -> str:
     """The function this device's interrupt calls, once a tick device uses it.
 
     A detached device has no event_handler, because no timer is programmed on
-    it; this is reported as detached, not as an unresolved symbol.
+    it, and the row reads "none (device not in use)".
     """
     if not ct.safe(lambda: device.event_handler.value_(), 0):
         return "none (device not in use)"

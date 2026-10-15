@@ -465,8 +465,8 @@ async def main() -> int:
         )
 
         # A command that does not exit is stopped after a time limit, and the
-        # result reports it: vmstat -n 1 prints one line per second until
-        # killed.
+        # result has a "note" row containing "did not exit within": vmstat -n 1
+        # prints one line per second until killed.
         trace_module = importlib.import_module("kexplore.operations.command_trace")
         run_command = trace_module.trace_command
         run_times = []

@@ -187,7 +187,9 @@ def jump_target(ctx, row) -> tuple[str, Object] | None:
     """The struct a line is read from, resolved now against the live kernel.
 
     Returns None, without raising, when the row is not a pseudo-file line, the
-    task has exited, or a pointer on the path is NULL; the caller reports it.
+    task has exited, or a pointer on the path is NULL. The caller,
+    ``action_jump_struct``, then shows the warning "no structure behind this
+    line".
     """
     jump = getattr(row, "item", None)
     if not isinstance(jump, Jump):

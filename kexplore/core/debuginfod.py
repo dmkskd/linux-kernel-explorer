@@ -98,7 +98,8 @@ def configure(offline_only: bool = False) -> None:
             os.environ["DEBUGINFOD_IMA_CERT_PATH"] = certs
         else:
             # No certificates are installed, so enforcement cannot succeed:
-            # download without signature verification and report it.
+            # download without signature verification, and print a warning to
+            # stderr.
             os.environ["DEBUGINFOD_URLS"] = servers()
             print("kernel debug info: no IMA certificates on this machine, "
                   "so the download is not signature-checked", file=sys.stderr)
@@ -113,7 +114,7 @@ def configure(offline_only: bool = False) -> None:
         # setting, every run repeats the same two failed requests.
         (cache / "cache_miss_s").write_text(f"{_MISS_SECONDS}\n")
     except OSError:
-        pass  # libdebuginfod reports a read-only or missing cache itself.
+        pass  # Not handled here; libdebuginfod's fetch then fails.
 
     # Remove zero-length debuginfo and executable entries, left by an
     # interrupted transfer or a cached 404, before anything reads the cache.

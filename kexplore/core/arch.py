@@ -26,7 +26,7 @@ _FALLBACK = 64
 def _machine(prog: Program) -> str:
     try:
         return prog["init_uts_ns"].name.machine.string_().decode()
-    except Exception:  # noqa: BLE001 - an unreadable machine name selects the default
+    except Exception:  # noqa: BLE001 - an unreadable machine name selects _FALLBACK
         return ""
 
 

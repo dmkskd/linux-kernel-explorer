@@ -165,7 +165,8 @@ def collect(label: str, produce: Produce, limit: int = MAX_ROWS) -> Collection:
     """Run a provider, truncating at ``limit`` and trapping its failures.
 
     Subsystem entries, curated links and walkthrough steps all resolve here,
-    so they truncate at the same limit and report failures the same way.
+    so they truncate at the same limit and return a failure in
+    ``Collection.error``.
     Helper availability varies with kernel version and configuration, and a
     walk can fault when the task it reads exits, so a failure is returned as a
     value: it disables one row instead of raising.
