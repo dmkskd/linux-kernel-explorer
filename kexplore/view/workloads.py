@@ -1,4 +1,4 @@
-"""The workloads tab: start and stop a workload, and see where its effect shows.
+"""The experiments tab: start and stop a workload, and open the catalog entries that show its sockets and skbs.
 
 An experiment, written to be removable; ``operations/workloads.py`` lists every
 place the rest of the explorer refers to it. ``frames`` is imported inside the
@@ -19,8 +19,18 @@ from ..operations import workloads
 from ..operations.workloads import Workload
 
 COLUMNS = ("row", "description")
-DOC = ("Programs that generate loopback traffic, run as child processes of kexplore. "
-       "Enter on start runs one; r re-reads its pane.")
+DOC = ("Each experiment is a program that kexplore runs as a child process. The "
+       "program creates a condition in the running kernel, for example a full accept "
+       "queue.")
+# The description of each sidebar branch, by its path.
+BRANCH_DOCS = {
+    ("net",): ("Modes of tests/helpers/traffic.py: sockets on 127.0.0.1, AF_UNIX "
+               "socketpairs, and a netem root qdisc on lo."),
+    ("net", "TCP"): "TCP connections on 127.0.0.1, ports 40100 to 40601.",
+    ("net", "UDP"): "A UDP socket bound to 127.0.0.1:40700.",
+    ("net", "AF_UNIX"): "socketpair() pairs of type SOCK_STREAM and SOCK_DGRAM.",
+    ("net", "qdisc"): "A netem root qdisc on lo with 1 s latency.",
+}
 RUNNING_MARK = "● "
 
 
@@ -35,7 +45,7 @@ class Action:
 def build_tree(tree) -> None:
     from . import frames
 
-    tree.root.set_label("workloads")
+    tree.root.set_label("experiments")
     branches = {(): tree.root}
     contents: dict[tuple[str, ...], list] = {(): []}
     for workload in workloads.WORKLOADS:
@@ -52,8 +62,8 @@ def build_tree(tree) -> None:
     listings = {}
     for path in sorted(contents, key=len, reverse=True):
         items = [listings[i] if isinstance(i, tuple) else i for i in contents[path]]
-        label = path[-1] if path else "workloads"
-        listings[path] = frames.Listing(label, DOC, tuple(items))
+        label = path[-1] if path else "experiments"
+        listings[path] = frames.Listing(label, BRANCH_DOCS.get(path, DOC), tuple(items))
         branches[path].data = listings[path]
 
 

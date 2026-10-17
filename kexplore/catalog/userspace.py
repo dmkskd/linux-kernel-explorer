@@ -168,7 +168,7 @@ FIELD_COMMANDS: dict[tuple[str, str], str] = {
     ("sched_info", "max_run_delay"): "getdelays -d -p <pid>  # CPU delay max, from taskstats",
     ("sched_info", "min_run_delay"): "getdelays -d -p <pid>  # CPU delay min, from taskstats",
     ("sched_info", "max_run_delay_ts"): "getdelays -d -p <pid>  # when the max was recorded",
-    ("sched_info", "last_arrival"): "no userspace equivalent: the last time this task took a CPU is kept only here",
+    ("sched_info", "last_arrival"): "no userspace equivalent: the last time this task took a CPU is recorded only in sched_info.last_arrival",
     ("sched_info", "last_queued"): "no userspace equivalent: zero unless the task is queued and waiting right now",
     # task_delay_info: delay accounting is published over taskstats (netlink),
     # not as a file. getdelays is the sample client in the kernel tree
@@ -458,7 +458,7 @@ def fill(command: str, found: dict[str, str]) -> str:
         command = command.replace(placeholder, shlex.quote(value))
     left = _PLACEHOLDER.search(command)
     if left:
-        return UNFILLED.get(left.group(), f"{left.group()} is not known here")
+        return UNFILLED.get(left.group(), f"{left.group()} has no value in the current frame")
     return command
 
 

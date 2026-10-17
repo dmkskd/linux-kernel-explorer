@@ -40,7 +40,7 @@ class Workload:
     label: str
     doc: str
     # The catalog entries that show the effect: (subsystem key, entry key,
-    # what to look for there).
+    # the field or row that changes).
     look: tuple[tuple[str, str, str], ...]
 
 
@@ -102,7 +102,7 @@ WORKLOADS = (
         "A 1 KB datagram to 127.0.0.1:40700 every 1 ms to a socket whose process "
         "sleeps after bind(). Once sk_rmem_alloc reaches sk_rcvbuf, further "
         "datagrams are dropped. On a kernel whose struct sock has "
-        "sk_drop_counters, UDP counts these drops there and sk_drops reads 0.",
+        "sk_drop_counters, UDP counts these drops in sk_drop_counters and sk_drops reads 0.",
         (("socket", "udp", "port 40700, as udp_sock: drop_counters.drops0 "
                            "increases on each refresh (r)"),
          ("skb", "receive", "port 40700: queued datagrams, payload kexplore-udp N")),

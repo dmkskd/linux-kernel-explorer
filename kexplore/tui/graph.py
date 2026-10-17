@@ -181,8 +181,8 @@ def build(obj: Object, expanded: frozenset[str]) -> Graph:
     levels deep while every other branch stays collapsed.
 
     Breadth first rather than depth first so the tree edge into a node is the
-    shortest path to it, which is what makes the picture's columns mean
-    "distance from here".
+    shortest path to it: each column is the number of links from the centre
+    node.
     """
     root = _as_pointer(obj)
     root_key = _key(root)
@@ -360,7 +360,7 @@ class GraphScreen(Screen):
         Binding("right,l", "move('right')", "outward"),
         Binding("enter,space", "toggle", "expand/collapse"),
         Binding("z", "isolate", "collapse others"),
-        Binding("c", "recentre", "re-centre here"),
+        Binding("c", "recentre", "re-centre on the selected node"),
         Binding("y", "copy_node", "copy node"),
         Binding("m", "toggle_mouse", "mouse"),
         Binding("backspace", "pop", "back"),

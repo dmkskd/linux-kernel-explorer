@@ -129,8 +129,8 @@ def _eevdf_pick(prog: Program) -> Iterator[Observation]:
                 yield Observation(
                     "    avg_vruntime",
                     "not defined",
-                    "sum_weight is 0: nothing is queued to average over, because "
-                    "the only runnable entity here is the one on the CPU",
+                    "sum_weight is 0: the cfs_rq's rbtree is empty, and its only "
+                    "runnable entity is cfs_rq->curr, on the CPU",
                 )
 
             candidates = []

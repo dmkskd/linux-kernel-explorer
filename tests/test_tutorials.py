@@ -213,12 +213,10 @@ async def test_tui_tutorials(prog: drgn.Program) -> None:
         check(tabs.active == "view-structures", f"cycled to structures: {tabs.active}")
         check(app.check_action("tutorial_next", ()) is None, "structures view: next step action hidden")
         check(app.check_action("tutorial_prev", ()) is None, "structures view: prev step action hidden")
-        app.action_cycle_view()
-        await pilot.pause()
-        check(tabs.active == "view-operations", f"cycled to operations: {tabs.active}")
-        app.action_cycle_view()
-        await pilot.pause()
-        check(tabs.active == "view-tutorials", f"cycled back to tutorials: {tabs.active}")
+        for expected in ("view-files", "view-experiments", "view-operations", "view-tutorials"):
+            app.action_cycle_view()
+            await pilot.pause()
+            check(tabs.active == expected, f"cycled to {expected}: {tabs.active}")
 
 
 async def test_tui_initial_tutorial(prog: drgn.Program) -> None:

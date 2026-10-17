@@ -506,7 +506,7 @@ def _hrtimer_expires_in(timer: Object) -> str:
     """
     clockid = _hrtimer_clock(timer)
     if clockid not in CLOCK_GETTIME_IDS:
-        return f"{int(timer.node.expires)} ns (clockid {clockid}, not readable here)"
+        return f"{int(timer.node.expires)} ns (clockid {clockid}, outside the clock ids clock_gettime() accepts)"
     now = _time.clock_gettime(clockid)
     delta_ms = (int(timer.node.expires) / 1e9 - now) * 1000
     when = f"{delta_ms:.1f} ms" if delta_ms >= 0 else f"{-delta_ms:.1f} ms ago (due)"
@@ -1617,7 +1617,7 @@ LINKS: dict[str, list[Link]] = {
         Link("task_group", "The cgroup whose share this queue represents.", lambda c: c.tg,
              origin="cfs_rq->tg",
              userspace="cat /proc/<pid>/cgroup"),
-        Link("curr (running entity)", "The entity currently on the CPU here.",
+        Link("curr (running entity)", "The sched_entity running on this runqueue's CPU.",
              lambda c: c.curr, applies=lambda c: c.curr.value_() != 0,
              origin="cfs_rq->curr"),
     ],
@@ -2255,7 +2255,7 @@ LINKS: dict[str, list[Link]] = {
              origin="walks mutex->first_waiter and the waiter list"),
     ],
     "mutex_waiter": [
-        Link("task", "The task waiting here.", lambda w: w.task,
+        Link("task", "The task waiting on this mutex.", lambda w: w.task,
              origin="waiter->task"),
     ],
     "rw_semaphore": [
@@ -2414,7 +2414,9 @@ DERIVED: dict[str, list[Derived]] = {
         Derived("= capacity", "How much the whole disk holds.", _disk_capacity),
     ],
     "request_queue": [
-        Derived("= path", "Whether I/O here becomes requests or stays bios.",
+        Derived("= path",
+                "How this queue receives I/O: as struct request through blk-mq, "
+                "or as bios through the driver's submit_bio.",
                 _queue_path),
         Derived("= elevator", "The I/O scheduler sorting this queue.",
                 _queue_elevator),

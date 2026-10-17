@@ -1156,7 +1156,7 @@ def _build_page_table_steps(prog: Program | None) -> list[TourStep]:
             action="mm_struct › pgd",
             commentary=(
                 f"pgd, the page global directory, is the top-level page table for this "
-                f"process. The value here is its virtual address; {ttbr} takes "
+                f"process. The field's value is a kernel virtual address; {ttbr} takes "
                 f"virt_to_phys of it at each context switch."
             ),
             userspace=f"cat /proc/{pid}/status | grep VmPTE",

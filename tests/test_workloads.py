@@ -1,12 +1,12 @@
-"""Start a workload from the workloads tab, see its effect, and stop it.
+"""Start a workload from the experiments tab, see its effect, and stop it.
 
 Every workload's entry rows are checked to resolve to a catalog entry. Opening
 the nagle workload must not start it; its start row does, and its two client
 sockets are then read from the kernel: one has nonagle 0, the other 1. The
 same row, now stop, must end the child.
 
-The delay workload is started and its held skbs are looked for in the qdisc
-and retransmit entries; stopping it must give lo back its noqueue qdisc.
+The delay workload is started, and the qdisc and retransmit entries must list
+its skbs. Stopping it must restore lo's noqueue root qdisc.
 """
 
 from __future__ import annotations
@@ -74,12 +74,12 @@ async def check_delay(prog) -> None:
     # The handshake alone takes one 2 s round trip, then a round trip of data.
     await asyncio.sleep(5)
     netem = [label for label, _ in skb.qdisc_queues(prog) if " netem #" in label]
-    held = [(label, s) for label, s in skb.retransmit_queues(prog)
+    unacked = [(label, s) for label, s in skb.retransmit_queues(prog)
             if f"[{workloads._children['delay'].process.pid}]" in label]
-    check(lo_qdisc(prog) == "netem" and bool(netem), f"qdisc entry lists {len(netem)} skbs netem holds")
-    first = _skb_payload(held[0][1]) if held else "(none)"
-    check(len(held) > 1 and "kexplore-delay" in first,
-          f"retransmit entry lists {len(held)} of its skbs, first: {first}")
+    check(lo_qdisc(prog) == "netem" and bool(netem), f"qdisc entry lists {len(netem)} skbs in netem's tfifo")
+    first = _skb_payload(unacked[0][1]) if unacked else "(none)"
+    check(len(unacked) > 1 and "kexplore-delay" in first,
+          f"retransmit entry lists {len(unacked)} of its skbs, first: {first}")
     workloads.stop(delay)
     check(lo_qdisc(prog) == "noqueue", f"stopping it restores lo: {lo_qdisc(prog)}")
 
@@ -121,11 +121,11 @@ async def main() -> int:
     prog = drgn.program_from_kernel()
     app = Explorer(prog)
     async with app.run_test(size=(160, 45)) as pilot:
-        app.query_one("#views", Tabs).active = "view-workloads"
+        app.query_one("#views", Tabs).active = "view-experiments"
         await settle(app, pilot)
         tree = app.query_one("#nav", Tree)
         node = next((n for n in tree_nodes(tree) if getattr(n.data, "key", "") == "nagle"), None)
-        check(node is not None, "the workloads tab lists nagle")
+        check(node is not None, "the experiments tab lists nagle")
         if node is None:
             return 1
 

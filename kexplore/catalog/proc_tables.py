@@ -325,8 +325,8 @@ MAPS = PseudoFile(
                doc="r read, w write, x execute, then s shared or p "
                    "private (copy on write)"),
         Origin("offset", (), "vm_pgoff",
-               doc="the offset into the file; in bytes here, in pages in "
-                   "the struct"),
+               doc="the offset into the file: in bytes in /proc/<pid>/maps, "
+                   "in pages in vm_pgoff"),
         Origin("device", ("vm_file", "f_inode", "i_sb"), "s_dev",
                doc="the device the file lives on, major:minor"),
         Origin("inode", ("vm_file", "f_inode"), "i_ino",

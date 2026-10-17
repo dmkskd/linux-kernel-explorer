@@ -1312,7 +1312,7 @@ class Explorer(App):
             self._pending_source = None
             doc = self._docs[tag]
             if not doc.decl_file:
-                self.notify("no source available here", severity="warning")
+                self.notify(f"struct {tag} has no DW_AT_decl_file in the DWARF", severity="warning")
                 return
             line = doc.decl_line
             title = f"struct {doc.tag}"
@@ -1358,7 +1358,7 @@ class Explorer(App):
                 yield Tabs(
                     Tab("structures", id="view-structures"),
                     Tab("files", id="view-files"),  # experiment: /proc annotation
-                    Tab("workloads", id="view-workloads"),  # experiment: workloads
+                    Tab("experiments", id="view-experiments"),  # experiment: workloads
                     Tab("operations", id="view-operations"),
                     Tab("tutorials", id="view-tutorials"),
                     id="views",
@@ -1521,7 +1521,7 @@ class Explorer(App):
             self._build_operation_tree(tree)
         elif view == "files":  # experiment: /proc annotation
             procfile.build_tree(tree)
-        elif view == "workloads":  # experiment: workloads
+        elif view == "experiments":  # experiment: workloads
             workloads.build_tree(tree)
         elif view in ("tutorials", "tours"):
             tree.root.set_label("tutorials")
@@ -2613,7 +2613,7 @@ class Explorer(App):
                 target = follow(rows[0].obj)
                 if target is None:
                     # NULL by design, for example a kernel thread's mm.
-                    self.notify(f"{row.name} is NULL here", severity="warning")
+                    self.notify(f"{row.name} is NULL", severity="warning")
                     return
                 self.push(frames.object_frame(row.name, target, self.context, row.doc))
             else:
@@ -2839,7 +2839,7 @@ class Explorer(App):
         tabs = self.query_one("#views", Tabs)
         order = ["view-structures",
                  "view-files",  # experiment: /proc annotation
-                 "view-workloads",  # experiment: workloads
+                 "view-experiments",  # experiment: workloads
                  "view-operations", "view-tutorials"]
         current = tabs.active or "view-structures"
         if current == "view-tours":
@@ -3119,7 +3119,7 @@ class Explorer(App):
             if 0 <= idx < len(self.active_tutorial.steps):
                 step = self.active_tutorial.steps[idx]
         if step is None or not step.commentary:
-            self.notify("no step narration here", severity="warning")
+            self.notify("the current tutorial step has no narration", severity="warning")
             return
         text = " ".join(step.commentary.split())
         if copy_to_system_clipboard(text, self):
@@ -3226,11 +3226,11 @@ class Explorer(App):
                 # screen under it. Only a slow fetch is reported.
                 self.set_timer(0.4, lambda: self._still_fetching(tag))
             else:
-                self.notify("no structure here to show source for",
+                self.notify("s shows a struct's source: select a row that references a struct",
                             severity="warning")
             return
         if not doc.decl_file:
-            self.notify("no source available here", severity="warning")
+            self.notify("this struct has no DW_AT_decl_file in the DWARF", severity="warning")
             return
 
         line = doc.decl_line
@@ -3282,7 +3282,7 @@ class Explorer(App):
         # A cell may show alternatives and a note; only one of them runs.
         command = runnable(command)
         if command in UNFILLED.values():
-            self.notify(f"nothing to run here: {command}", severity="warning")
+            self.notify(f"not runnable: {command}", severity="warning")
             return
         # A command that names no file is still traced, because the trace
         # measures which file the command reads.
@@ -3314,7 +3314,7 @@ class Explorer(App):
             return
         command = runnable(command)
         if command in UNFILLED.values():
-            self.notify(f"nothing to run here: {command}", severity="warning")
+            self.notify(f"not runnable: {command}", severity="warning")
             return
         self.push_screen(CommandScreen(command))
 
@@ -3353,7 +3353,8 @@ class Explorer(App):
             if row is not None and row.obj is not None:
                 obj, label = row.obj, row.name
         if obj is None or follow(obj) is None:
-            self.notify("nothing here to graph", severity="warning")
+            self.notify("g graphs a kernel object: select a row that references one",
+                        severity="warning")
             return
         target = follow(obj)
 
