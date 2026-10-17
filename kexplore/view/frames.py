@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, replace
 from drgn import Object, Program, TypeKind
 
 from . import procfile  # experiment: /proc annotation, see procfile.py
+from . import workloads  # experiment: workloads, see operations/workloads.py
 from ..catalog.decoders import decode_field
 from ..catalog.links import Derived, Link, derived_for, links_for, userspace_for
 from ..catalog.registry import Entry, FactEntry, Measurement, Subsystem, children
@@ -883,6 +884,8 @@ def plan_for(item, ctx: Context, subsystem_key: str = "",
     until opened.
     """
     if (plan := procfile.plan_for(item, ctx)) is not None:  # experiment
+        return plan
+    if (plan := workloads.plan_for(item, ctx)) is not None:  # experiment: workloads
         return plan
     if isinstance(item, Listing):
         return Plan(item.label, item.doc, LISTING_COLUMNS,

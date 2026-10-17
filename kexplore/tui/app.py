@@ -46,6 +46,7 @@ from ..operations.tour import GuidedTour, GuidedTutorial, TourStep, TutorialStep
 from ..operations.walkthrough import WALKTHROUGHS
 from ..view import frames
 from ..view import procfile  # experiment: /proc annotation
+from ..view import workloads  # experiment: workloads
 from ..view.frames import (
     FIELD_COLUMNS,
     GROUP_DOCS,
@@ -1356,9 +1357,10 @@ class Explorer(App):
                 initial_tab = "view-tutorials" if self.initial_tutorial else "view-structures"
                 yield Tabs(
                     Tab("structures", id="view-structures"),
+                    Tab("files", id="view-files"),  # experiment: /proc annotation
+                    Tab("workloads", id="view-workloads"),  # experiment: workloads
                     Tab("operations", id="view-operations"),
                     Tab("tutorials", id="view-tutorials"),
-                    Tab("files", id="view-files"),  # experiment: /proc annotation
                     id="views",
                     active=initial_tab,
                 )
@@ -1519,6 +1521,8 @@ class Explorer(App):
             self._build_operation_tree(tree)
         elif view == "files":  # experiment: /proc annotation
             procfile.build_tree(tree)
+        elif view == "workloads":  # experiment: workloads
+            workloads.build_tree(tree)
         elif view in ("tutorials", "tours"):
             tree.root.set_label("tutorials")
             self._build_tutorial_tree(tree)
@@ -2123,6 +2127,7 @@ class Explorer(App):
         # experiment: /proc annotation -- a file's text is not clipped at
         # MAX_CELL, which would cut off the value part of each line.
         wide = source_view or columns == procfile.TEXT_COLUMNS
+        wide = wide or columns == workloads.COLUMNS  # experiment: workloads
         table.fixed_columns = SOURCE_FIXED_COLUMNS if source_view else 0
 
         if not self.stack:
@@ -2178,6 +2183,8 @@ class Explorer(App):
             cells = [Text(_clip(v, limit)) for v in values]
             if row.name in source:
                 cells[2] = source[row.name].copy()
+            elif columns == workloads.COLUMNS:  # experiment: workloads
+                cells = workloads.paint(row, cells)
             # experiment: /proc annotation -- a pseudo-filesystem view does
             # supply its own cells, but its first column is a name like any
             # other: a directory to open, a file with a line table, a file
@@ -2583,6 +2590,13 @@ class Explorer(App):
             self.bell()
             return
 
+        # experiment: workloads -- the start/stop row acts instead of opening.
+        if (workload := workloads.action_of(row)) is not None:
+            self.notify(workloads.toggle(workload, self.query_one("#nav", Tree)))
+            self.stack[-1].load()
+            self.render_frame()
+            return
+
         # An index row stands for a catalog item rather than a value, and
         # opens it exactly as selecting it in the sidebar would.
         if row.item is not None:
@@ -2821,10 +2835,12 @@ class Explorer(App):
         )
 
     def action_cycle_view(self) -> None:
-        """Cycle between structures, operations, and tutorials views."""
+        """Cycle between structures, files, operations, and tutorials views."""
         tabs = self.query_one("#views", Tabs)
-        order = ["view-structures", "view-operations", "view-tutorials",
-                 "view-files"]  # experiment: /proc annotation
+        order = ["view-structures",
+                 "view-files",  # experiment: /proc annotation
+                 "view-workloads",  # experiment: workloads
+                 "view-operations", "view-tutorials"]
         current = tabs.active or "view-structures"
         if current == "view-tours":
             current = "view-tutorials"

@@ -17,3 +17,12 @@ an analysis has something to see. Nothing here asserts anything, and
   message, a semaphore array with a task blocked in semop(2), and an attached
   shared memory segment, so the *ipc* entries have objects to list. Removes
   them on exit; after a SIGKILL, `ipcrm` does.
+- `traffic.py`: loopback traffic by mode (`established`, `stream`, `stall`,
+  `churn`, `backlog`, `nagle`, `udp`, `unix`, or `all`). The *socket* and
+  *skb* entries then list ESTABLISHED, TIME_WAIT and SYN_SENT sockets, a full
+  accept queue, non-empty receive and write queues, and one connection with
+  Nagle enabled next to one with TCP_NODELAY. `delay` (CAP_NET_ADMIN, excluded
+  from `all`) installs a netem root qdisc on lo with 1 s latency: packets wait
+  in netem's tfifo, and each sent skb is on tcp_rtx_queue until its ACK
+  arrives. It deletes the qdisc on exit. The module docstring describes each
+  mode.

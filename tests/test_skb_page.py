@@ -94,6 +94,9 @@ async def main() -> int:
             r = row(app, label)
             check(r is not None, f"skb derived {label} = {r.value if r else '?'}")
         check(row(app, "shinfo") is not None, "skb links to shared info")
+        payload = row(app, "= payload")
+        check(payload is not None and payload.value.startswith("linear: kexplore-test-packet-"),
+              f"skb derived = payload = {payload.value if payload else '?'}")
 
         follow_named(app, table, "shinfo")
         await pilot.pause()

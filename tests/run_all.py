@@ -32,6 +32,7 @@ KERNEL = [
     "test_decoders.py",
     "test_process.py",
     "test_socket.py",
+    "test_workloads.py",
     "test_skb_page.py",
     "test_irq.py",
     "test_timers.py",

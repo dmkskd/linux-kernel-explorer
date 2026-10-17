@@ -20,7 +20,7 @@ import time as _time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-from drgn import Object, TypeKind, cast, container_of
+from drgn import Object, TypeKind, cast, container_of, sizeof
 from drgn.helpers.linux.block import (
     blk_rq_bytes,
     blk_rq_pos,
@@ -46,6 +46,7 @@ from drgn.helpers.linux.mm import (
     page_size,
     page_to_pfn,
     page_to_phys,
+    page_to_virt,
     vma_name,
 )
 from drgn.helpers.linux.mmzone import for_each_online_pgdat
@@ -209,6 +210,93 @@ def _skb_device(skb: Object) -> str:
     if name is None:
         return f"{address:#x}, not a device (dev_scratch in use)"
     return name
+
+
+# Bytes of payload shown by "= payload": what fits the value column as text.
+SKB_PAYLOAD_BYTES = 32
+# Bit 0 of a netmem_ref marks a net_iov: device memory, described by a struct
+# net_iov in place of a struct page.
+NET_IOV = 0x1
+
+
+def _skb_headlen(skb: Object) -> int:
+    """skb_headlen(): bytes in the linear area, from skb->data on."""
+    return skb.len.value_() - skb.data_len.value_()
+
+
+def _skb_offset(skb: Object, field: str) -> int:
+    """A head-relative position as a number, for skb->tail/end and the headers.
+
+    tail and end are an sk_buff_data_t: an offset from head where that type is
+    an integer, a pointer where it is not.
+    """
+    value = skb.member_(field)
+    if value.type_.kind == TypeKind.POINTER:
+        return value.value_() - skb.head.value_()
+    return value.value_()
+
+
+def _skb_layout(skb: Object) -> str:
+    data = skb.data.value_() - skb.head.value_()
+    return f"data +{data}  tail +{_skb_offset(skb, 'tail')}  end +{_skb_offset(skb, 'end')}"
+
+
+def _skb_headers(skb: Object) -> str:
+    """Where each header starts, as an offset from head; unset is all ones."""
+    parts = []
+    for name in ("mac", "network", "transport"):
+        field = skb.member_(f"{name}_header")
+        unset = (1 << (8 * sizeof(field.type_))) - 1
+        value = field.value_()
+        parts.append(f"{name} {'not set' if value == unset else f'+{value}'}")
+    return "  ".join(parts)
+
+
+def _skb_frag_page(frag: Object) -> tuple[Object, int, int] | None:
+    """(struct page *, offset, length) of one frag, or None for a net_iov.
+
+    skb_frag_t has a netmem_ref member since 6.8, and a bv_page member before.
+    """
+    try:
+        netmem = frag.netmem.value_()
+    except AttributeError:
+        return frag.bv_page, frag.bv_offset.value_(), frag.bv_len.value_()
+    if netmem & NET_IOV:
+        return None
+    page = Object(frag.prog_, "struct page *", netmem)
+    return page, frag.offset.value_(), frag.len.value_()
+
+
+def _skb_first_frag_page(skb: Object) -> Object:
+    found = _skb_frag_page(skb_shinfo(skb).frags[0])
+    if found is None:
+        raise ValueError("frag 0 is a net_iov, not a page")
+    return found[0]
+
+
+def _skb_in_pages(skb: Object) -> str:
+    shinfo = skb_shinfo(skb)
+    text = f"{skb.data_len.value_()} bytes in {shinfo.nr_frags.value_()} frags"
+    if shinfo.frag_list.value_():
+        text += ", and a frag_list"
+    return text
+
+
+def _skb_payload(skb: Object) -> str:
+    """The first bytes of data, as text: from the linear area, else from frag 0."""
+    headlen = _skb_headlen(skb)
+    if headlen:
+        where, address, length = "linear", skb.data.value_(), headlen
+    elif skb_shinfo(skb).nr_frags.value_():
+        found = _skb_frag_page(skb_shinfo(skb).frags[0])
+        if found is None:
+            return "frag 0 is a net_iov (device memory), described by a struct net_iov"
+        page, offset, length = found
+        where, address = "frag 0", page_to_virt(page).value_() + offset
+    else:
+        return "len 0"
+    raw = skb.prog_.read(address, min(SKB_PAYLOAD_BYTES, length))
+    return f"{where}: " + "".join(chr(b) if 32 <= b < 127 else "." for b in raw)
 
 
 def _is_socket_file(file: Object) -> bool:
@@ -1677,6 +1765,10 @@ LINKS: dict[str, list[Link]] = {
         Link("shinfo", "skb_shared_info: frags, gso, and the frag list.",
              lambda s: skb_shinfo(s),
              origin="skb_shinfo(), past skb->end"),
+        Link("frag 0 page", "The struct page of skb_shinfo(skb)->frags[0].",
+             _skb_first_frag_page,
+             applies=lambda s: skb_shinfo(s).nr_frags.value_() > 0,
+             origin="skb_shinfo(skb)->frags[0].netmem (bv_page before 6.8)"),
         Link("next in queue", "The following skb in this queue.", lambda s: s.next,
              applies=lambda s: s.next.value_() != 0,
              origin="skb->next"),
@@ -2468,6 +2560,29 @@ DERIVED: dict[str, list[Derived]] = {
                 lambda s: s.len.value_()),
         Derived("= data_len", "Bytes held in frags rather than the linear area.",
                 lambda s: s.data_len.value_()),
+        Derived("= linear data",
+                "skb_headlen(), len - data_len: the bytes in the linear buffer from "
+                "skb->data. 0 when all the data is in page frags.",
+                lambda s: f"{_skb_headlen(s)} bytes at {s.data.value_():#x}"),
+        Derived("= in pages",
+                "data_len: the bytes in the page frags of skb_shinfo(skb)->frags and "
+                "in the skbs on its frag_list.",
+                _skb_in_pages),
+        Derived("= payload",
+                f"The first {SKB_PAYLOAD_BYTES} bytes from skb->data, or from frag 0 "
+                "when the linear area is empty; bytes outside printable ASCII show as '.'.",
+                _skb_payload),
+        Derived("= layout",
+                "Offsets from skb->head. Headroom spans head to data, linear data "
+                "spans data to tail, tailroom spans tail to end, and "
+                "skb_shared_info starts at end.",
+                _skb_layout),
+        Derived("= headers",
+                "Offsets from skb->head of the link-layer, network and transport "
+                "headers. skb_pull() advances skb->data past a header and leaves "
+                "the header in the headroom. An unset offset is all ones, as for "
+                "mac_header and transport_header on an skb on sk_write_queue.",
+                _skb_headers),
         Derived("= headroom", "data - head: room to push headers.",
                 lambda s: s.data.value_() - s.head.value_()),
         Derived("= tailroom", "end - tail: room to append payload.",

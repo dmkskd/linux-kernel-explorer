@@ -68,6 +68,7 @@ ENTRY_COMMANDS: dict[tuple[str, str], str] = {
     ("skb", "nonempty"): "ss -tanmH | grep -o 'skmem:([^)]*)'",
     ("skb", "receive"): "ss -tanH | awk '{print $2}'  # Recv-Q",
     ("skb", "write"): "ss -tanH | awk '{print $3}'  # Send-Q",
+    ("skb", "retransmit"): "ss -tniH | grep -o 'unacked:[0-9]*'",
     ("skb", "backlog"): "cat /proc/net/softnet_stat",
     ("skb", "qdisc"): "tc -s qdisc show",
     # slab
